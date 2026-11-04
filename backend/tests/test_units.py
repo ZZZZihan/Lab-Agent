@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from app.audit import AuditRejected, sanitize_detail
 from app.auth import UNUSABLE_PASSWORD_HASH, verify_password
 from app.config import Settings, assert_strong_secret, get_settings
 from app.rag.chunker import chunk_markdown, parse_front_matter
+from app.rag.embedder import BGEEmbedder, HashingEmbedder
 from app.rag.redact import redact_text
 from app.rag.rrf import Hit, decide
 from app.secrets import read_secret
@@ -268,4 +271,46 @@ def test_unusable_password_hash_never_verifies() -> None:
     assert verify_password(UNUSABLE_PASSWORD_HASH, "!unusable") is False
     assert verify_password(UNUSABLE_PASSWORD_HASH, "") is False
     assert verify_password("!anything", "anything") is False
+
+
+async def test_hashing_embedder_async_protocol() -> None:
+    embedder = HashingEmbedder(dim=64)
+    assert embedder.kind == "hashing"
+    assert embedder.name == "hashing-cjk-v1"
+    assert embedder.dim == 64
+    q_vec = await embedder.embed_query("清衡-A100 节点")
+    d_vecs = await embedder.embed_documents(["清衡-A100 节点", "周三组会"])
+    assert len(q_vec) == 64
+    assert len(d_vecs) == 2
+    assert q_vec == d_vecs[0]
+    await embedder.aclose()
+
+
+async def test_bge_embedder_async_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], bool]] = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+
+        def encode(self, texts: list[str], *, normalize_embeddings: bool = False) -> list[list[float]]:
+            calls.append((list(texts), normalize_embeddings))
+            return [[float(idx + 1)] * 8 for idx, _ in enumerate(texts)]
+
+    fake_module = types.ModuleType("sentence_transformers")
+    fake_module.SentenceTransformer = FakeSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+    embedder = BGEEmbedder("BAAI/bge-small-zh-v1.5", 8)
+    assert embedder.kind == "bge"
+    assert embedder.name == "BAAI/bge-small-zh-v1.5"
+    assert embedder.dim == 8
+    assert calls == [(["维度检查"], True)]
+
+    q_vec = await embedder.embed_query("查询")
+    d_vecs = await embedder.embed_documents(["文档一", "文档二"])
+    assert q_vec == [1.0] * 8
+    assert d_vecs == [[1.0] * 8, [2.0] * 8]
+    assert calls[-2:] == [(["查询"], True), (["文档一", "文档二"], True)]
+    await embedder.aclose()
 

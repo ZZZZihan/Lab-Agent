@@ -94,6 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         retrieval_mode=settings.retrieval_mode,
     )
     yield
+    await app.state.embedder.aclose()
     await app.state.limiter.close()
     await dispose_engine()
 

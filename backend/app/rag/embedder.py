@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 from typing import Protocol
@@ -11,11 +12,14 @@ from app.rag.tokenize import char_bigrams, tokenize
 
 class Embedder(Protocol):
     name: str
+    kind: str
     dim: int
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
-    def embed_query(self, text: str) -> list[float]: ...
+    async def embed_query(self, text: str) -> list[float]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class HashingEmbedder:
@@ -24,12 +28,16 @@ class HashingEmbedder:
     def __init__(self, dim: int = 512) -> None:
         self.dim = dim
         self.name = "hashing-cjk-v1"
+        self.kind = "hashing"
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [self._embed(text) for text in texts]
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str) -> list[float]:
         return self._embed(text)
+
+    async def aclose(self) -> None:
+        return None
 
     def _embed(self, text: str) -> list[float]:
         vector = [0.0] * self.dim
@@ -57,21 +65,29 @@ class BGEEmbedder:
             ) from exc
         self.model = SentenceTransformer(model_name)
         self.name = model_name
+        self.kind = "bge"
         self.dim = dim
-        probe = self.embed_query("维度检查")
+        probe = self.model.encode(["维度检查"], normalize_embeddings=True)[0]
         if len(probe) != dim:
             raise RuntimeError(
                 f"{model_name} produced dimension {len(probe)}, column is {dim}. "
                 "bge-m3 needs a migration; this build is fixed at 512."
             )
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        vectors = self.model.encode(texts, normalize_embeddings=True)
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors = await asyncio.to_thread(
+            self.model.encode, texts, normalize_embeddings=True
+        )
         return [list(map(float, row)) for row in vectors]
 
-    def embed_query(self, text: str) -> list[float]:
-        vector = self.model.encode([text], normalize_embeddings=True)[0]
-        return [float(value) for value in vector]
+    async def embed_query(self, text: str) -> list[float]:
+        vectors = await asyncio.to_thread(
+            self.model.encode, [text], normalize_embeddings=True
+        )
+        return [float(value) for value in vectors[0]]
+
+    async def aclose(self) -> None:
+        return None
 
 
 def build_embedder(kind: str, model_name: str, dim: int) -> Embedder:

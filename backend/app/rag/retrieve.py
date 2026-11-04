@@ -71,7 +71,7 @@ async def search_knowledge(
     visible = int(count_row.scalar_one())
     pool = int(settings.dense_pool or 80)
     fetch_limit = visible if visible <= max(pool, 500) else pool
-    vector = embedder.embed_query(query)
+    vector = await embedder.embed_query(query)
     rows = await session.execute(
         text(
             f"""
