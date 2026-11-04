@@ -1,0 +1,78 @@
+{"id": "q001", "split": "dev", "type": "direct", "question": "清衡-A100 一共有多少台节点？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "硬件规模"}]}
+{"id": "q002", "split": "dev", "type": "direct", "question": "每台 GPU 节点安装了几张什么卡？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "硬件规模"}]}
+{"id": "q003", "split": "dev", "type": "direct", "question": "GPU 预约入口的域名是什么？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "预约"}]}
+{"id": "q004", "split": "dev", "type": "direct", "question": "单次 GPU 预约最长可以多久？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "预约"}]}
+{"id": "q005", "split": "dev", "type": "direct", "question": "交互式调试单卡不超过多长时间？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "交互调试"}]}
+{"id": "q006", "split": "dev", "type": "direct", "question": "登录节点上禁止做什么？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "登录节点"}]}
+{"id": "q007", "split": "dev", "type": "direct", "question": "周三学术例会的时间是几点到几点？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}]}
+{"id": "q008", "split": "dev", "type": "direct", "question": "周三学术例会在哪间实体会议室？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}]}
+{"id": "q009", "split": "test", "type": "direct", "question": "本学期组会主持轮值的顺序是什么？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "主持轮值"}]}
+{"id": "q010", "split": "test", "type": "direct", "question": "组会提纲应该提交到哪个仓库路径？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "提纲"}]}
+{"id": "q011", "split": "test", "type": "direct", "question": "周五论文研讨几点开始？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "时间"}]}
+{"id": "q012", "split": "dev", "type": "direct", "question": "周五论文研讨的线上会议室号是多少？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "时间"}]}
+{"id": "q013", "split": "dev", "type": "direct", "question": "赫利俄斯的内部代号是什么？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}]}
+{"id": "q014", "split": "test", "type": "direct", "question": "赫利俄斯十一月要完成多少条评测题？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "里程碑"}]}
+{"id": "q015", "split": "dev", "type": "direct", "question": "流明项目的负责人是谁？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "负责人"}]}
+{"id": "q016", "split": "test", "type": "direct", "question": "个人 NAS 配额是多少？", "answerable": true, "gold": [{"doc": "storage-nas", "heading": "路径配额"}]}
+{"id": "q017", "split": "dev", "type": "paraphrase", "question": "如果只是在清衡集群上做交互式调试，一张卡最多占用多久？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "交互调试"}]}
+{"id": "q018", "split": "dev", "type": "paraphrase", "question": "我想预约 GPU，应该打开哪个网站？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "预约"}]}
+{"id": "q019", "split": "dev", "type": "paraphrase", "question": "同一任务的 GPU 预约可以续约几次？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "预约"}]}
+{"id": "q020", "split": "dev", "type": "paraphrase", "question": "组会固定在星期几、哪个房间？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}]}
+{"id": "q021", "split": "test", "type": "paraphrase", "question": "本学期第一个主持组会的人是谁？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "主持轮值"}]}
+{"id": "q022", "split": "dev", "type": "paraphrase", "question": "HX-17 是哪个项目的代号？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}]}
+{"id": "q023", "split": "test", "type": "paraphrase", "question": "赫利俄斯的数据最远可以留在哪个网段？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "数据边界"}]}
+{"id": "q024", "split": "dev", "type": "paraphrase", "question": "周宁负责哪个项目？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "负责人"}]}
+{"id": "q025", "split": "test", "type": "paraphrase", "question": "流明用的 CTW-synth 子集有多少条样本？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "数据"}]}
+{"id": "q026", "split": "dev", "type": "paraphrase", "question": "门禁卡应该去找谁领取？", "answerable": true, "gold": [{"doc": "onboarding", "heading": "工位门禁"}]}
+{"id": "q027", "split": "test", "type": "paraphrase", "question": "新生第一周要先读哪些文档？", "answerable": true, "gold": [{"doc": "onboarding", "heading": "前两周"}]}
+{"id": "q028", "split": "dev", "type": "paraphrase", "question": "bge-small-zh 这一版中文小模型的向量是多少维？", "answerable": true, "gold": [{"doc": "paper-bge", "heading": "模型"}]}
+{"id": "q029", "split": "test", "type": "paraphrase", "question": "实验室不把哪一种自动指标当作发布门禁？", "answerable": true, "gold": [{"doc": "paper-eval", "heading": "门禁"}]}
+{"id": "q030", "split": "dev", "type": "paraphrase", "question": "共享存储挂载在哪条路径？", "answerable": true, "gold": [{"doc": "storage-nas", "heading": "路径配额"}]}
+{"id": "q031", "split": "dev", "type": "paraphrase_synonym", "question": "调试分区里一张加速卡最长能连续交互多久？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "交互调试"}]}
+{"id": "q032", "split": "dev", "type": "paraphrase_synonym", "question": "每周中段那场学术集会在几号房间？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}]}
+{"id": "q033", "split": "test", "type": "paraphrase_synonym", "question": "引用对齐那个课题的内部编号是什么？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}]}
+{"id": "q034", "split": "dev", "type": "paraphrase_synonym", "question": "字符误差那项工作谁在牵头？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "负责人"}]}
+{"id": "q035", "split": "test", "type": "paraphrase_synonym", "question": "向量笔记是哪位同学写的？", "answerable": true, "gold": [{"doc": "paper-bge", "heading": "阅读记录"}]}
+{"id": "q036", "split": "dev", "type": "paraphrase_synonym", "question": "外来人员拜访要提前几个工作日登记？", "answerable": true, "gold": [{"doc": "visitor", "heading": "登记"}]}
+{"id": "q037", "split": "dev", "type": "distractor", "question": "周三学术例会的线上会议号是多少？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}]}
+{"id": "q038", "split": "dev", "type": "distractor", "question": "周五论文研讨是在 B-214 举行的吗？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "与组会的区别"}]}
+{"id": "q039", "split": "dev", "type": "distractor", "question": "流明项目的内部代号是 HX-17 吗？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "负责人"}]}
+{"id": "q040", "split": "dev", "type": "distractor", "question": "周宁是赫利俄斯的负责人吗？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}]}
+{"id": "q041", "split": "test", "type": "distractor", "question": "组会提纲是发到 gpu.qingheng.lab 吗？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "提纲"}]}
+{"id": "q042", "split": "test", "type": "distractor", "question": "bge 笔记的作者是周宁吗？", "answerable": true, "gold": [{"doc": "paper-bge", "heading": "阅读记录"}]}
+{"id": "q043", "split": "dev", "type": "distractor", "question": "访客可以进入 C 座 506 吗？", "answerable": true, "gold": [{"doc": "visitor", "heading": "可进入区域"}]}
+{"id": "q044", "split": "dev", "type": "distractor", "question": "五万元以下的采购需要学院备案吗？", "answerable": true, "gold": [{"doc": "procurement", "heading": "审批"}]}
+{"id": "q045", "split": "test", "type": "distractor", "question": "备份是每天凌晨进行的吗？", "answerable": true, "gold": [{"doc": "storage-nas", "heading": "备份"}]}
+{"id": "q046", "split": "dev", "type": "distractor", "question": "交互式调试可以占用 24 小时吗？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "交互调试"}]}
+{"id": "q047", "split": "test", "type": "distractor", "question": "受限数据是不是所有登录用户都能检索？", "answerable": true, "gold": [{"doc": "dataset-policy", "heading": "分级"}]}
+{"id": "q048", "split": "dev", "type": "distractor", "question": "周五论文研讨也由陈予安、周宁、林可轮值主持吗？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "与组会的区别"}]}
+{"id": "q049", "split": "test", "type": "distractor", "question": "赫利俄斯的代码仓库是 git.qingheng.lab/lumen 吗？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}]}
+{"id": "q050", "split": "dev", "type": "distractor", "question": "门禁卡是沈昭老师本人发放的吗？", "answerable": true, "gold": [{"doc": "onboarding", "heading": "工位门禁"}]}
+{"id": "q051", "split": "dev", "type": "multi_chunk", "question": "清衡-A100 有多少台节点，交互式调试单卡上限是多久？", "answerable": true, "gold": [{"doc": "cluster-gpu", "heading": "硬件规模"}, {"doc": "cluster-gpu", "heading": "交互调试"}]}
+{"id": "q052", "split": "dev", "type": "multi_chunk", "question": "周三学术例会在哪间实体会议室，主持轮值顺序是什么？", "answerable": true, "gold": [{"doc": "meeting-wednesday", "heading": "时间地点"}, {"doc": "meeting-wednesday", "heading": "主持轮值"}]}
+{"id": "q053", "split": "dev", "type": "multi_chunk", "question": "赫利俄斯的内部代号是什么，数据不得离开哪个网段？", "answerable": true, "gold": [{"doc": "project-helios", "heading": "目标"}, {"doc": "project-helios", "heading": "数据边界"}]}
+{"id": "q054", "split": "test", "type": "multi_chunk", "question": "流明的负责人是谁，样本有多少条？", "answerable": true, "gold": [{"doc": "project-lumen", "heading": "负责人"}, {"doc": "project-lumen", "heading": "数据"}]}
+{"id": "q055", "split": "dev", "type": "multi_chunk", "question": "实验室导师是谁，门禁卡找谁领？", "answerable": true, "gold": [{"doc": "onboarding", "heading": "导师"}, {"doc": "onboarding", "heading": "工位门禁"}]}
+{"id": "q056", "split": "test", "type": "multi_chunk", "question": "密钥应存放在哪里，安全事故要发给哪个地址？", "answerable": true, "gold": [{"doc": "safety-compute", "heading": "密钥"}, {"doc": "safety-compute", "heading": "事故上报"}]}
+{"id": "q057", "split": "dev", "type": "multi_chunk", "question": "bge-small-zh-v1.5 的向量维度是多少，笔记作者是谁？", "answerable": true, "gold": [{"doc": "paper-bge", "heading": "模型"}, {"doc": "paper-bge", "heading": "阅读记录"}]}
+{"id": "q058", "split": "test", "type": "multi_chunk", "question": "实验室评测使用哪些指标，阈值只允许在哪个集合上调整？", "answerable": true, "gold": [{"doc": "paper-eval", "heading": "指标"}, {"doc": "paper-eval", "heading": "数据划分"}]}
+{"id": "q059", "split": "dev", "type": "multi_chunk", "question": "NAS 的共享路径是什么，备份在每周什么时候？", "answerable": true, "gold": [{"doc": "storage-nas", "heading": "路径配额"}, {"doc": "storage-nas", "heading": "备份"}]}
+{"id": "q060", "split": "test", "type": "multi_chunk", "question": "周五研讨的线上会议号是多少，它是否使用 B-214？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "时间"}, {"doc": "seminar-friday", "heading": "与组会的区别"}]}
+{"id": "q061", "split": "dev", "type": "unanswerable", "question": "周三学术例会是否对本科生开放？", "answerable": false, "gold": []}
+{"id": "q062", "split": "dev", "type": "unanswerable", "question": "清衡-A100 集群的电费由哪个账号支付？", "answerable": false, "gold": []}
+{"id": "q063", "split": "dev", "type": "unanswerable", "question": "bge-small-zh-v1.5 在 CMTEB 上的检索分数是多少？", "answerable": false, "gold": []}
+{"id": "q064", "split": "dev", "type": "unanswerable", "question": "赫利俄斯项目的经费报销码是多少？", "answerable": false, "gold": []}
+{"id": "q065", "split": "dev", "type": "unanswerable", "question": "流明项目样本标注员的小时工资是多少？", "answerable": false, "gold": []}
+{"id": "q066", "split": "dev", "type": "unanswerable", "question": "NAS 磁带库在哪一栋楼？", "answerable": false, "gold": []}
+{"id": "q067", "split": "dev", "type": "unanswerable", "question": "访客在 C 座大厅拍照需要谁批准？", "answerable": false, "gold": []}
+{"id": "q068", "split": "dev", "type": "unanswerable", "question": "当前待购 NVMe 的供应商银行账号是什么？", "answerable": false, "gold": []}
+{"id": "q069", "split": "test", "type": "unanswerable", "question": "沈昭老师的手机号是多少？", "answerable": false, "gold": []}
+{"id": "q070", "split": "test", "type": "unanswerable", "question": "登录节点的 root 口令是什么？", "answerable": false, "gold": []}
+{"id": "q071", "split": "test", "type": "unanswerable", "question": "组会主持轮值明年春季是否保持不变？", "answerable": false, "gold": []}
+{"id": "q072", "split": "dev", "type": "unanswerable", "question": "赫利俄斯十二月人工抽检的抽样比例是多少？", "answerable": false, "gold": []}
+{"id": "q073", "split": "dev", "type": "unanswerable", "question": "个人配额调整申请表的编号是什么？", "answerable": false, "gold": []}
+{"id": "q074", "split": "test", "type": "unanswerable", "question": "周五论文研讨的录播保留多少天？", "answerable": false, "gold": []}
+{"id": "q075", "split": "dev", "type": "unanswerable", "question": "笔记里旧哈希基线的商业许可证编号是多少？", "answerable": false, "gold": []}
+{"id": "q076", "split": "test", "type": "unanswerable", "question": "新生第二周项目双选系统的链接是什么？", "answerable": false, "gold": []}
+{"id": "q077", "split": "test", "type": "unanswerable", "question": "学院备案的联系人分机号是多少？", "answerable": false, "gold": []}
+{"id": "q078", "split": "dev", "type": "unanswerable", "question": "脱敏规则的正则版本号是多少？", "answerable": false, "gold": []}

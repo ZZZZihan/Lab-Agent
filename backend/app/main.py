@@ -1,0 +1,119 @@
+"""研证 API entrypoint."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator, MutableMapping
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from app.config import get_settings
+from app.db import dispose_engine, get_sessionmaker
+from app.llm import build_llm
+from app.logging_conf import configure_logging, get_logger
+from app.otel import setup_telemetry
+from app.rag.embedder import build_embedder
+from app.ratelimit import RateLimiter
+from app.routes import install_exception_handler, router
+
+log = get_logger("api")
+
+ScopeState = MutableMapping[str, object]
+Message = MutableMapping[str, object]
+
+
+class RequestContextMiddleware:
+    """Attach a request id without BaseHTTPMiddleware.
+
+    Starlette's ``BaseHTTPMiddleware`` runs the endpoint in a child task. asyncpg
+    connections are bound to the loop that checked them out, and that split
+    raises "Future attached to a different loop" under pytest-asyncio.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = uuid.uuid4().hex
+        raw_headers = scope.get("headers")
+        header_pairs = raw_headers if isinstance(raw_headers, list) else []
+        for key, value in header_pairs:
+            if key == b"x-request-id" and value:
+                request_id = value.decode("latin-1")
+                break
+        state: ScopeState = scope.setdefault("state", {})
+        state["request_id"] = request_id
+
+        async def send_with_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                raw = message.get("headers")
+                headers = list(raw) if isinstance(raw, list) else []
+                headers.append((b"x-request-id", request_id.encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            log.info(
+                "http_request",
+                method=scope.get("method"),
+                path=scope.get("path"),
+                request_id=request_id,
+            )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    configure_logging()
+    app.state.settings = settings
+    app.state.embedder = build_embedder(
+        settings.embedder, settings.embedding_model, settings.embedding_dim
+    )
+    app.state.llm = build_llm(settings)
+    app.state.limiter = RateLimiter(settings)
+    try:
+        async with get_sessionmaker()() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception:
+        log.error("database_unreachable")
+        raise
+    log.info(
+        "startup",
+        env=settings.app_env,
+        embedder=settings.embedder,
+        llm_provider=settings.llm_provider,
+        retrieval_mode=settings.retrieval_mode,
+    )
+    yield
+    await app.state.limiter.close()
+    await dispose_engine()
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(title="研证 YanZheng", version="0.1.0", lifespan=lifespan)
+    # Last added middleware is outermost. Request id is set before CORS and routes.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
+    )
+    app.add_middleware(RequestContextMiddleware)
+    setup_telemetry(app, settings)
+    app.include_router(router)
+    install_exception_handler(app)
+    return app
+
+
+app = create_app()

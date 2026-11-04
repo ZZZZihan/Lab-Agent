@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: yanzheng
+          POSTGRES_PASSWORD: yanzheng
+          POSTGRES_DB: yanzheng
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yanzheng -d yanzheng"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Create the test database
+        run: PGPASSWORD=yanzheng psql -h 127.0.0.1 -U yanzheng -d yanzheng -c "CREATE DATABASE yanzheng_test" || true
+      - name: Install
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Lint and types
+        working-directory: backend
+        run: uv run ruff check app evals tests && uv run mypy app evals
+      - name: Test
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://yanzheng:yanzheng@127.0.0.1:5432/yanzheng_test
+        run: uv run pytest -q
+      - name: Eval drift
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://yanzheng:yanzheng@127.0.0.1:5432/yanzheng
+          JWT_SECRET: ci-only-jwt-secret-value-0123456789-abcdef
+          APP_ENV: test
+          EMBEDDER: hashing
+          LLM_PROVIDER: fake
+          LOAD_TUNED_CONFIG: "true"
+        run: uv run python -m evals.run_eval --check
+      - name: Dependency audit
+        working-directory: backend
+        run: uv run pip-audit
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npm run lint && npx tsc --noEmit
+      - working-directory: frontend
+        run: npm audit --audit-level=high

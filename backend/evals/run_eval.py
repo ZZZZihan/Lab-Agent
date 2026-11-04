@@ -1,0 +1,298 @@
+"""Evaluate grounded retrieval. Thresholds are fit on the dev split only."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from app.auth import hash_password
+from app.config import get_settings, repo_root
+from app.db import dispose_engine, get_sessionmaker
+from app.models import User
+from app.rag.chunker import chunk_markdown, parse_front_matter
+from app.rag.embedder import build_embedder
+from app.rag.ingest import replace_source
+from app.rag.retrieve import search_knowledge
+from app.rag.tokenize import content_tokens
+from sqlalchemy import select
+
+from evals.metrics import evaluate, tune
+
+MODES = (
+    "dense",
+    "hybrid_rrf",
+    "hybrid_lexical_rerank",
+    "hybrid_lexical_rerank15",
+)
+
+
+def _load_questions(path: Path) -> list[dict[str, object]]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def _gold_map(corpus_dir: Path) -> dict[tuple[str, str], str]:
+    mapping: dict[tuple[str, str], str] = {}
+    for file in sorted(corpus_dir.glob("*.md")):
+        meta, body = parse_front_matter(file.read_text(encoding="utf-8"))
+        key = meta["key"]
+        seen: set[str] = set()
+        for chunk in chunk_markdown(body):
+            if chunk.heading in seen:
+                raise RuntimeError(f"duplicate heading {key} / {chunk.heading}")
+            seen.add(chunk.heading)
+            mapping[(key, chunk.heading)] = f"{key}#{chunk.index}"
+    return mapping
+
+
+def _read_corpus(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
+    records = []
+    for file in sorted(corpus_dir.glob("*.md")):
+        records.append(parse_front_matter(file.read_text(encoding="utf-8")))
+    return records
+
+
+async def _prepare(settings: object) -> User:
+    from app.config import Settings
+
+    assert isinstance(settings, Settings)
+    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    maker = get_sessionmaker()
+    async with maker() as session:
+        user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
+        if user is None:
+            user = User(
+                email="eval@lab.local",
+                display_name="评测",
+                role="admin",
+                password_hash=hash_password("Eval-User-Not-For-Login-2026-xx"),
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+        count = await replace_source(
+            session,
+            embedder=embedder,
+            owner_id=user.id,
+            source="eval",
+            records=_read_corpus(Path(settings.corpus_dir)),
+        )
+        await session.commit()
+        print(f"ingested {count} eval documents with embedder={embedder.name}")
+        return user
+
+
+async def _featurize(settings: object, user: User, questions: list[dict[str, object]]) -> list[dict[str, object]]:
+    from app.acl import Principal
+    from app.config import Settings
+
+    assert isinstance(settings, Settings)
+    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    gold_map = _gold_map(Path(settings.corpus_dir))
+    maker = get_sessionmaker()
+    features: list[dict[str, object]] = []
+    async with maker() as session:
+        for question in questions:
+            bundle = await search_knowledge(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=Principal(id=user.id, role=user.role),
+                query=str(question["question"]),
+                mode="dense",
+                source="eval",
+                limit=None,
+            )
+            gold = []
+            gold_refs = question["gold"]
+            if not isinstance(gold_refs, list):
+                raise RuntimeError(f"gold must be a list for {question['id']}")
+            for ref in gold_refs:
+                assert isinstance(ref, dict)
+                try:
+                    gold.append(gold_map[(str(ref["doc"]), str(ref["heading"]))])
+                except KeyError as exc:
+                    raise RuntimeError(f"missing gold heading for {question['id']}: {ref}") from exc
+            features.append(
+                {
+                    "id": question["id"],
+                    "split": question["split"],
+                    "type": question["type"],
+                    "answerable": bool(question["answerable"]),
+                    "gold": gold,
+                    "query_tokens": content_tokens(str(question["question"])),
+                    "elapsed_ms": bundle.elapsed_ms,
+                    "df": bundle.df,
+                    "n_docs": bundle.n_docs,
+                    "hits": [
+                        {
+                            "key": hit["key"],
+                            "cosine": float(hit.get("cosine") or 0.0),
+                            "bm25": float(hit.get("bm25") or 0.0),
+                            "tokens": list(hit.get("tokens") or []),
+                            "chunk_id": hit["chunk_id"],
+                            "document_id": hit["document_id"],
+                            "heading": hit.get("heading"),
+                            "title": hit.get("title"),
+                            "chunk_index": hit.get("chunk_index"),
+                        }
+                        for hit in bundle.hits
+                    ],
+                }
+            )
+    return features
+
+
+def _choose_rrf(rows: list[dict[str, object]], mode: str) -> int:
+    """Pick RRF k on the dev split using retrieval metrics only."""
+    if mode == "dense":
+        return 60
+    best_k = 60
+    best = (-1.0, -1.0)
+    for rrf_k in (20, 40, 60, 90):
+        metrics = evaluate(
+            rows,  # type: ignore[arg-type]
+            mode=mode,
+            params={
+                "rrf_k": rrf_k,
+                "evidence_score_min": 0.0,
+                "rare_coverage_min": 0.0,
+                "cite_margin": 1.0,
+                "cite_k": 4,
+            },
+        )
+        key = (metrics["recall_at_5"], metrics["mrr"])
+        if key > best:
+            best = key
+            best_k = rrf_k
+    return best_k
+
+
+def _round_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    return {key: round(value, 4) for key, value in metrics.items()}
+
+
+async def _run(tune_dev: bool, check: bool) -> None:
+    settings = get_settings()
+    questions = _load_questions(Path(settings.questions_path))
+    if len(questions) < 60:
+        raise SystemExit(f"eval set has {len(questions)} questions, need at least 60")
+    user = await _prepare(settings)
+    features = await _featurize(settings, user, questions)
+    root = repo_root()
+    config_path = root / "evals" / "data" / "v1" / "selected_config.json"
+    baseline_path = root / "evals" / "baseline_results.json"
+    existing = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
+    mode_reports: dict[str, object] = {}
+    selected_mode = "dense"
+    selected_params: dict[str, object] = {}
+    best_recall = (-1.0, -1.0)
+    for mode in MODES:
+        dev_rows = [row for row in features if row["split"] == "dev"]
+        test_rows = [row for row in features if row["split"] == "test"]
+        if tune_dev:
+            rrf_k = _choose_rrf(dev_rows, mode)
+            tuned = tune(dev_rows, mode, rrf_k)  # type: ignore[arg-type]
+            params = tuned["params"]
+            dev_metrics = tuned["dev"]
+        else:
+            if existing is None:
+                raise SystemExit("selected_config.json is missing; run with --tune first")
+            params = {
+                "rrf_k": existing.get("rrf_k", 60) if mode == existing.get("retrieval_mode") else 60,
+                "evidence_score_min": existing.get("evidence_score_min", 0.99),
+                "rare_coverage_min": existing.get("rare_coverage_min", 0.0),
+                "cite_margin": existing.get("cite_margin", 0.15),
+                "cite_k": existing.get("cite_k", 3),
+            }
+            # Non-selected modes keep a documented default so the table still renders.
+            if mode != existing.get("retrieval_mode"):
+                params = {
+                    "rrf_k": 60,
+                    "evidence_score_min": existing.get("evidence_score_min", 0.99),
+                    "rare_coverage_min": existing.get("rare_coverage_min", 0.0),
+                    "cite_margin": existing.get("cite_margin", 1.0),
+                    "cite_k": existing.get("cite_k", 4),
+                }
+            dev_metrics = evaluate(dev_rows, mode=mode, params=params)  # type: ignore[arg-type]
+        test_metrics = evaluate(test_rows, mode=mode, params=params)  # type: ignore[arg-type]
+        mode_reports[mode] = {
+            "config": params,
+            "dev": _round_metrics(dev_metrics),
+            "test": _round_metrics(test_metrics),
+        }
+        recall = float(dev_metrics["recall_at_5"])
+        reciprocal = float(dev_metrics["mrr"])
+        if (recall, reciprocal) > best_recall:
+            best_recall = (recall, reciprocal)
+            selected_mode = mode
+            selected_params = dict(params)
+    if not tune_dev and existing is not None:
+        selected_mode = str(existing["retrieval_mode"])
+        selected_params = {
+            "retrieval_mode": selected_mode,
+            "rrf_k": existing["rrf_k"],
+            "dense_pool": existing.get("dense_pool", 80),
+            "lexical_pool": existing.get("lexical_pool", 80),
+            "evidence_score_min": existing["evidence_score_min"],
+            "rare_coverage_min": existing["rare_coverage_min"],
+            "cite_margin": existing["cite_margin"],
+            "cite_k": existing["cite_k"],
+        }
+    else:
+        selected_params["retrieval_mode"] = selected_mode
+        selected_params["dense_pool"] = 80
+        selected_params["lexical_pool"] = 80
+        config_path.write_text(
+            json.dumps(selected_params, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    report = {
+        "label": "hashing-embedder-ci-baseline",
+        "embedder": settings.embedder,
+        "embedding_model_when_bge": settings.embedding_model,
+        "neural_weights_used": settings.embedder != "hashing",
+        "protocol": (
+            "Thresholds, citation margin, and RRF k are chosen on the dev split only. "
+            "The test split is scored once with the frozen config. "
+            "Refusal uses cosine similarity, or the lexical reranker score when that mode is active. "
+            "Min-max normalized fusion scores are not used as a threshold. "
+            "Hybrid fusion is reciprocal rank fusion, not a weighted sum."
+        ),
+        "selected_mode": selected_mode,
+        "selected_config": selected_params,
+        "selection_rule": "highest dev Recall@5, tie-break MRR; thresholds maximize dev refusal correctness then citation F1",
+        "modes": mode_reports,
+        "questions": {"total": len(questions), "dev": sum(1 for q in questions if q["split"] == "dev"), "test": sum(1 for q in questions if q["split"] == "test")},
+    }
+    if tune_dev:
+        baseline_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"selected_mode": selected_mode, "test": mode_reports[selected_mode]["test"]}, ensure_ascii=False, indent=2))  # type: ignore[index]
+    if check and baseline_path.is_file():
+        committed = json.loads(baseline_path.read_text(encoding="utf-8"))
+        current = mode_reports[selected_mode]["test"]  # type: ignore[index]
+        reference = committed["modes"][selected_mode]["test"]
+        for key in ("recall_at_5", "mrr", "refusal_correctness", "citation_f1"):
+            delta = abs(float(current[key]) - float(reference[key]))  # type: ignore[index]
+            if delta > 0.03:
+                raise SystemExit(f"{key} drifted by {delta:.3f}")
+    await dispose_engine()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tune", action="store_true", help="Fit thresholds on dev and write the baseline")
+    parser.add_argument("--check", action="store_true", help="Fail if test metrics drift from the committed baseline")
+    args = parser.parse_args()
+    command.upgrade(Config(str(repo_root() / "backend" / "alembic.ini")), "head")
+    asyncio.run(_run(tune_dev=args.tune, check=args.check))
+
+
+if __name__ == "__main__":
+    main()

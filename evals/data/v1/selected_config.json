@@ -1,0 +1,10 @@
+{
+  "rrf_k": 60,
+  "evidence_score_min": 0.2475,
+  "rare_coverage_min": 0.0,
+  "cite_margin": 0.05,
+  "cite_k": 1,
+  "dense_pool": 80,
+  "lexical_pool": 80,
+  "retrieval_mode": "dense"
+}

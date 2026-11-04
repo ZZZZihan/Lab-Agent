@@ -1,0 +1,11 @@
+.git
+frontend/node_modules
+frontend/.next
+backend/.venv
+backend/.mypy_cache
+backend/.ruff_cache
+backend/.pytest_cache
+agent-tools
+data
+*.pyc
+.env

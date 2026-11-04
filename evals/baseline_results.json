@@ -1,0 +1,202 @@
+{
+  "label": "hashing-embedder-ci-baseline",
+  "embedder": "hashing",
+  "embedding_model_when_bge": "BAAI/bge-small-zh-v1.5",
+  "neural_weights_used": false,
+  "protocol": "Thresholds, citation margin, and RRF k are chosen on the dev split only. The test split is scored once with the frozen config. Refusal uses cosine similarity, or the lexical reranker score when that mode is active. Min-max normalized fusion scores are not used as a threshold. Hybrid fusion is reciprocal rank fusion, not a weighted sum.",
+  "selected_mode": "dense",
+  "selected_config": {
+    "rrf_k": 60,
+    "evidence_score_min": 0.2475,
+    "rare_coverage_min": 0.0,
+    "cite_margin": 0.05,
+    "cite_k": 1,
+    "dense_pool": 80,
+    "lexical_pool": 80,
+    "retrieval_mode": "dense"
+  },
+  "selection_rule": "highest dev Recall@5, tie-break MRR; thresholds maximize dev refusal correctness then citation F1",
+  "modes": {
+    "dense": {
+      "config": {
+        "rrf_k": 60,
+        "evidence_score_min": 0.2475,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.05,
+        "cite_k": 1,
+        "dense_pool": 80,
+        "lexical_pool": 80,
+        "retrieval_mode": "dense"
+      },
+      "dev": {
+        "n": 51.0,
+        "n_answerable": 39.0,
+        "n_unanswerable": 12.0,
+        "recall_at_5": 0.9487,
+        "recall_at_1": 0.8205,
+        "mrr": 0.9262,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.7949,
+        "citation_f1_when_answered": 0.8857,
+        "refusal_correctness": 0.8039,
+        "false_refusal_rate": 0.1026,
+        "false_answer_rate": 0.5,
+        "latency_ms_mean": 2.1494,
+        "latency_ms_p50": 2.0485
+      },
+      "test": {
+        "n": 27.0,
+        "n_answerable": 21.0,
+        "n_unanswerable": 6.0,
+        "recall_at_5": 0.9524,
+        "recall_at_1": 0.7143,
+        "mrr": 0.8878,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.6667,
+        "citation_f1_when_answered": 0.8235,
+        "refusal_correctness": 0.7037,
+        "false_refusal_rate": 0.1905,
+        "false_answer_rate": 0.6667,
+        "latency_ms_mean": 2.0687,
+        "latency_ms_p50": 2.0229
+      }
+    },
+    "hybrid_rrf": {
+      "config": {
+        "rrf_k": 20,
+        "evidence_score_min": 0.2475,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.05,
+        "cite_k": 1,
+        "dense_pool": 80,
+        "lexical_pool": 80,
+        "retrieval_mode": "hybrid_rrf"
+      },
+      "dev": {
+        "n": 51.0,
+        "n_answerable": 39.0,
+        "n_unanswerable": 12.0,
+        "recall_at_5": 0.9487,
+        "recall_at_1": 0.8205,
+        "mrr": 0.9262,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.7949,
+        "citation_f1_when_answered": 0.8857,
+        "refusal_correctness": 0.8039,
+        "false_refusal_rate": 0.1026,
+        "false_answer_rate": 0.5,
+        "latency_ms_mean": 2.1494,
+        "latency_ms_p50": 2.0485
+      },
+      "test": {
+        "n": 27.0,
+        "n_answerable": 21.0,
+        "n_unanswerable": 6.0,
+        "recall_at_5": 1.0,
+        "recall_at_1": 0.7619,
+        "mrr": 0.9206,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.6667,
+        "citation_f1_when_answered": 0.8235,
+        "refusal_correctness": 0.7037,
+        "false_refusal_rate": 0.1905,
+        "false_answer_rate": 0.6667,
+        "latency_ms_mean": 2.0687,
+        "latency_ms_p50": 2.0229
+      }
+    },
+    "hybrid_lexical_rerank": {
+      "config": {
+        "rrf_k": 20,
+        "evidence_score_min": 0.452,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.12,
+        "cite_k": 2,
+        "dense_pool": 80,
+        "lexical_pool": 80,
+        "retrieval_mode": "hybrid_lexical_rerank"
+      },
+      "dev": {
+        "n": 51.0,
+        "n_answerable": 39.0,
+        "n_unanswerable": 12.0,
+        "recall_at_5": 0.9487,
+        "recall_at_1": 0.7821,
+        "mrr": 0.9026,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.7179,
+        "citation_f1_when_answered": 0.875,
+        "refusal_correctness": 0.8039,
+        "false_refusal_rate": 0.1795,
+        "false_answer_rate": 0.25,
+        "latency_ms_mean": 2.1494,
+        "latency_ms_p50": 2.0485
+      },
+      "test": {
+        "n": 27.0,
+        "n_answerable": 21.0,
+        "n_unanswerable": 6.0,
+        "recall_at_5": 1.0,
+        "recall_at_1": 0.7857,
+        "mrr": 0.9167,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.5714,
+        "citation_f1_when_answered": 0.8571,
+        "refusal_correctness": 0.6296,
+        "false_refusal_rate": 0.3333,
+        "false_answer_rate": 0.5,
+        "latency_ms_mean": 2.0687,
+        "latency_ms_p50": 2.0229
+      }
+    },
+    "hybrid_lexical_rerank15": {
+      "config": {
+        "rrf_k": 20,
+        "evidence_score_min": 0.452,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.12,
+        "cite_k": 2,
+        "dense_pool": 80,
+        "lexical_pool": 80,
+        "retrieval_mode": "hybrid_lexical_rerank15"
+      },
+      "dev": {
+        "n": 51.0,
+        "n_answerable": 39.0,
+        "n_unanswerable": 12.0,
+        "recall_at_5": 0.9487,
+        "recall_at_1": 0.7821,
+        "mrr": 0.9012,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.7179,
+        "citation_f1_when_answered": 0.875,
+        "refusal_correctness": 0.8039,
+        "false_refusal_rate": 0.1795,
+        "false_answer_rate": 0.25,
+        "latency_ms_mean": 2.1494,
+        "latency_ms_p50": 2.0485
+      },
+      "test": {
+        "n": 27.0,
+        "n_answerable": 21.0,
+        "n_unanswerable": 6.0,
+        "recall_at_5": 1.0,
+        "recall_at_1": 0.7857,
+        "mrr": 0.9167,
+        "multi_chunk_recall_at_5": 1.0,
+        "citation_f1": 0.5714,
+        "citation_f1_when_answered": 0.8571,
+        "refusal_correctness": 0.6296,
+        "false_refusal_rate": 0.3333,
+        "false_answer_rate": 0.5,
+        "latency_ms_mean": 2.0687,
+        "latency_ms_p50": 2.0229
+      }
+    }
+  },
+  "questions": {
+    "total": 78,
+    "dev": 51,
+    "test": 27
+  }
+}

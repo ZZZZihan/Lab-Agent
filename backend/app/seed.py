@@ -1,0 +1,80 @@
+"""Load synthetic lab documents and local demo accounts. No real personal data."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from sqlalchemy import select
+
+from app.auth import hash_password
+from app.config import get_settings
+from app.db import dispose_engine, get_sessionmaker
+from app.models import User
+from app.rag.chunker import parse_front_matter
+from app.rag.embedder import build_embedder
+from app.rag.ingest import replace_source
+
+DEMO_USERS = (
+    ("admin@lab.local", "沈昭", "admin", "YanZheng-Demo-2026-Admin"),
+    ("member@lab.local", "林可", "member", "YanZheng-Demo-2026-Member"),
+    ("zhou@lab.local", "周宁", "member", "YanZheng-Demo-2026-Zhou"),
+    ("viewer@lab.local", "王敏", "viewer", "YanZheng-Demo-2026-Viewer"),
+)
+
+
+def _read_dir(path: Path) -> list[tuple[dict[str, str], str]]:
+    records: list[tuple[dict[str, str], str]] = []
+    if not path.is_dir():
+        return records
+    for file in sorted(path.glob("*.md")):
+        meta, body = parse_front_matter(file.read_text(encoding="utf-8"))
+        records.append((meta, body))
+    return records
+
+
+async def seed() -> None:
+    settings = get_settings()
+    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    maker = get_sessionmaker()
+    async with maker() as session:
+        users: dict[str, User] = {}
+        for email, name, role, password in DEMO_USERS:
+            user = await session.scalar(select(User).where(User.email == email))
+            if user is None:
+                user = User(
+                    email=email,
+                    display_name=name,
+                    role=role,
+                    password_hash=hash_password(password),
+                    is_active=True,
+                )
+                session.add(user)
+                await session.flush()
+            users[email] = user
+        admin = users["admin@lab.local"]
+        grants = {
+            "project-helios": [users["member@lab.local"].id],
+            "procurement": [users["zhou@lab.local"].id],
+        }
+        corpus = _read_dir(Path(settings.corpus_dir))
+        private = _read_dir(Path(settings.seed_only_dir))
+        count = await replace_source(
+            session,
+            embedder=embedder,
+            owner_id=admin.id,
+            source="seed",
+            records=corpus + private,
+            grants=grants,
+        )
+        await session.commit()
+    await dispose_engine()
+    print(f"seeded {count} documents for 清衡实验室")
+
+
+def main() -> None:
+    asyncio.run(seed())
+
+
+if __name__ == "__main__":
+    main()
