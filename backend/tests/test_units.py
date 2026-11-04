@@ -11,6 +11,7 @@ from app.config import Settings, assert_strong_secret
 from app.rag.chunker import chunk_markdown, parse_front_matter
 from app.rag.redact import redact_text
 from app.rag.rrf import Hit, decide
+from app.seed import assert_demo_seed_allowed
 from evals.metrics import tune
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,13 @@ def test_weak_secrets_rejected() -> None:
             cors_origins="http://localhost:43123",
             load_tuned_config=False,
         )
+
+
+def test_prod_refuses_demo_seed() -> None:
+    assert_demo_seed_allowed("dev")
+    assert_demo_seed_allowed("test")
+    with pytest.raises(SystemExit):
+        assert_demo_seed_allowed("prod")
 
 
 def test_wildcard_cors_rejected() -> None:

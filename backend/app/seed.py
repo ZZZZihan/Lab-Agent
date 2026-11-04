@@ -33,8 +33,18 @@ def _read_dir(path: Path) -> list[tuple[dict[str, str], str]]:
     return records
 
 
+def assert_demo_seed_allowed(app_env: str) -> None:
+    """Demo accounts are local fixtures. Production must provision its own users."""
+    if app_env == "prod":
+        raise SystemExit(
+            "Refusing to load demo accounts when APP_ENV=prod. "
+            "Create users out of band and do not reuse the YanZheng-Demo passwords."
+        )
+
+
 async def seed() -> None:
     settings = get_settings()
+    assert_demo_seed_allowed(settings.app_env)
     embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
     maker = get_sessionmaker()
     async with maker() as session:

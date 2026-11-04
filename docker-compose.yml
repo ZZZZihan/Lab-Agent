@@ -55,6 +55,9 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        # Local demo only. A production image build leaves this false.
+        NEXT_PUBLIC_DEMO_HINTS: "true"
     environment:
       API_INTERNAL_URL: http://api:8000
       COOKIE_SECURE: "false"

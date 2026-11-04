@@ -11,7 +11,7 @@ Report a vulnerability privately to the repository owner. Do not open a public i
 - Configuration comes from the environment. `JWT_SECRET` shorter than 32 characters, a placeholder, or a low-diversity string aborts startup.
 - A non-local LLM provider other than Ollama refuses to start without `LLM_API_KEY`.
 - `LLM_CAPTURE` is rejected unless `APP_ENV=test`. It exists so tests can prove redaction. It must stay off in any shared environment.
-- Demo passwords in the seed script are for the local database only. Do not reuse them, and do not point this app at a production identity provider with those accounts.
+- Demo passwords in the seed script are labeled local fixtures (`YanZheng-Demo-2026-*`). `python -m app.seed` and the API entrypoint both refuse to load them when `APP_ENV=prod`. The login form prefills them only when `NEXT_PUBLIC_DEMO_HINTS=true`, which the Docker image leaves off unless a demo build opts in. Do not reuse these passwords.
 
 ## Access control
 

@@ -24,3 +24,19 @@ evals/out/
 coverage/
 .idea/
 .vscode/
+
+# Model caches and weights. CI uses the hashing embedder and must not commit them.
+.cache/
+.huggingface/
+models/
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.ckpt
+pytorch_model.bin
+
+# Local data volumes
+pgdata/
+data/

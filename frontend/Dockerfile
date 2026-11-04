@@ -4,6 +4,9 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ .
 ENV NEXT_TELEMETRY_DISABLED=1
+# Next inlines this at build time. The default image does not prefill demo accounts.
+ARG NEXT_PUBLIC_DEMO_HINTS=false
+ENV NEXT_PUBLIC_DEMO_HINTS=$NEXT_PUBLIC_DEMO_HINTS
 RUN npm run build
 
 FROM node:22-bookworm-slim AS run

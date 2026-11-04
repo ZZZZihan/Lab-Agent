@@ -20,11 +20,11 @@ const DEMOS = [
 export default function LoginPage() {
   const { t, toggle } = useI18n();
   const router = useRouter();
-  const [email, setEmail] = useState("member@lab.local");
-  const [password, setPassword] = useState("YanZheng-Demo-2026-Member");
+  const showHints = process.env.NEXT_PUBLIC_DEMO_HINTS === "true";
+  const [email, setEmail] = useState(showHints ? "member@lab.local" : "");
+  const [password, setPassword] = useState(showHints ? "YanZheng-Demo-2026-Member" : "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
-  const showHints = process.env.NEXT_PUBLIC_DEMO_HINTS === "true";
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col justify-center px-4 py-10">

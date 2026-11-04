@@ -8,7 +8,7 @@
 
 研证回答实验室已经写下来的事实：集群约定、组会、项目笔记、论文笔记。上传的 Markdown 按 `##` 标题切成块，检索在数据库里就带上访问控制，模型只有在余弦相似度（或显式开启的重排分数）超过开发集上调好的阈值时才会被调用。
 
-本地演示账号只用于这套合成数据：
+下面的账号和密码只属于本地合成演示。`APP_ENV=prod` 时种子脚本会直接退出，不会写入这些账号。登录框只有在 `NEXT_PUBLIC_DEMO_HINTS=true` 时才预填密码；镜像构建默认是关闭的，`docker compose` 的本地演示才会打开。
 
 | 姓名 | 邮箱 | 角色 | 密码 |
 | --- | --- | --- | --- |
@@ -85,6 +85,16 @@ The committed file `evals/baseline_results.json` is the **hashing embedder**, no
 Mode choice is the best dev Recall@5, then MRR, so dense stays selected when hybrid ties it on dev. Hybrid RRF does not show the collapse that a naive BM25-weighted fusion produced on an earlier paraphrase set. The lexical reranker is not a cross-encoder. Multi-chunk Recall@5 is 1.0 on this set; citation F1 is lower because the tuned policy cites a single section. The hashing embedder still answers two thirds of the unanswerable test questions that share vocabulary with the corpus. That gap is why a calibrated neural embedder is the next measurement, not a claim this table already makes.
 
 Query latency for this embedder is about 2 ms on CPU inside the eval harness. That number is not comparable to a cross-encoder.
+
+## Known gaps
+
+- The table above is the hashing embedder baseline. It is not `bge-small-zh-v1.5`, not `bge-m3`, and not a cross-encoder. No neural-model numbers are committed. CI never downloads weights.
+- On the test split the selected hashing run still answers about two thirds of the unanswerable questions that share vocabulary with the corpus (false-answer rate 0.667). Refusal is not good enough to treat as a safety claim.
+- Citation F1 is behind Recall@5 because the tuned policy cites one section (`cite_k` 1).
+- Hybrid RRF ties dense on the dev split, so dense stays selected. The lexical rerank modes are IDF coverage over a candidate pool, not `bge-reranker`.
+- The default answerer is an extractive local fallback. A hosted model is optional and stays behind the same refusal check.
+- `search_papers` returns `not_configured`. OIDC verification fails closed until issuer, audience, and JWKS are set; it is not wired to a live provider.
+- This repository has no license file.
 
 ## Layout
 
