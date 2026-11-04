@@ -31,7 +31,7 @@ TOOL_NAMES = [
 
 def build_server() -> MCPServer:
     server = MCPServer(
-        "yanzheng",
+        "lab-agent",
         instructions=(
             "Research-lab knowledge tools. Results are limited to documents the "
             "configured actor can read. search_papers stays unconfigured until a provider is set."

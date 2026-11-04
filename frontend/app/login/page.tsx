@@ -11,10 +11,10 @@ import { ApiError, login } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 const DEMOS = [
-  ["admin@lab.local", "沈昭", "admin", "YanZheng-Demo-2026-Admin"],
-  ["member@lab.local", "林可", "member", "YanZheng-Demo-2026-Member"],
-  ["zhou@lab.local", "周宁", "member", "YanZheng-Demo-2026-Zhou"],
-  ["viewer@lab.local", "王敏", "viewer", "YanZheng-Demo-2026-Viewer"],
+  ["admin@lab.local", "沈昭", "admin", "LabAgent-Demo-2026-Admin"],
+  ["member@lab.local", "林可", "member", "LabAgent-Demo-2026-Member"],
+  ["zhou@lab.local", "周宁", "member", "LabAgent-Demo-2026-Zhou"],
+  ["viewer@lab.local", "王敏", "viewer", "LabAgent-Demo-2026-Viewer"],
 ];
 
 export default function LoginPage() {
@@ -22,7 +22,7 @@ export default function LoginPage() {
   const router = useRouter();
   const showHints = process.env.NEXT_PUBLIC_DEMO_HINTS === "true";
   const [email, setEmail] = useState(showHints ? "member@lab.local" : "");
-  const [password, setPassword] = useState(showHints ? "YanZheng-Demo-2026-Member" : "");
+  const [password, setPassword] = useState(showHints ? "LabAgent-Demo-2026-Member" : "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 

@@ -45,7 +45,7 @@ def test_weak_secrets_rejected() -> None:
     with pytest.raises(RuntimeError):
         Settings(
             _env_file=None,  # type: ignore[call-arg]
-            database_url="postgresql+asyncpg://yanzheng:yanzheng@localhost/yanzheng",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
             jwt_secret="replace-me-with-a-long-random-string",
             cors_origins="http://localhost:43123",
             load_tuned_config=False,
@@ -63,7 +63,7 @@ def test_wildcard_cors_rejected() -> None:
     with pytest.raises(RuntimeError):
         Settings(
             _env_file=None,  # type: ignore[call-arg]
-            database_url="postgresql+asyncpg://yanzheng:yanzheng@localhost/yanzheng",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
             jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",
             cors_origins="*",
             load_tuned_config=False,

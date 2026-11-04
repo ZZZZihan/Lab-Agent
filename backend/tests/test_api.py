@@ -14,7 +14,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-PASSWORD = "YanZheng-Test-Password-2026"
+PASSWORD = "LabAgent-Test-Password-2026"
 
 
 async def _add_user(email: str, role: str, name: str) -> None:
@@ -228,3 +228,11 @@ async def test_audit_is_append_only(client: AsyncClient) -> None:
         with pytest.raises(DBAPIError):
             await session.execute(text("DELETE FROM audit_events"))
             await session.commit()
+    async with maker() as session:
+        await session.execute(text("SELECT set_config('labagent.audit_retention', 'on', true)"))
+        await session.execute(text("DELETE FROM audit_events"))
+        await session.commit()
+    async with maker() as session:
+        remaining = await session.scalar(text("SELECT count(*) FROM audit_events"))
+        assert not remaining
+

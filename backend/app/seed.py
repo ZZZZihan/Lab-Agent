@@ -16,10 +16,10 @@ from app.rag.embedder import build_embedder
 from app.rag.ingest import replace_source
 
 DEMO_USERS = (
-    ("admin@lab.local", "沈昭", "admin", "YanZheng-Demo-2026-Admin"),
-    ("member@lab.local", "林可", "member", "YanZheng-Demo-2026-Member"),
-    ("zhou@lab.local", "周宁", "member", "YanZheng-Demo-2026-Zhou"),
-    ("viewer@lab.local", "王敏", "viewer", "YanZheng-Demo-2026-Viewer"),
+    ("admin@lab.local", "沈昭", "admin", "LabAgent-Demo-2026-Admin"),
+    ("member@lab.local", "林可", "member", "LabAgent-Demo-2026-Member"),
+    ("zhou@lab.local", "周宁", "member", "LabAgent-Demo-2026-Zhou"),
+    ("viewer@lab.local", "王敏", "viewer", "LabAgent-Demo-2026-Viewer"),
 )
 
 
@@ -38,7 +38,7 @@ def assert_demo_seed_allowed(app_env: str) -> None:
     if app_env == "prod":
         raise SystemExit(
             "Refusing to load demo accounts when APP_ENV=prod. "
-            "Create users out of band and do not reuse the YanZheng-Demo passwords."
+            "Create users out of band and do not reuse the LabAgent-Demo passwords."
         )
 
 

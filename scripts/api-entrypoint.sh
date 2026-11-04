@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-cd /opt/yanzheng/backend
+cd /opt/lab-agent/backend
 alembic upgrade head
 if [ "${APP_ENV:-dev}" = "prod" ]; then
   echo "APP_ENV=prod: skipping demo seed"

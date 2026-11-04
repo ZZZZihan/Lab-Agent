@@ -55,7 +55,7 @@ class Runtime(TypedDict):
     request_id: str | None
 
 
-_runtime: ContextVar[Runtime] = ContextVar("yanzheng_runtime")
+_runtime: ContextVar[Runtime] = ContextVar("lab_agent_runtime")
 
 MEETING_WORDS = ("组会", "研讨", "会议室", "轮值", "提纲", "例会")
 PROJECT_WORDS = ("项目", "代号", "里程碑", "赫利俄斯", "流明", "hx-17")

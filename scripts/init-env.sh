@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [[ -f .env ]]; then
+if [[ -f .env && "${1:-}" != "--force" ]]; then
   echo ".env already exists"
   exit 0
 fi
@@ -10,7 +10,7 @@ pg="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
 cat > .env <<EOF
 APP_ENV=dev
 POSTGRES_PASSWORD=${pg}
-DATABASE_URL=postgresql+asyncpg://yanzheng:${pg}@127.0.0.1:55432/yanzheng
+DATABASE_URL=postgresql+asyncpg://labagent:${pg}@127.0.0.1:55432/labagent
 REDIS_URL=redis://127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
