@@ -6,7 +6,7 @@ export type Locale = "zh" | "en";
 
 const copy = {
   zh: {
-    brand: "研证",
+    brand: "Lab Agent",
     lab: "清衡实验室",
     tagline: "只根据你有权阅读的实验室文档作答。",
     login: "登录",
@@ -24,7 +24,7 @@ const copy = {
     asking: "正在检索并核对依据…",
     placeholder: "例如：周三学术例会在哪间实体会议室？",
     emptyTitle: "从一条可以核对的问题开始",
-    emptyBody: "回答会标出具体小节。证据不够时，研证会拒绝作答，而不是补一段听起来合理的话。",
+    emptyBody: "回答会标出具体小节。证据不够时，Lab Agent 会拒绝作答，而不是补一段听起来合理的话。",
     suggestions: "可以先问这些",
     citations: "依据",
     openDoc: "打开原文",
@@ -73,7 +73,7 @@ const copy = {
     noSession: "登录状态已失效，请重新登录。",
   },
   en: {
-    brand: "YanZheng",
+    brand: "Lab Agent",
     lab: "Qingheng Lab",
     tagline: "Answers stay inside documents you are allowed to read.",
     login: "Sign in",
@@ -91,7 +91,7 @@ const copy = {
     asking: "Searching and checking evidence…",
     placeholder: "For example: which room hosts the Wednesday seminar?",
     emptyTitle: "Start with a question the notes can answer",
-    emptyBody: "Citations point at a section. If the evidence is too thin, YanZheng refuses instead of filling the gap.",
+    emptyBody: "Citations point at a section. If the evidence is too thin, Lab Agent refuses instead of filling the gap.",
     suggestions: "Try one of these",
     citations: "Evidence",
     openDoc: "Open source",
@@ -163,7 +163,7 @@ export function LocaleProvider({
       t: copy[locale] as Copy,
       toggle: () => {
         const next = locale === "zh" ? "en" : "zh";
-        document.cookie = `yz_locale=${next}; path=/; max-age=31536000; samesite=lax`;
+        document.cookie = `la_locale=${next}; path=/; max-age=31536000; samesite=lax`;
         setLocale(next);
       },
     }),

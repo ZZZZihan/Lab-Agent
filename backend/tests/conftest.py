@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 _ENV = Path(__file__).resolve().parents[2] / ".env"
-_password = "yanzheng"
+_password = "labagent"
 if _ENV.is_file():
     for line in _ENV.read_text(encoding="utf-8").splitlines():
         if line.startswith("POSTGRES_PASSWORD="):
@@ -22,7 +22,7 @@ if _ENV.is_file():
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL",
-    f"postgresql+asyncpg://yanzheng:{_password}@127.0.0.1:55432/yanzheng_test",
+    f"postgresql+asyncpg://labagent:{_password}@127.0.0.1:55432/labagent_test",
 )
 os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://127.0.0.1:56379/1")
 os.environ["JWT_SECRET"] = "test-only-jwt-secret-value-0123456789-abcdef"

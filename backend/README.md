@@ -1,3 +1,3 @@
-# YanZheng API
+# Lab Agent API
 
-Python package for the 研证 service. Run instructions live in the repository README.
+Python package for the Lab Agent service. Run instructions live in the repository README.

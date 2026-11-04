@@ -1,1 +1,1 @@
-"""研证 YanZheng application package."""
+"""Lab Agent application package."""

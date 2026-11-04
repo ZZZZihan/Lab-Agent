@@ -1,1 +1,1 @@
-CREATE DATABASE yanzheng_test;
+CREATE DATABASE labagent_test;

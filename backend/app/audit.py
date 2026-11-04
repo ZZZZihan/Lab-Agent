@@ -98,7 +98,7 @@ async def write_audit(
 
 async def run_retention(session: AsyncSession, *, days: int) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=days)
-    await session.execute(text("SELECT set_config('yanzheng.audit_retention', 'on', true)"))
+    await session.execute(text("SELECT set_config('labagent.audit_retention', 'on', true)"))
     result = await session.execute(
         text("DELETE FROM audit_events WHERE created_at < :cutoff"),
         {"cutoff": cutoff},

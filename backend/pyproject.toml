@@ -1,5 +1,5 @@
 [project]
-name = "yanzheng"
+name = "lab-agent"
 version = "0.1.0"
 description = "Evidence-grounded research-lab knowledge agent"
 readme = "README.md"

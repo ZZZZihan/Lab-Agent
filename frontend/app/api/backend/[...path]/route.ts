@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-const COOKIE = "yz_session";
+const COOKIE = "la_session";
 
 function apiBase() {
   return (process.env.API_INTERNAL_URL || "http://127.0.0.1:43124").replace(/\/$/, "");

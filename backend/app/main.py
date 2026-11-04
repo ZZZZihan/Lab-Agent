@@ -1,4 +1,4 @@
-"""研证 API entrypoint."""
+"""Lab Agent API entrypoint."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="研证 YanZheng", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Lab Agent", version="0.1.0", lifespan=lifespan)
     # Last added middleware is outermost. Request id is set before CORS and routes.
     app.add_middleware(
         CORSMiddleware,

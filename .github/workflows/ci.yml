@@ -39,13 +39,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: yanzheng
-          POSTGRES_PASSWORD: yanzheng
-          POSTGRES_DB: yanzheng
+          POSTGRES_USER: labagent
+          POSTGRES_PASSWORD: labagent
+          POSTGRES_DB: labagent
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U yanzheng -d yanzheng"
+          --health-cmd "pg_isready -U labagent -d labagent"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -55,7 +55,7 @@ jobs:
         with:
           enable-cache: true
       - name: Create the test database
-        run: PGPASSWORD=yanzheng psql -h 127.0.0.1 -U yanzheng -d yanzheng -c "CREATE DATABASE yanzheng_test" || true
+        run: PGPASSWORD=labagent psql -h 127.0.0.1 -U labagent -d labagent -c "CREATE DATABASE labagent_test" || true
       - name: Install
         working-directory: backend
         run: uv sync --frozen
@@ -65,12 +65,12 @@ jobs:
       - name: Test
         working-directory: backend
         env:
-          TEST_DATABASE_URL: postgresql+asyncpg://yanzheng:yanzheng@127.0.0.1:5432/yanzheng_test
+          TEST_DATABASE_URL: postgresql+asyncpg://labagent:labagent@127.0.0.1:5432/labagent_test
         run: uv run pytest -q
       - name: Eval drift
         working-directory: backend
         env:
-          DATABASE_URL: postgresql+asyncpg://yanzheng:yanzheng@127.0.0.1:5432/yanzheng
+          DATABASE_URL: postgresql+asyncpg://labagent:labagent@127.0.0.1:5432/labagent
           JWT_SECRET: ci-only-jwt-secret-value-0123456789-abcdef
           APP_ENV: test
           EMBEDDER: hashing

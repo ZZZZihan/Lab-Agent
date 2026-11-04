@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     agent_max_steps: int = 4
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
-    service_name: str = "yanzheng-api"
+    service_name: str = "lab-agent-api"
 
     @model_validator(mode="after")
     def _enforce(self) -> Self:

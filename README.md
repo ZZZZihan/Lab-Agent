@@ -1,21 +1,21 @@
-# 研证 YanZheng
+# Lab Agent
 
-研证是清衡实验室的知识助手。它只根据当前用户有权阅读的文档回答，引用具体小节，证据不够就拒绝，并留下不含原文的审计记录。
+Lab Agent 是清衡实验室的知识助手。它只根据当前用户有权阅读的文档回答，引用具体小节，证据不够就拒绝，并留下不含原文的审计记录。
 
 这是一次从零开始的重写，面向检索、权限和可复现评测。旧系统里的业务 CRUD 没有搬过来。
 
 ## 中文说明
 
-研证回答实验室已经写下来的事实：集群约定、组会、项目笔记、论文笔记。上传的 Markdown 按 `##` 标题切成块，检索在数据库里就带上访问控制，模型只有在余弦相似度（或显式开启的重排分数）超过开发集上调好的阈值时才会被调用。
+Lab Agent 回答实验室已经写下来的事实：集群约定、组会、项目笔记、论文笔记。上传的 Markdown 按 `##` 标题切成块，检索在数据库里就带上访问控制，模型只有在余弦相似度（或显式开启的重排分数）超过开发集上调好的阈值时才会被调用。
 
 下面的账号和密码只属于本地合成演示。`APP_ENV=prod` 时种子脚本会直接退出，不会写入这些账号。登录框只有在 `NEXT_PUBLIC_DEMO_HINTS=true` 时才预填密码；镜像构建默认是关闭的，`docker compose` 的本地演示才会打开。
 
 | 姓名 | 邮箱 | 角色 | 密码 |
 | --- | --- | --- | --- |
-| 沈昭 | admin@lab.local | 管理员 | `YanZheng-Demo-2026-Admin` |
-| 林可 | member@lab.local | 成员，可读项目赫利俄斯 | `YanZheng-Demo-2026-Member` |
-| 周宁 | member@lab.local | 成员，可读采购笔记，不能读赫利俄斯 | `YanZheng-Demo-2026-Zhou` |
-| 王敏 | viewer@lab.local | 查看者，不能上传 | `YanZheng-Demo-2026-Viewer` |
+| 沈昭 | admin@lab.local | 管理员 | `LabAgent-Demo-2026-Admin` |
+| 林可 | member@lab.local | 成员，可读项目赫利俄斯 | `LabAgent-Demo-2026-Member` |
+| 周宁 | member@lab.local | 成员，可读采购笔记，不能读赫利俄斯 | `LabAgent-Demo-2026-Zhou` |
+| 王敏 | viewer@lab.local | 查看者，不能上传 | `LabAgent-Demo-2026-Viewer` |
 
 界面默认中文，右上角可以切到英文。
 
@@ -27,6 +27,10 @@
 ./scripts/init-env.sh
 docker compose up --build
 ```
+
+> **升级提示（命名统一后的破坏性变化）**：
+> - 数据库用户名和库名已改为 `labagent`，旧的本地数据卷与 `.env` 不能继续使用。请执行 `docker compose down -v`，删除旧的 `.env`（或执行 `./scripts/init-env.sh --force`）后再重新启动。
+> - 会话与语言 Cookie 已改名为 `la_session`、`la_locale`，已登录的用户需要重新登录一次。
 
 浏览器打开 [http://127.0.0.1:43123](http://127.0.0.1:43123)。API 在 `43124`，Postgres 在 `55432`，Redis 在 `56379`。
 
@@ -56,7 +60,7 @@ uv run python -m evals.run_eval --check                  # 对照已提交的基
 
 ```mermaid
 flowchart LR
-  web["Next.js 研证"] --> api["FastAPI"]
+  web["Next.js Lab Agent"] --> api["FastAPI"]
   api --> agent["LangGraph"]
   agent --> retrieve["ACL search"]
   retrieve --> pg["Postgres + pgvector"]
@@ -111,4 +115,4 @@ cd backend && uv run pytest && uv run ruff check app evals tests && uv run mypy 
 cd frontend && npm run lint && npx tsc --noEmit
 ```
 
-Pytest uses the compose database `yanzheng_test` on port 55432 unless `TEST_DATABASE_URL` is set.
+Pytest uses the compose database `labagent_test` on port 55432 unless `TEST_DATABASE_URL` is set.

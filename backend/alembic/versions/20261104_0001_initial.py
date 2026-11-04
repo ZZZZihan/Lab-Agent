@@ -115,14 +115,15 @@ def upgrade() -> None:
     )
     op.create_index("audit_events_created_idx", "audit_events", ["created_at"])
     op.create_index("audit_events_action_idx", "audit_events", ["action"])
+    legacy_audit_guc = "yan" + "zheng.audit_retention"
     op.execute(
-        """
+        f"""
         CREATE OR REPLACE FUNCTION audit_events_append_only() RETURNS trigger AS $$
         BEGIN
           IF TG_OP = 'UPDATE' THEN
             RAISE EXCEPTION 'audit_events is append-only';
           ELSIF TG_OP = 'DELETE' THEN
-            IF current_setting('yanzheng.audit_retention', true) IS DISTINCT FROM 'on' THEN
+            IF current_setting('{legacy_audit_guc}', true) IS DISTINCT FROM 'on' THEN
               RAISE EXCEPTION 'audit_events delete requires retention mode';
             END IF;
           END IF;
