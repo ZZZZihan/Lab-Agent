@@ -28,11 +28,16 @@ class Actor:
     display_name: str
 
 
+UNUSABLE_PASSWORD_HASH = "!unusable"
+
+
 def hash_password(password: str) -> str:
     return _hasher.hash(password)
 
 
 def verify_password(password_hash: str, password: str) -> bool:
+    if password_hash.startswith("!"):
+        return False
     try:
         return bool(_hasher.verify(password_hash, password))
     except VerifyMismatchError:
@@ -50,7 +55,7 @@ def issue_token(user: User, settings: Settings) -> tuple[str, str, int]:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl)).timestamp()),
     }
-    token = jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+    token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm="HS256")
     return token, jti, ttl
 
 
@@ -67,7 +72,7 @@ async def authenticate_local(session: AsyncSession, token: str, settings: Settin
     if settings.oidc_issuer:
         return await authenticate_oidc(session, token, settings)
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        payload = jwt.decode(token, settings.jwt_secret.get_secret_value(), algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise PermissionError("invalid_token") from exc
     jti = str(payload.get("jti") or "")

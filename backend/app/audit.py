@@ -89,7 +89,7 @@ async def write_audit(
                 resource_type=resource_type,
                 resource_id=resource_id,
                 request_id=request_id,
-                ip_hash=hash_ip(ip, settings.jwt_secret),
+                ip_hash=hash_ip(ip, settings.jwt_secret.get_secret_value()),
                 detail=payload,
             )
         )

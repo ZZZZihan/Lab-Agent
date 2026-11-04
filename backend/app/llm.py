@@ -125,7 +125,7 @@ class OpenAICompatibleLLM:
         ]
         headers = {"Content-Type": "application/json"}
         if self.settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+            headers["Authorization"] = f"Bearer {self.settings.llm_api_key.get_secret_value()}"
         payload = {
             "model": self.model,
             "messages": messages,

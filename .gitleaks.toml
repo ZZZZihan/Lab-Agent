@@ -5,7 +5,6 @@ description = "Synthetic demo and test credentials. They are not production secr
 regexes = [
   '''(?:LabAgent|[Y]an[Z]heng)-Demo-2026-[A-Za-z]+''',
   '''(?:LabAgent|[Y]an[Z]heng)-Test-Password-[0-9]+''',
-  '''Eval-User-Not-For-Login-2026-xx''',
   '''test-only-jwt-secret-value-0123456789-abcdef''',
   '''ci-only-jwt-secret-value-0123456789-abcdef''',
 ]
