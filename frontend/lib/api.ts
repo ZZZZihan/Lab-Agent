@@ -4,28 +4,79 @@ export type Citation = {
   index?: number;
   chunk_id?: string;
   document_id?: string;
+  doc_key?: string | null;
+  chunk_index?: number;
   title?: string;
   heading?: string;
+  collection?: string;
   excerpt?: string;
   score?: number;
 };
 
-export type ChatEvent = {
-  type: string;
-  text?: string;
-  reason?: string;
+export type RetrievalHit = {
+  chunk_id: string;
+  document_id: string;
+  title?: string;
+  heading?: string;
   score?: number;
-  cosine?: number;
-  coverage?: number;
-  threshold?: number;
-  items?: Citation[];
-  neighbors?: Citation[];
-  paper_status?: string | null;
-  refused?: boolean;
-  conversation_id?: string;
+};
+
+export type RefusalReason = "no_hits" | "low_score" | "low_coverage" | "model_declined";
+
+export type TokenUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+/**
+ * SSE event contract emitted by POST /api/v1/chat/stream:
+ * - status:         { phase }
+ * - tool:           { name, status }
+ * - retrieval:      { mode, coverage, elapsed_ms, hits[], refused }
+ * - citations:      { items[], paper_status }
+ * - token:          { text }
+ * - citation_check: { used[], invalid[], uncited }
+ * - refusal:        { reason, score, cosine, coverage, threshold, neighbors[], paper_status? }
+ * - error:          { code }
+ * - done:           { conversation_id, message_id, refused, model, usage, error? }
+ */
+export type ChatEvent = {
+  type:
+    | "status"
+    | "tool"
+    | "retrieval"
+    | "citations"
+    | "token"
+    | "citation_check"
+    | "refusal"
+    | "error"
+    | "done"
+    | string;
+  phase?: string;
   name?: string;
   status?: string;
+  mode?: string;
+  coverage?: number;
+  elapsed_ms?: number;
+  hits?: RetrievalHit[];
+  refused?: boolean;
+  items?: Citation[];
+  paper_status?: string | null;
+  text?: string;
+  used?: number[];
+  invalid?: number[];
+  uncited?: boolean;
+  reason?: RefusalReason | string;
+  score?: number;
+  cosine?: number;
+  threshold?: number;
+  neighbors?: Citation[];
   code?: string;
+  conversation_id?: string;
+  message_id?: string;
+  model?: string;
+  usage?: TokenUsage;
+  error?: string;
 };
 
 export class ApiError extends Error {

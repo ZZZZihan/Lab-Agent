@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self, cast
@@ -52,6 +53,25 @@ def assert_strong_secret(value: str, name: str) -> None:
         raise RuntimeError(f"{name} has too little character variety")
 
 
+def extract_host_port(url: str | None) -> str | None:
+    if not url or not url.strip():
+        return None
+    raw = url.strip()
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urllib.parse.urlsplit(raw)
+    host = parsed.hostname
+    if not host:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return host
+    if port is not None:
+        return f"{host}:{port}"
+    return host
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(repo_root() / ".env"),
@@ -65,11 +85,18 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr
     jwt_ttl_minutes: int = 480
     cors_origins: str = "http://127.0.0.1:43123,http://localhost:43123"
-    llm_provider: Literal["fake", "openai", "deepseek", "ollama", "vllm"] = "fake"
+    llm_provider: Literal[
+        "fake", "openai", "deepseek", "ollama", "vllm", "openai_compatible"
+    ] = "fake"
     llm_base_url: str | None = None
     llm_api_key: SecretStr | None = None
     llm_api_key_file: str = ""
     llm_model: str = "fake-grounded-v1"
+    llm_timeout_seconds: float = 60.0
+    llm_max_retries: int = 2
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 800
+    llm_redact: bool = True
     embedder: Literal["hashing", "bge"] = "hashing"
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_dim: int = 512
@@ -129,7 +156,7 @@ class Settings(BaseSettings):
             self.llm_api_key and len(self.llm_api_key.get_secret_value()) >= 8
         ):
             raise RuntimeError(f"LLM_API_KEY is required for provider {self.llm_provider}")
-        if self.llm_base_url is None:
+        if self.llm_base_url is None or not self.llm_base_url.strip():
             defaults = {
                 "openai": "https://api.openai.com/v1",
                 "deepseek": "https://api.deepseek.com/v1",
@@ -139,6 +166,11 @@ class Settings(BaseSettings):
                 self.llm_base_url = defaults[self.llm_provider]
             elif self.llm_provider == "vllm":
                 raise RuntimeError("LLM_BASE_URL is required for vLLM")
+            elif self.llm_provider == "openai_compatible":
+                raise RuntimeError("LLM_BASE_URL is required for openai_compatible")
+        if self.llm_provider == "openai_compatible":
+            if not self.llm_model.strip() or self.llm_model.strip() == "fake-grounded-v1":
+                raise RuntimeError("LLM_MODEL must be explicitly set for openai_compatible")
         if self.llm_capture and self.app_env != "test":
             raise RuntimeError("LLM_CAPTURE is only allowed when APP_ENV=test")
         if not 1 <= self.audit_retention_days <= 3650:
@@ -183,6 +215,10 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [part.strip() for part in self.cors_origins.split(",") if part.strip()]
 
+    @property
+    def llm_base_host(self) -> str | None:
+        return extract_host_port(self.llm_base_url)
+
 
 def _pick[T](current: T | None, tuned: dict[str, object], key: str, default: T) -> T:
     if current is not None:
@@ -213,6 +249,7 @@ __all__ = [
     "MODES",
     "Settings",
     "assert_strong_secret",
+    "extract_host_port",
     "get_settings",
     "repo_root",
     "reset_settings_cache",

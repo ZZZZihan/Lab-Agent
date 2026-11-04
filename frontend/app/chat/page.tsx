@@ -1,14 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { type ChatEvent, type Citation } from "@/lib/api";
-import { useI18n } from "@/lib/i18n";
+import { type Copy, useI18n } from "@/lib/i18n";
+
+type CitationCheckState = {
+  used: number[];
+  invalid: number[];
+  uncited: boolean;
+};
 
 type Turn = {
   id: string;
@@ -19,6 +25,7 @@ type Turn = {
   refused?: boolean;
   refusal?: ChatEvent;
   citations: Citation[];
+  citationCheck?: CitationCheckState;
   paperStatus?: string | null;
   phase?: string;
 };
@@ -30,29 +37,79 @@ const SUGGESTIONS = [
   "实验室本科生宿舍在哪一栋？",
 ];
 
-function Citations({ items, label }: { items: Citation[]; label: string }) {
+function mapErrorCode(code: string | undefined, t: Copy): string {
+  if (code === "llm_unavailable") return t.llmUnavailable;
+  if (code === "embedding_unavailable") return t.embeddingUnavailable;
+  if (code === "unauthorized") return t.noSession;
+  return t.error;
+}
+
+function renderAnswerWithCitations(answer: string, turnId: string): ReactNode[] {
+  const parts = answer.split(/(\[[0-9]{1,2}\])/g);
+  return parts.map((part, idx) => {
+    const match = /^\[([0-9]{1,2})\]$/.exec(part);
+    if (!match) return <span key={idx}>{part}</span>;
+    const num = Number(match[1]);
+    const targetId = `citation-${turnId}-${num}`;
+    return (
+      <sup key={idx} className="mx-0.5">
+        <button
+          type="button"
+          className="cursor-pointer text-xs font-medium text-primary underline hover:opacity-80"
+          onClick={() => {
+            const el = document.getElementById(targetId);
+            el?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }}
+        >
+          [{num}]
+        </button>
+      </sup>
+    );
+  });
+}
+
+function Citations({
+  items,
+  label,
+  turnId,
+}: {
+  items: Citation[];
+  label: string;
+  turnId: string;
+}) {
   const { t } = useI18n();
   if (!items.length) return null;
   return (
     <div className="mt-3 grid gap-2">
       <p className="text-xs tracking-wide text-muted-foreground">{label}</p>
-      {items.map((item, index) => (
-        <div key={`${item.chunk_id || index}`} className="rounded-lg border border-border bg-background px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary">{item.heading || "—"}</Badge>
-            <span className="text-sm">{item.title}</span>
-            {typeof item.score === "number" ? (
-              <span className="text-xs text-muted-foreground">{item.score.toFixed(2)}</span>
+      {items.map((item, index) => {
+        const citeIndex = item.index ?? index + 1;
+        return (
+          <div
+            key={`${item.chunk_id || index}`}
+            id={`citation-${turnId}-${citeIndex}`}
+            className="rounded-lg border border-border bg-background px-3 py-2"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">[{citeIndex}]</Badge>
+              <Badge variant="secondary">{item.heading || "—"}</Badge>
+              <span className="text-sm">{item.title}</span>
+              {typeof item.score === "number" ? (
+                <span className="text-xs text-muted-foreground">{item.score.toFixed(2)}</span>
+              ) : null}
+            </div>
+            <p className="mt-2 text-sm leading-6">{item.excerpt}</p>
+            {item.document_id ? (
+              <Link
+                className="mt-2 inline-block text-xs text-primary underline"
+                href={`/documents/${item.document_id}`}
+              >
+                {t.openDoc}
+              </Link>
             ) : null}
           </div>
-          <p className="mt-2 text-sm leading-6">{item.excerpt}</p>
-          {item.document_id ? (
-            <Link className="mt-2 inline-block text-xs text-primary underline" href={`/documents/${item.document_id}`}>
-              {t.openDoc}
-            </Link>
-          ) : null}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -97,12 +154,31 @@ export default function ChatPage() {
             if (event.type === "citations") {
               return { ...turn, citations: event.items || [], paperStatus: event.paper_status };
             }
+            if (event.type === "citation_check") {
+              return {
+                ...turn,
+                citationCheck: {
+                  used: event.used || [],
+                  invalid: event.invalid || [],
+                  uncited: Boolean(event.uncited),
+                },
+              };
+            }
             if (event.type === "refusal") {
               return { ...turn, refused: true, refusal: event, paperStatus: event.paper_status };
             }
             if (event.type === "tool") return { ...turn, phase: event.name };
-            if (event.type === "error") return { ...turn, error: t.error, pending: false };
-            if (event.type === "done") return { ...turn, pending: false, refused: event.refused ?? turn.refused };
+            if (event.type === "error") {
+              return { ...turn, error: mapErrorCode(event.code, t), pending: false };
+            }
+            if (event.type === "done") {
+              return {
+                ...turn,
+                pending: false,
+                refused: event.refused ?? turn.refused,
+                error: event.error ? mapErrorCode(event.error, t) : turn.error,
+              };
+            }
             return turn;
           }),
         );
@@ -152,36 +228,70 @@ export default function ChatPage() {
           </div>
         ) : (
           <div className="grid gap-6">
-            {turns.map((turn) => (
-              <article key={turn.id} className="grid gap-3">
-                <p className="text-sm font-medium">{turn.question}</p>
-                {turn.refused && turn.refusal ? (
-                  <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
-                    <p className="font-medium text-destructive">{t.refusalTitle}</p>
-                    <p className="mt-1 text-sm">
-                      {t.score} {Number(turn.refusal.score || 0).toFixed(2)} · {t.threshold}{" "}
-                      {Number(turn.refusal.threshold || 0).toFixed(2)} · {t.coverage}{" "}
-                      {Number(turn.refusal.coverage || 0).toFixed(2)}
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">{t.refusalBody}</p>
-                    <Citations items={turn.refusal.neighbors || []} label={t.refusalBody} />
-                  </div>
-                ) : (
-                  <div className="rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10">
-                    {turn.pending && !turn.answer ? (
-                      <p className="text-sm text-muted-foreground">{turn.phase || t.asking}</p>
-                    ) : (
-                      <p className="whitespace-pre-wrap text-sm leading-7">{turn.answer}</p>
-                    )}
-                    <Citations items={turn.citations} label={t.citations} />
-                  </div>
-                )}
-                {turn.paperStatus === "not_configured" ? (
-                  <p className="text-xs text-muted-foreground">{t.paperNote}</p>
-                ) : null}
-                {turn.error ? <p className="text-sm text-destructive">{turn.error}</p> : null}
-              </article>
-            ))}
+            {turns.map((turn) => {
+              const isModelDeclined = turn.refusal?.reason === "model_declined";
+              const usedSet =
+                turn.citationCheck && turn.citationCheck.used.length > 0
+                  ? new Set(turn.citationCheck.used)
+                  : null;
+              const displayedCitations = usedSet
+                ? turn.citations.filter((c, i) => usedSet.has(c.index ?? i + 1))
+                : turn.citations;
+
+              return (
+                <article key={turn.id} className="grid gap-3">
+                  <p className="text-sm font-medium">{turn.question}</p>
+                  {turn.refused && turn.refusal ? (
+                    <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
+                      <p className="font-medium text-destructive">
+                        {isModelDeclined ? t.modelDeclinedTitle : t.refusalTitle}
+                      </p>
+                      <p className="mt-1 text-sm">
+                        {t.score} {Number(turn.refusal.score || 0).toFixed(2)} · {t.threshold}{" "}
+                        {Number(turn.refusal.threshold || 0).toFixed(2)} · {t.coverage}{" "}
+                        {Number(turn.refusal.coverage || 0).toFixed(2)}
+                      </p>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {isModelDeclined ? t.modelDeclinedBody : t.refusalBody}
+                      </p>
+                      <Citations
+                        items={turn.refusal.neighbors || []}
+                        label={isModelDeclined ? t.modelDeclinedBody : t.refusalBody}
+                        turnId={turn.id}
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10">
+                      {turn.pending && !turn.answer ? (
+                        <p className="text-sm text-muted-foreground">{turn.phase || t.asking}</p>
+                      ) : (
+                        <p className="whitespace-pre-wrap text-sm leading-7">
+                          {renderAnswerWithCitations(turn.answer, turn.id)}
+                        </p>
+                      )}
+                      {turn.citationCheck?.invalid && turn.citationCheck.invalid.length > 0 ? (
+                        <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                          {t.invalidCitationsNote}
+                          {turn.citationCheck.invalid.map((n) => `[${n}]`).join(", ")}
+                        </p>
+                      ) : null}
+                      {turn.citationCheck?.uncited ? (
+                        <p className="mt-2 text-xs text-muted-foreground">{t.uncitedNote}</p>
+                      ) : null}
+                      <Citations
+                        items={displayedCitations}
+                        label={turn.citationCheck?.uncited ? t.uncitedNote : t.citations}
+                        turnId={turn.id}
+                      />
+                    </div>
+                  )}
+                  {turn.paperStatus === "not_configured" ? (
+                    <p className="text-xs text-muted-foreground">{t.paperNote}</p>
+                  ) : null}
+                  {turn.error ? <p className="text-sm text-destructive">{turn.error}</p> : null}
+                </article>
+              );
+            })}
           </div>
         )}
         <form
