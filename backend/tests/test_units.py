@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 from app.audit import AuditRejected, sanitize_detail
-from app.config import Settings, assert_strong_secret
+from app.auth import UNUSABLE_PASSWORD_HASH, verify_password
+from app.config import Settings, assert_strong_secret, get_settings
 from app.rag.chunker import chunk_markdown, parse_front_matter
 from app.rag.redact import redact_text
 from app.rag.rrf import Hit, decide
+from app.secrets import read_secret
 from app.seed import assert_demo_seed_allowed
 from evals.metrics import tune
 
@@ -158,3 +160,112 @@ def test_app_import_does_not_pull_torch() -> None:
     # sentence-transformers may appear only inside a function.
     source = (root / "app" / "rag" / "embedder.py").read_text(encoding="utf-8")
     assert "import sentence_transformers" not in source.split("def __init__")[0]
+
+
+def test_secret_str_not_exposed_in_repr_or_dump() -> None:
+    jwt_plain = "test-only-jwt-secret-value-0123456789-abcdef"
+    llm_plain = "ci-only-jwt-secret-value-0123456789-abcdef"
+    default_settings = get_settings()
+    assert jwt_plain not in repr(default_settings)
+    assert jwt_plain not in str(default_settings.model_dump())
+
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret=jwt_plain,  # type: ignore[arg-type]
+        llm_provider="openai",
+        llm_api_key=llm_plain,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        load_tuned_config=False,
+    )
+    assert jwt_plain not in repr(settings)
+    assert llm_plain not in repr(settings)
+    assert jwt_plain not in str(settings.model_dump())
+    assert llm_plain not in str(settings.model_dump())
+    assert settings.jwt_secret.get_secret_value() == jwt_plain
+    assert settings.llm_api_key is not None
+    assert settings.llm_api_key.get_secret_value() == llm_plain
+
+
+def test_read_secret_precedence_and_error_redaction(tmp_path: Path) -> None:
+    file_val = "test-only-jwt-secret-value-0123456789-abcdef"
+    env_val = "ci-only-jwt-secret-value-0123456789-abcdef"
+    secret_file = tmp_path / "magpie.key"
+    secret_file.write_text(f"  {file_val}\n", encoding="utf-8")
+    secret_file.chmod(0o600)
+
+    resolved_env = read_secret(env_val, str(secret_file), "LLM_API_KEY")
+    assert resolved_env is not None
+    assert resolved_env.get_secret_value() == env_val
+
+    resolved_file = read_secret(None, str(secret_file), "LLM_API_KEY")
+    assert resolved_file is not None
+    assert resolved_file.get_secret_value() == file_val
+
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        llm_provider="openai",
+        llm_api_key=None,
+        llm_api_key_file=str(secret_file),
+        cors_origins="http://localhost:43123",
+        load_tuned_config=False,
+    )
+    assert settings.llm_api_key is not None
+    assert settings.llm_api_key.get_secret_value() == file_val
+
+    empty_file = tmp_path / "empty.key"
+    empty_file.write_text("   \n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="LLM_API_KEY file is empty"):
+        read_secret(None, str(empty_file), "LLM_API_KEY")
+
+    sentinel = "SENTINEL_FILE_CONTENT_DO_NOT_LEAK"
+    bad_utf8_file = tmp_path / "bad_utf8.key"
+    bad_utf8_file.write_bytes(sentinel.encode("utf-8") + b"\xff\xfe")
+    with pytest.raises(RuntimeError) as exc_bad_utf8:
+        read_secret(None, str(bad_utf8_file), "LLM_API_KEY")
+    assert sentinel not in str(exc_bad_utf8.value)
+    assert sentinel not in repr(exc_bad_utf8.value)
+    assert "LLM_API_KEY" in str(exc_bad_utf8.value)
+    assert str(bad_utf8_file) in str(exc_bad_utf8.value)
+
+    multiline_file = tmp_path / "multiline.key"
+    multiline_file.write_text(f"{sentinel}\nextra-line\n", encoding="utf-8")
+    with pytest.raises(RuntimeError) as exc_multiline:
+        read_secret(None, str(multiline_file), "LLM_API_KEY")
+    assert sentinel not in str(exc_multiline.value)
+    assert sentinel not in repr(exc_multiline.value)
+    assert "LLM_API_KEY" in str(exc_multiline.value)
+    assert str(multiline_file) in str(exc_multiline.value)
+
+    short_sentinel = "SNTNL7"
+    short_file = tmp_path / "short.key"
+    short_file.write_text(short_sentinel, encoding="utf-8")
+    with pytest.raises(RuntimeError) as exc_short:
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+            jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            llm_provider="openai",
+            llm_api_key=None,
+            llm_api_key_file=str(short_file),
+            cors_origins="http://localhost:43123",
+            load_tuned_config=False,
+        )
+    assert short_sentinel not in str(exc_short.value)
+    assert short_sentinel not in repr(exc_short.value)
+
+    open_file = tmp_path / "open_perms.key"
+    open_file.write_text(file_val, encoding="utf-8")
+    open_file.chmod(0o644)
+    prod_resolved = read_secret(None, str(open_file), "LLM_API_KEY", app_env="prod")
+    assert prod_resolved is not None
+    assert prod_resolved.get_secret_value() == file_val
+
+
+def test_unusable_password_hash_never_verifies() -> None:
+    assert verify_password(UNUSABLE_PASSWORD_HASH, "!unusable") is False
+    assert verify_password(UNUSABLE_PASSWORD_HASH, "") is False
+    assert verify_password("!anything", "anything") is False
+

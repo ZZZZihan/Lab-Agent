@@ -9,7 +9,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from app.auth import hash_password
+from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
 from app.models import User
@@ -72,10 +72,14 @@ async def _prepare(settings: object) -> User:
                 email="eval@lab.local",
                 display_name="评测",
                 role="admin",
-                password_hash=hash_password("Eval-User-Not-For-Login-2026-xx"),
-                is_active=True,
+                password_hash=UNUSABLE_PASSWORD_HASH,
+                is_active=False,
             )
             session.add(user)
+            await session.flush()
+        else:
+            user.password_hash = UNUSABLE_PASSWORD_HASH
+            user.is_active = False
             await session.flush()
         count = await replace_source(
             session,

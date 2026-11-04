@@ -7,8 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self, cast
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.secrets import read_secret
 
 PLACEHOLDERS = {
     "changeme",
@@ -60,12 +62,13 @@ class Settings(BaseSettings):
     app_env: Literal["dev", "test", "prod"] = "dev"
     database_url: str
     redis_url: str = "redis://127.0.0.1:56379/0"
-    jwt_secret: str
+    jwt_secret: SecretStr
     jwt_ttl_minutes: int = 480
     cors_origins: str = "http://127.0.0.1:43123,http://localhost:43123"
     llm_provider: Literal["fake", "openai", "deepseek", "ollama", "vllm"] = "fake"
     llm_base_url: str | None = None
-    llm_api_key: str | None = None
+    llm_api_key: SecretStr | None = None
+    llm_api_key_file: str = ""
     llm_model: str = "fake-grounded-v1"
     embedder: Literal["hashing", "bge"] = "hashing"
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
@@ -107,7 +110,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce(self) -> Self:
-        assert_strong_secret(self.jwt_secret, "JWT_SECRET")
+        assert_strong_secret(self.jwt_secret.get_secret_value(), "JWT_SECRET")
         if self.embedding_dim != 512:
             raise RuntimeError(
                 "EMBEDDING_DIM must stay 512 so hashing and bge-small-zh-v1.5 share one column"
@@ -116,8 +119,14 @@ class Settings(BaseSettings):
         if not origins or any(origin == "*" for origin in origins):
             raise RuntimeError("CORS_ORIGINS must be an explicit list and cannot contain *")
         self.cors_origins = ",".join(origins)
+        self.llm_api_key = read_secret(
+            self.llm_api_key.get_secret_value() if self.llm_api_key is not None else None,
+            self.llm_api_key_file or None,
+            "LLM_API_KEY",
+            app_env=self.app_env,
+        )
         if self.llm_provider not in {"fake", "ollama"} and not (
-            self.llm_api_key and len(self.llm_api_key) >= 8
+            self.llm_api_key and len(self.llm_api_key.get_secret_value()) >= 8
         ):
             raise RuntimeError(f"LLM_API_KEY is required for provider {self.llm_provider}")
         if self.llm_base_url is None:

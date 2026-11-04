@@ -236,3 +236,39 @@ async def test_audit_is_append_only(client: AsyncClient) -> None:
         remaining = await session.scalar(text("SELECT count(*) FROM audit_events"))
         assert not remaining
 
+
+async def test_eval_account_is_locked_and_cannot_login(client: AsyncClient) -> None:
+    from app.auth import UNUSABLE_PASSWORD_HASH
+    from app.config import get_settings
+    from evals.run_eval import _prepare
+    from sqlalchemy import select
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        session.add(
+            User(
+                email="eval@lab.local",
+                display_name="评测",
+                role="admin",
+                password_hash=hash_password(PASSWORD),
+                is_active=True,
+            )
+        )
+        await session.commit()
+
+    await _prepare(get_settings())
+
+    async with maker() as session:
+        eval_user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
+        assert eval_user is not None
+        assert eval_user.password_hash == UNUSABLE_PASSWORD_HASH
+        assert eval_user.is_active is False
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "eval@lab.local", "password": PASSWORD},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_credentials"
+
+
