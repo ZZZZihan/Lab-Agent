@@ -783,42 +783,31 @@ async def _evaluate_path(
 
 
 def _make_path_settings(base: Settings, **overrides: Any) -> Settings:
-    params: dict[str, Any] = {
-        "_env_file": None,
-        "app_env": base.app_env,
-        "database_url": base.database_url,
-        "redis_url": base.redis_url,
-        "jwt_secret": base.jwt_secret.get_secret_value(),
-        "cors_origins": base.cors_origins,
-        "embedder": base.embedder,
-        "embedding_base_url": base.embedding_base_url,
-        "embedding_api_key": (
-            base.embedding_api_key.get_secret_value()
-            if base.embedding_api_key is not None
-            else None
-        ),
-        "embedding_api_key_file": base.embedding_api_key_file,
-        "embedding_model": base.embedding_model,
-        "embedding_model_version": base.embedding_model_version,
-        "embedding_dim": base.embedding_dim,
-        "embedding_native_dim": base.embedding_native_dim,
-        "embedding_truncate": base.embedding_truncate,
-        "embedding_send_dimensions": base.embedding_send_dimensions,
-        "embedding_storage": base.embedding_storage,
-        "embedding_index": base.embedding_index,
-        "embedding_prefix_dim": base.embedding_prefix_dim,
-        "embedding_query_template": base.embedding_query_template,
-        "embedding_query_instruction": base.embedding_query_instruction,
-        "embedding_document_prefix": base.embedding_document_prefix,
-        "embedding_batch_size": base.embedding_batch_size,
-        "embedding_timeout_seconds": base.embedding_timeout_seconds,
-        "embedding_max_retries": base.embedding_max_retries,
-        "embedding_redact": base.embedding_redact,
-        "calibration_dir": base.calibration_dir,
-        "load_tuned_config": True,
+    from pydantic import SecretStr
+
+    tuning_fields = {
+        "retrieval_mode",
+        "dense_pool",
+        "lexical_pool",
+        "rrf_k",
+        "evidence_score_min",
+        "cite_margin",
+        "cite_k",
+        "rare_coverage_min",
+        "calibration_source",
     }
-    for field_name in getattr(base, "_explicit_tuning_fields", frozenset()):
-        params.setdefault(field_name, getattr(base, field_name))
+    explicit_tuning: frozenset[str] = getattr(
+        base, "_explicit_tuning_fields", frozenset()
+    )
+    params: dict[str, Any] = {"_env_file": None}
+    for field_name in Settings.model_fields:
+        if field_name in tuning_fields and field_name not in explicit_tuning:
+            continue
+        val = getattr(base, field_name)
+        if isinstance(val, SecretStr):
+            val = val.get_secret_value()
+        params[field_name] = val
+    params["load_tuned_config"] = True
     params.update(overrides)
     return Settings(**params)
 

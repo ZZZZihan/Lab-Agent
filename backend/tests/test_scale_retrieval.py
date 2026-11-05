@@ -679,6 +679,47 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
         )
         assert derived_no_pools.dense_pool == 80
         assert derived_no_pools.lexical_pool == 80
+
+        # 8. Verify _make_path_settings preserves all non-tuning Settings fields (e.g. prod secrets)
+        for env_key in (
+            "APP_ENV",
+            "EMBEDDER",
+            "EMBEDDING_DIM",
+            "EMBEDDING_STORAGE",
+            "EMBEDDING_INDEX",
+            "EMBEDDING_MODEL",
+            "LLM_PROVIDER",
+            "LLM_CAPTURE",
+        ):
+            mp.delenv(env_key, raising=False)
+        env_prod = tmp_path / "prod.env"
+        env_prod.write_text(
+            "APP_ENV=prod\n"
+            f"DATABASE_URL={get_settings().database_url}\n"
+            "REDIS_URL=redis://127.0.0.1:56379/1\n"
+            f"JWT_SECRET={JWT_SECRET}\n"
+            f"INTERNAL_PROXY_SECRET={JWT_SECRET}-proxy\n"
+            f"AUDIT_HMAC_KEY={JWT_SECRET}-audit\n"
+            "EMBEDDER=openai_compatible\n"
+            "EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1\n"
+            "EMBEDDING_MODEL=qwen3-embedding:8b\n"
+            "EMBEDDING_MODEL_VERSION=64b933495768\n"
+            "EMBEDDING_DIM=4096\n"
+            "EMBEDDING_NATIVE_DIM=4096\n"
+            "EMBEDDING_STORAGE=halfvec\n",
+            encoding="utf-8",
+        )
+        base_prod = Settings(_env_file=str(env_prod))  # type: ignore[call-arg]
+        derived_prod = _make_path_settings(
+            base_prod,
+            embedding_index="hnsw_prefix",
+            embedding_prefix_dim=1024,
+        )
+        assert derived_prod.app_env == "prod"
+        assert derived_prod.internal_proxy_secret is not None
+        assert derived_prod.internal_proxy_secret.get_secret_value() == f"{JWT_SECRET}-proxy"
+        assert derived_prod.audit_hmac_key is not None
+        assert derived_prod.audit_hmac_key.get_secret_value() == f"{JWT_SECRET}-audit"
     finally:
         mp.undo()
 
