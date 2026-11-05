@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +71,35 @@ function mapToolPhase(name: string | undefined, t: Copy): string {
   return t.asking;
 }
 
+function reconstructCitationCheck(
+  answer: string,
+  citations: Citation[],
+  refused: boolean,
+): CitationCheckState | undefined {
+  if (refused) return undefined;
+  const validIndices = new Set(citations.map((c, idx) => c.index ?? idx + 1));
+  const used: number[] = [];
+  const invalid: number[] = [];
+  for (const match of answer.matchAll(/\[([0-9]{1,2})\]/g)) {
+    const num = Number(match[1]);
+    if (validIndices.has(num)) {
+      if (!used.includes(num)) {
+        used.push(num);
+      }
+    } else if (!invalid.includes(num)) {
+      invalid.push(num);
+    }
+  }
+  if (citations.length === 0 && used.length === 0 && invalid.length === 0) {
+    return undefined;
+  }
+  return {
+    used,
+    invalid,
+    uncited: used.length === 0,
+  };
+}
+
 function messagesToTurns(messages: StoredMessage[]): Turn[] {
   const result: Turn[] = [];
   for (const msg of messages) {
@@ -83,11 +112,14 @@ function messagesToTurns(messages: StoredMessage[]): Turn[] {
         citations: [],
       });
     } else if (msg.role === "assistant") {
+      const citations = Array.isArray(msg.citations) ? msg.citations : [];
+      const citationCheck = reconstructCitationCheck(msg.content, citations, msg.refused);
       const last = result[result.length - 1];
       if (last && !last.answer && !last.refused) {
         last.answer = msg.content;
         last.refused = msg.refused;
-        last.citations = Array.isArray(msg.citations) ? msg.citations : [];
+        last.citations = citations;
+        last.citationCheck = citationCheck;
       } else {
         result.push({
           id: msg.id,
@@ -95,7 +127,8 @@ function messagesToTurns(messages: StoredMessage[]): Turn[] {
           answer: msg.content,
           pending: false,
           refused: msg.refused,
-          citations: Array.isArray(msg.citations) ? msg.citations : [],
+          citations,
+          citationCheck,
         });
       }
     }
@@ -181,6 +214,10 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const activeSelectionRef = useRef<string | null>(null);
+  const historyRequestIdRef = useRef(0);
+  const uiLocked = busy || loadingHistory || deletingId !== null;
 
   const loadConversations = useCallback(async () => {
     try {
@@ -208,44 +245,58 @@ export default function ChatPage() {
   }, []);
 
   async function selectConversation(id: string) {
-    if (busy || loadingHistory) return;
+    if (busy || loadingHistory || deletingId !== null) return;
+    const reqId = ++historyRequestIdRef.current;
     setLoadingHistory(true);
     try {
       const detail = await api<ConversationDetail>(`conversations/${id}`);
+      if (historyRequestIdRef.current !== reqId) return;
+      activeSelectionRef.current = detail.id;
       setConversationId(detail.id);
       setTurns(messagesToTurns(detail.messages || []));
     } catch {
       // Keep current state if loading fails
     } finally {
-      setLoadingHistory(false);
+      if (historyRequestIdRef.current === reqId) {
+        setLoadingHistory(false);
+      }
     }
   }
 
   function startNewConversation() {
-    if (busy) return;
+    if (busy || loadingHistory || deletingId !== null) return;
+    historyRequestIdRef.current += 1;
+    activeSelectionRef.current = null;
     setConversationId(null);
     setTurns([]);
     setDraft("");
   }
 
   async function handleDeleteConversation(id: string) {
-    if (busy) return;
+    if (busy || loadingHistory || deletingId !== null) return;
+    setDeletingId(id);
     try {
       await api(`conversations/${id}`, { method: "DELETE" });
       setConversations((current) => current.filter((c) => c.id !== id));
-      if (conversationId === id) {
+      if (activeSelectionRef.current === id) {
+        historyRequestIdRef.current += 1;
+        activeSelectionRef.current = null;
         setConversationId(null);
         setTurns([]);
       }
     } catch {
       // Ignore delete error
+    } finally {
+      setDeletingId(null);
     }
   }
 
   async function ask(question: string) {
     const text = question.trim();
-    if (!text || busy) return;
+    if (!text || busy || loadingHistory || deletingId !== null) return;
+    historyRequestIdRef.current += 1;
     const id = crypto.randomUUID();
+    const targetConversationId = activeSelectionRef.current;
     setDraft("");
     setBusy(true);
     setTurns((current) => [
@@ -254,8 +305,8 @@ export default function ChatPage() {
     ]);
     try {
       const payload: { message: string; conversation_id?: string } = { message: text };
-      if (conversationId) {
-        payload.conversation_id = conversationId;
+      if (targetConversationId) {
+        payload.conversation_id = targetConversationId;
       }
       const response = await fetch("/api/backend/chat/stream", {
         method: "POST",
@@ -276,6 +327,7 @@ export default function ChatPage() {
       const apply = (event: ChatEvent) => {
         if (event.type === "done" && event.conversation_id) {
           resolvedConvId = event.conversation_id;
+          activeSelectionRef.current = event.conversation_id;
           setConversationId(event.conversation_id);
         }
         setTurns((current) =>
@@ -352,7 +404,7 @@ export default function ChatPage() {
               type="button"
               variant="outline"
               size="sm"
-              disabled={busy}
+              disabled={uiLocked}
               onClick={startNewConversation}
             >
               {t.newConversation}
@@ -374,7 +426,7 @@ export default function ChatPage() {
                     <button
                       type="button"
                       className="min-w-0 flex-1 truncate text-left"
-                      disabled={busy || loadingHistory}
+                      disabled={uiLocked}
                       onClick={() => void selectConversation(conv.id)}
                       title={conv.title}
                     >
@@ -383,7 +435,7 @@ export default function ChatPage() {
                     <button
                       type="button"
                       className="shrink-0 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-destructive"
-                      disabled={busy}
+                      disabled={uiLocked}
                       onClick={() => void handleDeleteConversation(conv.id)}
                       aria-label={t.deleteConversation}
                     >
@@ -407,7 +459,8 @@ export default function ChatPage() {
                   <button
                     key={item}
                     type="button"
-                    className="rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-muted"
+                    disabled={uiLocked}
+                    className="rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
                     onClick={() => void ask(item)}
                   >
                     {item}
@@ -503,7 +556,7 @@ export default function ChatPage() {
             />
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-xs text-muted-foreground">{t.independentTurnNote}</p>
-              <Button type="submit" disabled={busy || !draft.trim()}>
+              <Button type="submit" disabled={uiLocked || !draft.trim()}>
                 {busy ? t.asking : t.send}
               </Button>
             </div>
