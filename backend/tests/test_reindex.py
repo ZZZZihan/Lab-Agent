@@ -284,7 +284,9 @@ async def test_startup_lifespan_fails_on_index_mismatch_and_health_reports_field
                 assert body["embedding_dim"] == 512
                 assert body["embedding_storage"] == "vector"
                 assert body["embedding_fingerprint"] == s_512.embedding_fingerprint
+                assert body["index_ok"] is True
                 assert body["embedding_index_ok"] is True
+                assert body["embedding_index"] == "hnsw"
                 assert body["embedding_base_host"] is None
                 assert body["calibrated"] is True
                 assert body["calibration_source"] == f"{s_512.embedding_slug}.json"

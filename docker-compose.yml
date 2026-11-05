@@ -37,11 +37,16 @@ services:
       REDIS_URL: redis://redis:6379/0
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET}
       CORS_ORIGINS: http://127.0.0.1:43123,http://localhost:43123
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:3425/v1}
+      LLM_API_KEY_FILE: /run/secrets/magpie_key
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
       UPLOAD_DIR: /app/data/uploads
       CALIBRATION_DIR: /app/data/calibrations
       LOAD_TUNED_CONFIG: "true"
       CORPUS_DIR: /opt/lab-agent/evals/data/v1/corpus
       SEED_ONLY_DIR: /opt/lab-agent/evals/data/v1/seed_only
+    secrets:
+      - magpie_key
     ports:
       - "127.0.0.1:43124:8000"
     extra_hosts:
@@ -89,3 +94,8 @@ volumes:
   pgdata:
   uploads:
   calibrations:
+
+secrets:
+  magpie_key:
+    file: ${LAB_AGENT_MAGPIE_KEY_FILE:-~/.config/lab-agent/magpie.key}
+
