@@ -73,35 +73,95 @@ class HashingEmbedder:
 
 
 class BGEEmbedder:
-    """Optional BAAI/bge-small-zh-v1.5. Imported only when selected."""
+    """Optional local SentenceTransformer embedder (e.g. BAAI/bge-small-zh-v1.5). Imported only when selected."""
 
-    def __init__(self, model_name: str, dim: int) -> None:
+    def __init__(
+        self,
+        model_name: str | Settings,
+        dim: int | None = None,
+        *,
+        revision: str = "",
+        query_template: str = "{query}",
+        query_instruction: str = "",
+        document_prefix: str = "",
+        redact: bool = False,
+        device: str = "cpu",
+    ) -> None:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise RuntimeError(
                 "EMBEDDER=bge requires the optional extra: uv sync --extra bge"
             ) from exc
-        self.model = SentenceTransformer(model_name)
-        self.name = model_name
+
+        if isinstance(model_name, Settings):
+            settings = model_name
+            resolved_model = settings.embedding_model
+            resolved_dim = settings.embedding_dim if dim is None else dim
+            resolved_revision = settings.embedding_model_version.strip()
+            resolved_query_template = settings.embedding_query_template
+            resolved_query_instruction = settings.embedding_query_instruction
+            resolved_document_prefix = settings.embedding_document_prefix
+            resolved_redact = settings.embedding_redact
+        else:
+            if dim is None:
+                raise TypeError("BGEEmbedder(model_name, dim) requires dim when model_name is str")
+            resolved_model = model_name
+            resolved_dim = dim
+            resolved_revision = revision.strip()
+            resolved_query_template = query_template.replace("\\n", "\n")
+            resolved_query_instruction = query_instruction
+            resolved_document_prefix = document_prefix
+            resolved_redact = redact
+
+        st_kwargs: dict[str, Any] = {"device": device}
+        if resolved_revision:
+            st_kwargs["revision"] = resolved_revision
+
+        self.model = SentenceTransformer(resolved_model, **st_kwargs)
+        self.name = resolved_model
         self.kind = "bge"
-        self.dim = dim
+        self.dim = resolved_dim
+        self.revision = resolved_revision
+        self.query_template = resolved_query_template
+        self.query_instruction = resolved_query_instruction
+        self.document_prefix = resolved_document_prefix
+        self.redact = resolved_redact
+        self.device = device
+
         probe = self.model.encode(["维度检查"], normalize_embeddings=True)[0]
-        if len(probe) != dim:
+        if len(probe) != self.dim:
             raise RuntimeError(
-                f"{model_name} produced dimension {len(probe)}, column is {dim}. "
-                "bge-m3 needs a migration; this build is fixed at 512."
+                f"{self.name} produced dimension {len(probe)}, configured EMBEDDING_DIM is {self.dim}."
             )
 
+    def _prepare_document(self, text: str) -> str:
+        raw = text if text.strip() else "__empty__"
+        if self.redact:
+            raw, _ = redact_text(raw)
+        if self.document_prefix:
+            return f"{self.document_prefix}{raw}"
+        return raw
+
+    def _prepare_query(self, text: str) -> str:
+        raw = text if text.strip() else "__empty__"
+        if self.redact:
+            raw, _ = redact_text(raw)
+        return self.query_template.format(instruction=self.query_instruction, query=raw)
+
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        prepared = [self._prepare_document(item) for item in texts]
         vectors = await asyncio.to_thread(
-            self.model.encode, texts, normalize_embeddings=True
+            self.model.encode, prepared, normalize_embeddings=True
         )
         return [list(map(float, row)) for row in vectors]
 
     async def embed_query(self, text: str) -> list[float]:
+        prepared = self._prepare_query(text)
         vectors = await asyncio.to_thread(
-            self.model.encode, [text], normalize_embeddings=True
+            self.model.encode, [prepared], normalize_embeddings=True
         )
         return [float(value) for value in vectors[0]]
 
@@ -287,7 +347,7 @@ def build_embedder(settings: Settings) -> Embedder:
     if settings.embedder == "hashing":
         return HashingEmbedder(settings.embedding_dim)
     if settings.embedder == "bge":
-        return BGEEmbedder(settings.embedding_model, settings.embedding_dim)
+        return BGEEmbedder(settings)
     if settings.embedder == "openai_compatible":
         return OpenAICompatibleEmbedder(settings)
     raise RuntimeError(f"Unknown embedder {settings.embedder}")

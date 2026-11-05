@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,7 @@ from app.embed_check import (
     UNRELATED_QUERY,
     run_embed_check,
 )
-from app.rag.embedder import EmbeddingError, OpenAICompatibleEmbedder, build_embedder
+from app.rag.embedder import BGEEmbedder, EmbeddingError, OpenAICompatibleEmbedder, build_embedder
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
 DB_URL = "postgresql+asyncpg://labagent:labagent@localhost/labagent"
@@ -396,3 +398,79 @@ async def test_embed_check_success_and_failure() -> None:
     built = build_embedder(settings)
     assert isinstance(built, OpenAICompatibleEmbedder)
     await built.aclose()
+
+
+async def test_bge_embedder_applies_query_template_not_on_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded_inputs: list[list[str]] = []
+    init_calls: list[dict[str, Any]] = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            init_calls.append({"model_name": model_name, **kwargs})
+
+        def encode(self, texts: list[str], *, normalize_embeddings: bool = False) -> list[list[float]]:
+            assert normalize_embeddings is True
+            encoded_inputs.append(list(texts))
+            return [[1.0] + [0.0] * 63 for _ in texts]
+
+    fake_module = types.ModuleType("sentence_transformers")
+    fake_module.SentenceTransformer = FakeSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+    instruction = "為這個句子生成表示以用於檢索相關文章："
+    settings = _make_settings(
+        embedder="bge",
+        embedding_base_url=None,
+        embedding_model="BAAI/bge-small-zh-v1.5",
+        embedding_model_version="a1b2c3d4e5f67890",
+        embedding_dim=64,
+        embedding_native_dim=None,
+        embedding_query_template=r"Instruct: {instruction}\nQuery:{query}",
+        embedding_query_instruction=instruction,
+        embedding_document_prefix="",
+        embedding_redact=False,
+    )
+
+    embedder = build_embedder(settings)
+    assert isinstance(embedder, BGEEmbedder)
+    assert init_calls == [
+        {
+            "model_name": "BAAI/bge-small-zh-v1.5",
+            "device": "cpu",
+            "revision": "a1b2c3d4e5f67890",
+        }
+    ]
+    assert encoded_inputs == [["维度检查"]]
+
+    await embedder.embed_query("GPU 预约入口")
+    assert encoded_inputs[-1] == [f"Instruct: {instruction}\nQuery:GPU 预约入口"]
+
+    await embedder.embed_documents(["第一篇文档正文", "第二篇文档正文"])
+    assert encoded_inputs[-1] == ["第一篇文档正文", "第二篇文档正文"]
+
+    # Also verify optional document_prefix and redaction when configured
+    settings_prefixed = _make_settings(
+        embedder="bge",
+        embedding_base_url=None,
+        embedding_model="BAAI/bge-small-zh-v1.5",
+        embedding_model_version="",
+        embedding_dim=64,
+        embedding_native_dim=None,
+        embedding_query_template="query: {query}",
+        embedding_document_prefix="passage: ",
+        embedding_redact=True,
+    )
+    embedder_prefixed = BGEEmbedder(settings_prefixed)
+    assert init_calls[-1] == {"model_name": "BAAI/bge-small-zh-v1.5", "device": "cpu"}
+
+    await embedder_prefixed.embed_query("联系 sec@qingheng.lab")
+    assert encoded_inputs[-1] == ["query: 联系 [REDACTED_EMAIL]"]
+
+    await embedder_prefixed.embed_documents(["   ", "邮箱 sec@qingheng.lab"])
+    assert encoded_inputs[-1] == ["passage: __empty__", "passage: 邮箱 [REDACTED_EMAIL]"]
+    assert await embedder_prefixed.embed_documents([]) == []
+    await embedder.aclose()
+    await embedder_prefixed.aclose()
+
