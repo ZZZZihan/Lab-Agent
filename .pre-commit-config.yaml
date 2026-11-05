@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        args: ["--config=.gitleaks.toml", "--redact"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        files: ^backend/(app|evals|tests)/
+        args: ["--config=backend/pyproject.toml"]
+      - id: ruff-format
+        files: ^backend/(app|evals|tests)/
+        args: ["--check", "--config=backend/pyproject.toml"]

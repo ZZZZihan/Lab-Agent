@@ -81,6 +81,7 @@ Retrieval SQL and direct document reads use the same rule: admins see everything
 | **安全与审计** | `APP_ENV` / `JWT_SECRET` / `JWT_TTL_MINUTES` | 运行环境（`dev`/`test`/`prod`）、强校验 JWT 密钥（`SecretStr`）与会话有效期 |
 | **安全与审计** | `INTERNAL_PROXY_SECRET` | Next.js 代理透传 `X-Client-IP` 的共享 HMAC 密钥（`APP_ENV=prod` 时必填） |
 | **安全与审计** | `AUDIT_HMAC_KEY` | 审计客户端 IP 哈希专用 HMAC 密钥（`SecretStr`，`APP_ENV=prod` 时必填，`init-env.sh` 自动生成；`dev` 未设置时回退到 `JWT_SECRET` 并告警。注意：更换这个密钥后，新旧 IP 哈希无法关联） |
+| **安全与审计** | `REDIS_PASSWORD` / `REDIS_URL` | Compose Redis 鉴权密码（`init-env.sh` 自动生成，通过 `--requirepass` 启用）与连接 URL |
 | **安全与审计** | `RATE_LIMIT_ENABLED` / `LOGIN_IP_RATE_LIMIT` / `LOGIN_IP_RATE_WINDOW_SECONDS` / `LOGIN_ACCOUNT_RATE_LIMIT` / `LOGIN_ACCOUNT_RATE_WINDOW_SECONDS` | 登录双桶限流（按 IP 默认 30 次/60 秒，按账号默认 10 次/900 秒） |
 | **安全与审计** | `CHAT_RATE_LIMIT` / `CHAT_RATE_WINDOW_SECONDS` / `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_WINDOW_SECONDS` | 问答与文档上传按用户限流 |
 | **安全与审计** | `AUDIT_RETENTION_DAYS` | 审计保留天数（`1–3650`，默认 `180`） |
@@ -103,4 +104,4 @@ The model is called only after a decision score clears a threshold that was fit 
 
 ## Dependencies and history
 
-Continuous integration runs gitleaks on full history, `pip-audit`, and `npm audit --audit-level=high`, plus the test suite. The default embedder is a local hashing embedder so CI never downloads weights.
+Continuous integration runs gitleaks on full history, `pip-audit`, `npm audit --audit-level=high`, Trivy container vulnerability scanning (failing on `HIGH` / `CRITICAL` vulnerabilities with available fixes), and SPDX SBOM generation (`anchore/sbom-action`), plus the test suite. Both Docker images pin base images by SHA-256 digest and run as non-root users (`uid=10001` for `api`, `node` for `web`). The default embedder in CI is a local hashing embedder so CI never downloads weights.

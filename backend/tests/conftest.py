@@ -14,17 +14,25 @@ from sqlalchemy import text
 
 _ENV = Path(__file__).resolve().parents[2] / ".env"
 _password = os.environ.get("POSTGRES_PASSWORD", "labagent")
+_redis_password = os.environ.get("REDIS_PASSWORD", "")
 if _ENV.is_file():
     for line in _ENV.read_text(encoding="utf-8").splitlines():
         if line.startswith("POSTGRES_PASSWORD="):
             _password = line.split("=", 1)[1].strip()
+        elif line.startswith("REDIS_PASSWORD="):
+            _redis_password = line.split("=", 1)[1].strip()
 
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL",
     f"postgresql+asyncpg://labagent:{_password}@127.0.0.1:55432/labagent_test",
 )
-os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "redis://127.0.0.1:56379/1")
+_default_redis_url = (
+    f"redis://:{_redis_password}@127.0.0.1:56379/1"
+    if _redis_password
+    else "redis://127.0.0.1:56379/1"
+)
+os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", _default_redis_url)
 os.environ["JWT_SECRET"] = "test-only-jwt-secret-value-0123456789-abcdef"
 os.environ["LOAD_TUNED_CONFIG"] = "false"
 os.environ["EVIDENCE_SCORE_MIN"] = "0"
