@@ -38,6 +38,8 @@ MODES = (
     "hybrid_lexical_rerank15",
 )
 
+REDACTION_VERSION = 2
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -400,7 +402,11 @@ class Settings(BaseSettings):
                 f"{self.embedding_model}@{version[:12]}" if version else self.embedding_model
             )
         storage_suffix = "h" if self.embedding_storage == "halfvec" else ""
-        redact_flag = 0 if self.embedder == "hashing" else (1 if self.embedding_redact else 0)
+        redact_flag = (
+            "0"
+            if self.embedder == "hashing" or not self.embedding_redact
+            else f"v{REDACTION_VERSION}"
+        )
         qp_text = "" if self.embedder == "hashing" else self.render_query("")
         dp_text = "" if self.embedder == "hashing" else self.embedding_document_prefix
         qp_hash = hashlib.sha256(qp_text.encode("utf-8")).hexdigest()[:8]
@@ -451,6 +457,7 @@ def reset_settings_cache() -> None:
 __all__ = [
     "Field",
     "MODES",
+    "REDACTION_VERSION",
     "Settings",
     "assert_strong_secret",
     "extract_host_port",

@@ -341,7 +341,11 @@ def test_settings_validation_and_fingerprint_change_rules() -> None:
     assert _make_settings(embedding_model_version="9704fd987c12").embedding_fingerprint != fp_base
     assert _make_settings(embedding_dim=128, embedding_native_dim=128).embedding_fingerprint != fp_base
     assert _make_settings(embedding_storage="halfvec").embedding_fingerprint != fp_base
-    assert _make_settings(embedding_redact=True).embedding_fingerprint != fp_base
+    fp_redact = _make_settings(embedding_redact=True)
+    assert fp_redact.embedding_fingerprint != fp_base
+    assert "|redact=v2|" in fp_redact.embedding_fingerprint
+    assert "-redact-v2-" in fp_redact.embedding_slug
+    assert "|redact=0|" in fp_base
     assert (
         _make_settings(
             embedding_query_template=r"Instruct: {instruction}\nQuery:{query}",
