@@ -136,7 +136,7 @@ jobs:
           docker build -f backend/Dockerfile -t lab-agent-api:ci .
           docker build -f frontend/Dockerfile -t lab-agent-web:ci .
       - name: Trivy scan backend image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: lab-agent-api:ci
           format: table
@@ -145,7 +145,7 @@ jobs:
           vuln-type: os,library
           severity: CRITICAL,HIGH
       - name: Trivy scan frontend image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: lab-agent-web:ci
           format: table
