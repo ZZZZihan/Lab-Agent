@@ -77,19 +77,87 @@ def test_wildcard_cors_rejected() -> None:
 
 
 def test_redacts_contact_identifiers() -> None:
-    text = "联系 sec@qingheng.lab 或 13812345678，身份证 11010119900307887X。"
+    text = (
+        "联系 sec@qingheng.lab 或 13812345678，座机 010-62785432 / 075586012345，"
+        "身份证 11010119900307887X，银行卡 4532015112830366 与 6222021234567890128，"
+        "护照 E12345678、G87654321、P11223344。"
+    )
     cleaned, count = redact_text(text)
-    assert count == 3
+    assert count == 10
     assert "sec@qingheng.lab" not in cleaned
     assert "13812345678" not in cleaned
+    assert "010-62785432" not in cleaned
+    assert "075586012345" not in cleaned
     assert "11010119900307887X" not in cleaned
+    assert "4532015112830366" not in cleaned
+    assert "6222021234567890128" not in cleaned
+    assert "E12345678" not in cleaned
+    assert "G87654321" not in cleaned
+    assert "P11223344" not in cleaned
     assert "[REDACTED_EMAIL]" in cleaned
+    assert cleaned.count("[REDACTED_PHONE]") == 3
+    assert "[REDACTED_ID]" in cleaned
+    assert cleaned.count("[REDACTED_CARD]") == 2
+    assert cleaned.count("[REDACTED_PASSPORT]") == 3
+
+
+def test_redact_false_positives_and_v1_corpus() -> None:
+    from app.config import REDACTION_VERSION
+
+    assert REDACTION_VERSION == 2
+
+    # False-positive cases for each rule:
+    # - IP/CIDR, dates, HX-17, version numbers, meeting IDs
+    # - 16-digit number failing Luhn (4532015112830367)
+    # - 9-digit / lowercase / hyphenated passport-like tokens (E123456789, e12345678, E-12345678)
+    benign = (
+        "内网网段 10.0.0.0/16 与 192.168.1.1/24，日期 2026-09-12 与 2026-11-05，"
+        "代号 HX-17，版本 v0.10.1234567 与 0.8.0-pg16，会议室号 883-102-447，"
+        "非 Luhn 16 位单号 4532015112830367，提交哈希 e12345678 与编号 E123456789、E-12345678。"
+    )
+    cleaned_benign, count_benign = redact_text(benign)
+    assert count_benign == 0
+    assert cleaned_benign == benign
+
+    # Run redaction over the entire v1 corpus (and seed_only) and assert only expected hits
+    corpus_hits: dict[str, tuple[int, str]] = {}
+    for folder in ("corpus", "seed_only"):
+        folder_path = ROOT / "evals" / "data" / "v1" / folder
+        for md_file in sorted(folder_path.glob("*.md")):
+            raw = md_file.read_text(encoding="utf-8")
+            cleaned, count = redact_text(raw)
+            if count > 0:
+                corpus_hits[md_file.name] = (count, cleaned)
+            else:
+                assert cleaned == raw
+
+    assert list(corpus_hits.keys()) == ["safety-compute.md"]
+    safety_count, safety_cleaned = corpus_hits["safety-compute.md"]
+    assert safety_count == 1
+    assert "sec@qingheng.lab" not in safety_cleaned
+    assert "[REDACTED_EMAIL]" in safety_cleaned
 
 
 def test_audit_rejects_prompt_text() -> None:
     with pytest.raises(AuditRejected):
         sanitize_detail({"prompt": "用户的原问题"})
-    sanitize_detail({"model": "fake-grounded-v1", "prompt_tokens": 12, "hit_ids": ["abc"]})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"note": "请联系 sec@qingheng.lab 处理"})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"contact": "13812345678"})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"contact": "010-62785432"})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"items": ["ok", "user@example.org"]})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"items": ["ok", "+86 13800138000"]})
+    sanitize_detail(
+        {
+            "model": "fake-grounded-v1",
+            "prompt_tokens": 12,
+            "hit_ids": ["abc", "01234567-89ab-cdef-0123-456789abcdef"],
+        }
+    )
 
 
 def test_chunker_keeps_heading_with_its_fact() -> None:

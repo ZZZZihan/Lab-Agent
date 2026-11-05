@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db import get_sessionmaker
 from app.models import AuditEvent
+from app.rag.redact import contains_email_or_phone
 
 GENESIS_PREV_HASH = "0" * 64
 AUDIT_ADVISORY_LOCK_ID = 727274
@@ -73,16 +74,22 @@ def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
     for key, value in (detail or {}).items():
         if key.lower() in FORBIDDEN_KEYS:
             raise AuditRejected(f"audit field not allowed: {key}")
-        if isinstance(value, str) and len(value) > 200:
-            raise AuditRejected("audit string too long")
+        if isinstance(value, str):
+            if len(value) > 200:
+                raise AuditRejected("audit string too long")
+            if contains_email_or_phone(value):
+                raise AuditRejected("audit string value contains email or phone")
         if isinstance(value, list):
             if len(value) > 80:
                 raise AuditRejected("audit list too long")
             for item in value:
                 if not isinstance(item, (str, int, float)):
                     raise AuditRejected("audit list values must be scalars")
-                if isinstance(item, str) and len(item) > 80:
-                    raise AuditRejected("audit list item too long")
+                if isinstance(item, str):
+                    if len(item) > 80:
+                        raise AuditRejected("audit list item too long")
+                    if contains_email_or_phone(item):
+                        raise AuditRejected("audit list item contains email or phone")
         elif isinstance(value, dict):
             raise AuditRejected("nested audit objects are not allowed")
         elif not isinstance(value, (str, int, float, bool)) and value is not None:
