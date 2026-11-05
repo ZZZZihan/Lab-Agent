@@ -16,6 +16,9 @@ from evals.report import run_report
 from evals.run_eval import (
     _gold_map,
     _load_questions,
+    _prepare,
+    _resolve_corpus_dir,
+    _resolve_questions_path,
     compute_dataset_manifest,
     verify_dataset_manifest,
 )
@@ -248,3 +251,88 @@ def test_v2_committed_results_and_report_sync() -> None:
     assert "| `v2` |" in readme_text
     assert "| `v1` |" in results_readme_text
     assert "| `v2` |" in results_readme_text
+
+
+async def test_v2_dataset_path_resolution_and_seed_only_acl_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.acl import Principal
+    from app.config import get_settings, reset_settings_cache
+    from app.db import dispose_engine, get_sessionmaker
+    from app.models import Document
+    from app.rag.embedder import build_embedder
+    from app.rag.retrieve import search_knowledge
+    from sqlalchemy import select
+
+    # 1. Even when docker-compose v1 defaults are set in CORPUS_DIR / QUESTIONS_PATH,
+    # --dataset v2 resolves to evals/data/v2/corpus and evals/data/v2/questions.jsonl.
+    monkeypatch.setenv("CORPUS_DIR", "/opt/lab-agent/evals/data/v1/corpus")
+    monkeypatch.setenv("QUESTIONS_PATH", "/opt/lab-agent/evals/data/v1/questions.jsonl")
+    reset_settings_cache()
+    try:
+        s = get_settings()
+        assert _resolve_corpus_dir(s, "v2") == V2_CORPUS_DIR
+        assert _resolve_questions_path(s, "v2") == V2_QUESTIONS_PATH
+    finally:
+        monkeypatch.delenv("CORPUS_DIR", raising=False)
+        monkeypatch.delenv("QUESTIONS_PATH", raising=False)
+        reset_settings_cache()
+
+    # 2. _prepare ingests seed_only into source="eval" under a separate owner and gives
+    # the evaluation user role="member", so SQL ACL filtering actively blocks seed_only docs
+    # for the evaluation user while an admin principal can retrieve them from source="eval".
+    settings = get_settings()
+    user = await _prepare(settings, corpus_dir=V2_CORPUS_DIR)
+    assert user.role == "member"
+
+    embedder = build_embedder(settings)
+    maker = get_sessionmaker()
+    try:
+        async with maker() as session:
+            eval_seed_docs = list(
+                await session.scalars(
+                    select(Document).where(
+                        Document.source == "eval",
+                        Document.doc_key.in_(
+                            ["private-mentor-eval", "restricted-patent-draft"]
+                        ),
+                    )
+                )
+            )
+            assert len(eval_seed_docs) == 2
+            for sdoc in eval_seed_docs:
+                assert sdoc.owner_id != user.id
+                assert sdoc.visibility in {"private", "restricted"}
+
+            query = "2026秋季导师私下转博评估备忘录中推迟转博答辩的博士生"
+            member_bundle = await search_knowledge(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=Principal(id=user.id, role=user.role),
+                query=query,
+                mode="dense",
+                source="eval",
+                limit=None,
+            )
+            member_keys = {str(h["key"]).split("#", 1)[0] for h in member_bundle.hits}
+            assert "private-mentor-eval" not in member_keys
+            assert "restricted-patent-draft" not in member_keys
+
+            admin_bundle = await search_knowledge(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=Principal(id=user.id, role="admin"),
+                query=query,
+                mode="dense",
+                source="eval",
+                limit=None,
+            )
+            admin_keys = {str(h["key"]).split("#", 1)[0] for h in admin_bundle.hits}
+            assert "private-mentor-eval" in admin_keys
+            assert "restricted-patent-draft" in admin_keys
+    finally:
+        await embedder.aclose()
+        await dispose_engine()
+

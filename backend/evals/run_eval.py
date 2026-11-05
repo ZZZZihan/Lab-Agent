@@ -22,7 +22,7 @@ from app.db import dispose_engine, get_sessionmaker
 from app.models import User
 from app.rag.chunker import chunk_document
 from app.rag.embedder import Embedder, build_embedder
-from app.rag.ingest import read_corpus_dir, replace_source
+from app.rag.ingest import ingest_text, read_corpus_dir, replace_source
 from app.rag.retrieve import search_knowledge
 from app.rag.tokenize import content_tokens
 from sqlalchemy import select, text
@@ -119,31 +119,38 @@ def verify_dataset_manifest(dataset_dir: Path) -> dict[str, object]:
 
 async def _prepare(settings: object, corpus_dir: Path | None = None) -> User:
     from app.config import Settings
+    from app.ingest_worker import process_next_pending
+    from app.rag.index_meta import column_type
+    from app.reindex import apply_reindex
 
     assert isinstance(settings, Settings)
     resolved_corpus_dir = corpus_dir or Path(settings.corpus_dir)
     embedder = build_embedder(settings)
     maker = get_sessionmaker()
     try:
+        rebuilt = False
         async with maker() as session:
-            from app.rag.index_meta import column_type
-            from app.reindex import apply_reindex
-
             col_storage, col_dim = await column_type(session)
             if (col_storage, col_dim) != (settings.embedding_storage, settings.embedding_dim):
-                await apply_reindex(session, settings, embedder, if_needed=True)
+                rebuilt = await apply_reindex(session, settings, embedder, if_needed=True)
+        if rebuilt:
+            while await process_next_pending(embedder, settings) is not None:
+                pass
+
+        async with maker() as session:
             user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
             if user is None:
                 user = User(
                     email="eval@lab.local",
                     display_name="评测",
-                    role="admin",
+                    role="member",
                     password_hash=UNUSABLE_PASSWORD_HASH,
                     is_active=False,
                 )
                 session.add(user)
                 await session.flush()
             else:
+                user.role = "member"
                 user.password_hash = UNUSABLE_PASSWORD_HASH
                 user.is_active = False
                 await session.flush()
@@ -154,6 +161,43 @@ async def _prepare(settings: object, corpus_dir: Path | None = None) -> User:
                 source="eval",
                 records=_read_corpus(resolved_corpus_dir),
             )
+            seed_only_dir = resolved_corpus_dir.parent / "seed_only"
+            if seed_only_dir.is_dir():
+                seed_only_records = _read_corpus(seed_only_dir)
+                if seed_only_records:
+                    acl_owner = await session.scalar(
+                        select(User).where(User.email == "eval-acl-owner@qingheng.lab")
+                    )
+                    if acl_owner is None:
+                        acl_owner = User(
+                            email="eval-acl-owner@qingheng.lab",
+                            display_name="评测ACL所有者",
+                            role="admin",
+                            password_hash=UNUSABLE_PASSWORD_HASH,
+                            is_active=False,
+                        )
+                        session.add(acl_owner)
+                        await session.flush()
+                    else:
+                        acl_owner.role = "admin"
+                        acl_owner.password_hash = UNUSABLE_PASSWORD_HASH
+                        acl_owner.is_active = False
+                        await session.flush()
+                    for meta, body in seed_only_records:
+                        key = meta.get("key")
+                        await ingest_text(
+                            session,
+                            embedder=embedder,
+                            owner_id=acl_owner.id,
+                            title=meta.get("title") or key or "未命名",
+                            text=body,
+                            collection=meta.get("collection") or "knowledge",
+                            visibility=meta.get("visibility") or "private",
+                            source="eval",
+                            source_format=meta.get("source_format") or "markdown",
+                            doc_key=key,
+                            storage=settings.embedding_storage,
+                        )
             await session.commit()
             print(f"ingested {count} eval documents with embedder={embedder.name}")
             return user
@@ -351,6 +395,53 @@ def _git_sha(root: Path) -> str:
     return "unknown"
 
 
+def _is_v1_default_path(raw: str | Path, suffix_parts: tuple[str, ...]) -> bool:
+    p = Path(raw)
+    return len(p.parts) >= len(suffix_parts) and p.parts[-len(suffix_parts) :] == suffix_parts
+
+
+def _resolve_corpus_dir(settings: object, dataset: str = "v1") -> Path:
+    from app.config import Settings
+
+    assert isinstance(settings, Settings)
+    root = repo_root()
+    if dataset == "v1":
+        return Path(settings.corpus_dir)
+    dataset_corpus = root / "evals" / "data" / dataset / "corpus"
+    env_override = os.environ.get("CORPUS_DIR", "").strip()
+    if env_override and not _is_v1_default_path(env_override, ("evals", "data", "v1", "corpus")):
+        return Path(env_override)
+    if (
+        settings.corpus_dir
+        and not _is_v1_default_path(settings.corpus_dir, ("evals", "data", "v1", "corpus"))
+    ):
+        return Path(settings.corpus_dir)
+    return dataset_corpus
+
+
+def _resolve_questions_path(settings: object, dataset: str = "v1") -> Path:
+    from app.config import Settings
+
+    assert isinstance(settings, Settings)
+    root = repo_root()
+    if dataset == "v1":
+        return Path(settings.questions_path)
+    dataset_questions = root / "evals" / "data" / dataset / "questions.jsonl"
+    env_override = os.environ.get("QUESTIONS_PATH", "").strip()
+    if env_override and not _is_v1_default_path(
+        env_override, ("evals", "data", "v1", "questions.jsonl")
+    ):
+        return Path(env_override)
+    if (
+        settings.questions_path
+        and not _is_v1_default_path(
+            settings.questions_path, ("evals", "data", "v1", "questions.jsonl")
+        )
+    ):
+        return Path(settings.questions_path)
+    return dataset_questions
+
+
 async def _run(
     tune_dev: bool,
     check: bool,
@@ -362,9 +453,9 @@ async def _run(
     slug = settings.embedding_slug
     fingerprint = settings.embedding_fingerprint
     runtime_dir = Path(settings.calibration_dir)
+    corpus_dir = _resolve_corpus_dir(settings, dataset)
+    questions_path = _resolve_questions_path(settings, dataset)
     if dataset == "v1":
-        corpus_dir = Path(settings.corpus_dir)
-        questions_path = Path(settings.questions_path)
         repo_cal_path = root / "evals" / "calibrations" / f"{slug}.json"
         repo_results_path = root / "evals" / "results" / "v1" / f"{slug}.json"
         runtime_cal_path = runtime_dir / f"{slug}.json"
@@ -372,16 +463,6 @@ async def _run(
     else:
         dataset_dir = root / "evals" / "data" / dataset
         verify_dataset_manifest(dataset_dir)
-        corpus_dir = (
-            Path(os.environ["CORPUS_DIR"])
-            if os.environ.get("CORPUS_DIR")
-            else dataset_dir / "corpus"
-        )
-        questions_path = (
-            Path(os.environ["QUESTIONS_PATH"])
-            if os.environ.get("QUESTIONS_PATH")
-            else dataset_dir / "questions.jsonl"
-        )
         repo_cal_path = root / "evals" / "calibrations" / dataset / f"{slug}.json"
         repo_results_path = root / "evals" / "results" / dataset / f"{slug}.json"
         runtime_cal_path = runtime_dir / dataset / f"{slug}.json"
