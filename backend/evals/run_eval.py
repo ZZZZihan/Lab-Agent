@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -19,9 +20,9 @@ from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
 from app.models import User
-from app.rag.chunker import chunk_markdown, parse_front_matter
+from app.rag.chunker import chunk_document
 from app.rag.embedder import Embedder, build_embedder
-from app.rag.ingest import replace_source
+from app.rag.ingest import read_corpus_dir, replace_source
 from app.rag.retrieve import search_knowledge
 from app.rag.tokenize import content_tokens
 from sqlalchemy import select, text
@@ -46,11 +47,11 @@ def _load_questions(path: Path) -> list[dict[str, object]]:
 
 def _gold_map(corpus_dir: Path) -> dict[tuple[str, str], str]:
     mapping: dict[tuple[str, str], str] = {}
-    for file in sorted(corpus_dir.glob("*.md")):
-        meta, body = parse_front_matter(file.read_text(encoding="utf-8"))
+    for meta, body in _read_corpus(corpus_dir):
         key = meta["key"]
+        source_format = meta.get("source_format") or "markdown"
         seen: set[str] = set()
-        for chunk in chunk_markdown(body):
+        for chunk in chunk_document(body, source_format):
             if chunk.heading in seen:
                 raise RuntimeError(f"duplicate heading {key} / {chunk.heading}")
             seen.add(chunk.heading)
@@ -59,16 +60,68 @@ def _gold_map(corpus_dir: Path) -> dict[tuple[str, str], str]:
 
 
 def _read_corpus(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
-    records = []
-    for file in sorted(corpus_dir.glob("*.md")):
-        records.append(parse_front_matter(file.read_text(encoding="utf-8")))
-    return records
+    return read_corpus_dir(corpus_dir)
 
 
-async def _prepare(settings: object) -> User:
+def compute_dataset_manifest(dataset_dir: Path) -> dict[str, object]:
+    files: dict[str, str] = {}
+    for path in sorted(dataset_dir.rglob("*")):
+        if not path.is_file() or path.name == "MANIFEST.json":
+            continue
+        rel = path.relative_to(dataset_dir).as_posix()
+        files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    questions_file = dataset_dir / "questions.jsonl"
+    test_lines: list[str] = []
+    if questions_file.is_file():
+        for line in questions_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                if row.get("split") == "test":
+                    test_lines.append(json.dumps(row, ensure_ascii=False, sort_keys=True))
+    test_split_sha256 = hashlib.sha256("\n".join(test_lines).encode("utf-8")).hexdigest()
+    return {
+        "dataset": dataset_dir.name,
+        "test_split_sha256": test_split_sha256,
+        "files": files,
+    }
+
+
+def verify_dataset_manifest(dataset_dir: Path) -> dict[str, object]:
+    manifest_path = dataset_dir / "MANIFEST.json"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"Missing dataset manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = compute_dataset_manifest(dataset_dir)
+    recorded_files = manifest.get("files")
+    if not isinstance(recorded_files, dict):
+        raise RuntimeError(f"Invalid MANIFEST.json structure in {manifest_path}")
+    actual_files = expected["files"]
+    assert isinstance(actual_files, dict)
+    if set(recorded_files.keys()) != set(actual_files.keys()):
+        missing = sorted(set(recorded_files.keys()) - set(actual_files.keys()))
+        extra = sorted(set(actual_files.keys()) - set(recorded_files.keys()))
+        raise RuntimeError(
+            f"Dataset manifest file list mismatch: missing={missing}, extra={extra}"
+        )
+    for rel_path, expected_sha in recorded_files.items():
+        actual_sha = actual_files[rel_path]
+        if actual_sha != expected_sha:
+            raise RuntimeError(
+                f"Dataset file hash mismatch for {rel_path}: expected {expected_sha}, got {actual_sha}"
+            )
+    if (
+        "test_split_sha256" in manifest
+        and manifest["test_split_sha256"] != expected["test_split_sha256"]
+    ):
+        raise RuntimeError("Dataset test_split_sha256 mismatch in MANIFEST.json")
+    return manifest
+
+
+async def _prepare(settings: object, corpus_dir: Path | None = None) -> User:
     from app.config import Settings
 
     assert isinstance(settings, Settings)
+    resolved_corpus_dir = corpus_dir or Path(settings.corpus_dir)
     embedder = build_embedder(settings)
     maker = get_sessionmaker()
     try:
@@ -99,7 +152,7 @@ async def _prepare(settings: object) -> User:
                 embedder=embedder,
                 owner_id=user.id,
                 source="eval",
-                records=_read_corpus(Path(settings.corpus_dir)),
+                records=_read_corpus(resolved_corpus_dir),
             )
             await session.commit()
             print(f"ingested {count} eval documents with embedder={embedder.name}")
@@ -150,13 +203,19 @@ def _latency_summary(values: list[float]) -> dict[str, float]:
     }
 
 
-async def _featurize(settings: object, user: User, questions: list[dict[str, object]]) -> list[dict[str, object]]:
+async def _featurize(
+    settings: object,
+    user: User,
+    questions: list[dict[str, object]],
+    corpus_dir: Path | None = None,
+) -> list[dict[str, object]]:
     from app.acl import Principal, load_user_group_ids
     from app.config import Settings
 
     assert isinstance(settings, Settings)
+    resolved_corpus_dir = corpus_dir or Path(settings.corpus_dir)
     embedder = _TimingEmbedder(build_embedder(settings))
-    gold_map = _gold_map(Path(settings.corpus_dir))
+    gold_map = _gold_map(resolved_corpus_dir)
     maker = get_sessionmaker()
     features: list[dict[str, object]] = []
     try:
@@ -292,26 +351,51 @@ def _git_sha(root: Path) -> str:
     return "unknown"
 
 
-async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
+async def _run(
+    tune_dev: bool,
+    check: bool,
+    commit: bool = False,
+    dataset: str = "v1",
+) -> None:
     settings = get_settings()
     root = repo_root()
     slug = settings.embedding_slug
     fingerprint = settings.embedding_fingerprint
     runtime_dir = Path(settings.calibration_dir)
-    repo_cal_path = root / "evals" / "calibrations" / f"{slug}.json"
-    repo_results_path = root / "evals" / "results" / "v1" / f"{slug}.json"
-    runtime_cal_path = runtime_dir / f"{slug}.json"
-    runtime_results_path = runtime_dir / f"results-{slug}.json"
+    if dataset == "v1":
+        corpus_dir = Path(settings.corpus_dir)
+        questions_path = Path(settings.questions_path)
+        repo_cal_path = root / "evals" / "calibrations" / f"{slug}.json"
+        repo_results_path = root / "evals" / "results" / "v1" / f"{slug}.json"
+        runtime_cal_path = runtime_dir / f"{slug}.json"
+        runtime_results_path = runtime_dir / f"results-{slug}.json"
+    else:
+        dataset_dir = root / "evals" / "data" / dataset
+        verify_dataset_manifest(dataset_dir)
+        corpus_dir = (
+            Path(os.environ["CORPUS_DIR"])
+            if os.environ.get("CORPUS_DIR")
+            else dataset_dir / "corpus"
+        )
+        questions_path = (
+            Path(os.environ["QUESTIONS_PATH"])
+            if os.environ.get("QUESTIONS_PATH")
+            else dataset_dir / "questions.jsonl"
+        )
+        repo_cal_path = root / "evals" / "calibrations" / dataset / f"{slug}.json"
+        repo_results_path = root / "evals" / "results" / dataset / f"{slug}.json"
+        runtime_cal_path = runtime_dir / dataset / f"{slug}.json"
+        runtime_results_path = runtime_dir / dataset / f"results-{slug}.json"
 
     if check and not (tune_dev and commit) and not repo_results_path.is_file():
         print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)
         raise SystemExit(3)
 
-    questions = _load_questions(Path(settings.questions_path))
+    questions = _load_questions(questions_path)
     if len(questions) < 60:
         raise SystemExit(f"eval set has {len(questions)} questions, need at least 60")
-    user = await _prepare(settings)
-    features = await _featurize(settings, user, questions)
+    user = await _prepare(settings, corpus_dir=corpus_dir)
+    features = await _featurize(settings, user, questions, corpus_dir=corpus_dir)
     chunks_table_bytes = await _chunks_table_bytes()
     embed_latencies = [float(row.get("embed_ms") or 0.0) for row in features]  # type: ignore[arg-type]
     search_latencies = [float(row.get("elapsed_ms") or 0.0) for row in features]  # type: ignore[arg-type]
@@ -398,7 +482,7 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         selected_params["lexical_pool"] = 80
         calibration_payload = {
             "embedder_fingerprint": fingerprint,
-            "dataset": "v1",
+            "dataset": dataset,
             "split_used": "dev",
             "tuned_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "git_sha": _git_sha(root),
@@ -427,8 +511,8 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         except ValueError:
             reindex_duration_s = None
     report: dict[str, object] = {
-        "label": f"{slug}-v1",
-        "dataset": "v1",
+        "label": f"{slug}-{dataset}",
+        "dataset": dataset,
         "generated_at": generated_at,
         "git_sha": git_sha,
         "embedder_fingerprint": fingerprint,
@@ -463,6 +547,7 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
     print(
         json.dumps(
             {
+                "dataset": dataset,
                 "selected_mode": selected_mode,
                 "chunks_table_bytes": chunks_table_bytes,
                 "query_embedding_latency_ms": query_embedding_latency_ms,
@@ -491,6 +576,12 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        choices=("v1", "v2"),
+        default=os.environ.get("DATASET_VERSION", "v1"),
+        help="Dataset version to evaluate (default: v1)",
+    )
     parser.add_argument("--tune", action="store_true", help="Fit thresholds on dev and write calibration")
     parser.add_argument(
         "--commit",
@@ -500,7 +591,7 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="Fail if test metrics drift from the committed baseline")
     args = parser.parse_args()
     command.upgrade(Config(str(repo_root() / "backend" / "alembic.ini")), "head")
-    asyncio.run(_run(tune_dev=args.tune, check=args.check, commit=args.commit))
+    asyncio.run(_run(tune_dev=args.tune, check=args.check, commit=args.commit, dataset=args.dataset))
 
 
 if __name__ == "__main__":

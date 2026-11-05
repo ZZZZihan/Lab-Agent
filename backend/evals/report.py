@@ -64,19 +64,27 @@ def _load_result_records(
             continue
         if "embedder_fingerprint" not in doc or "modes" not in doc:
             continue
+        inferred_dataset = str(
+            doc.get("dataset")
+            or (path.parent.name if path.parent != results_dir else "v1")
+        )
         cal_doc: dict[str, Any] = {}
-        cal_path = calibrations_dir / path.name
-        if cal_path.is_file():
-            try:
-                loaded_cal = json.loads(cal_path.read_text(encoding="utf-8"))
-                if isinstance(loaded_cal, dict):
-                    cal_doc = loaded_cal
-            except Exception:
-                pass
+        for cal_path in (
+            calibrations_dir / inferred_dataset / path.name,
+            calibrations_dir / path.name,
+        ):
+            if cal_path.is_file():
+                try:
+                    loaded_cal = json.loads(cal_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded_cal, dict):
+                        cal_doc = loaded_cal
+                        break
+                except Exception:
+                    pass
         dataset = str(
             doc.get("dataset")
             or cal_doc.get("dataset")
-            or (path.parent.name if path.parent != results_dir else "v1")
+            or inferred_dataset
         )
         raw_date = (
             doc.get("generated_at")

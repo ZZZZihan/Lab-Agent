@@ -269,36 +269,69 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
     from app.rag.rrf import decision_score
 
     scores: list[float] = []
+    precomputed: list[tuple[bool, list[Hit], float, set[str], float]] = []
     for row in rows:
         ranked = _ranked_keys(row, mode, rrf_k)
         if ranked:
             scores.append(decision_score(ranked[0], mode))
+        keys = [str(hit["key"]) for hit in ranked]
+        cov = coverage_of(row, ranked)
+        gold = _gold(row)
+        is_ans = bool(row["answerable"])
+        r5 = recall_at_k(keys, gold, 5) if is_ans else 0.0
+        precomputed.append((is_ans, ranked, cov, gold, r5))
+    mean_r5 = round(_avg([r5 for is_ans, _, _, _, r5 in precomputed if is_ans]), 6)
     best_key: tuple[float, ...] | None = None
     best_params: dict[str, Any] | None = None
     for score_min in _thresholds(scores):
         for rare_min in (0.0, 0.35, 0.55, 0.75):
             for margin in (0.05, 0.12, 0.25, 1.0):
                 for cite_k in (1, 2, 3, 4):
-                    params = {
-                        "rrf_k": rrf_k,
-                        "evidence_score_min": score_min,
-                        "rare_coverage_min": rare_min,
-                        "cite_margin": margin,
-                        "cite_k": cite_k,
-                        "dense_pool": 80,
-                        "lexical_pool": 80,
-                        "retrieval_mode": mode,
-                    }
-                    metrics = evaluate(rows, mode=mode, params=params, include_ci=False)
+                    refusal_sum = 0.0
+                    citation_sum = 0.0
+                    false_refusal_sum = 0.0
+                    ans_count = 0
+                    for is_ans, ranked, cov, gold, _ in precomputed:
+                        decision = decide(
+                            ranked,
+                            mode=mode,
+                            score_min=float(score_min),
+                            rare_coverage=cov,
+                            rare_min=float(rare_min),
+                            margin=float(margin),
+                            cite_k=int(cite_k),
+                        )
+                        refused = decision["refused"]
+                        if (is_ans and not refused) or (not is_ans and refused):
+                            refusal_sum += 1.0
+                        if is_ans:
+                            ans_count += 1
+                            cited = {str(hit["key"]) for hit in decision["citations"]}
+                            citation_sum += f1(cited, gold)
+                            if refused:
+                                false_refusal_sum += 1.0
+                    n_total = len(precomputed)
+                    refusal_corr = refusal_sum / n_total if n_total else 0.0
+                    cit_f1 = citation_sum / ans_count if ans_count else 0.0
+                    false_ref = false_refusal_sum / ans_count if ans_count else 0.0
                     key = (
-                        round(metric_value(metrics["refusal_correctness"]), 6),
-                        round(metric_value(metrics["citation_f1"]), 6),
-                        round(-metric_value(metrics["false_refusal_rate"]), 6),
-                        round(metric_value(metrics["recall_at_5"]), 6),
+                        round(refusal_corr, 6),
+                        round(cit_f1, 6),
+                        round(-false_ref, 6),
+                        mean_r5,
                     )
                     if best_key is None or key > best_key:
                         best_key = key
-                        best_params = params
+                        best_params = {
+                            "rrf_k": rrf_k,
+                            "evidence_score_min": score_min,
+                            "rare_coverage_min": rare_min,
+                            "cite_margin": margin,
+                            "cite_k": cite_k,
+                            "dense_pool": 80,
+                            "lexical_pool": 80,
+                            "retrieval_mode": mode,
+                        }
     if best_params is None:
         raise RuntimeError("tuner received no rows")
     return {
