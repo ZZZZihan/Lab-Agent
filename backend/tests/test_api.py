@@ -2025,4 +2025,200 @@ async def test_maintenance_task_delete_expired_revoked_tokens(
         assert await session.get(RevokedToken, "active-jti-002") is not None
 
 
+async def test_audit_filters_csv_export_and_hmac_key(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    import csv
+    import io
+    from datetime import UTC, datetime, timedelta
+
+    from app.audit import hash_ip, write_audit
+    from app.main import app
+    from pydantic import SecretStr
+
+    del people
+    admin = await _login(client, "admin@lab.local")
+    member = await _login(client, "member@lab.local")
+
+    doc_id = await _upload(
+        client,
+        member,
+        title="审计过滤与导出测试",
+        body="## 第一节\n测试审计过滤参数和 CSV 导出。",
+        visibility="lab",
+    )
+
+    # Non-admin cannot export CSV
+    forbidden_csv = await client.get("/api/v1/audit/export.csv", headers=member)
+    assert forbidden_csv.status_code == 403
+
+    # Filter by resource_id
+    by_res = await client.get(
+        f"/api/v1/audit?resource_id={doc_id}&limit=50", headers=admin
+    )
+    assert by_res.status_code == 200, by_res.text
+    res_events = by_res.json()["events"]
+    assert len(res_events) >= 2
+    assert all(ev["resource_id"] == doc_id for ev in res_events)
+
+    # Filter by since / until ISO timestamps
+    now = datetime.now(UTC)
+    past_iso = (now - timedelta(hours=1)).isoformat()
+    future_iso = (now + timedelta(hours=1)).isoformat()
+
+    in_window = await client.get(
+        f"/api/v1/audit?resource_id={doc_id}&since={past_iso}&until={future_iso}",
+        headers=admin,
+    )
+    assert in_window.status_code == 200
+    assert len(in_window.json()["events"]) == len(res_events)
+
+    empty_window = await client.get(
+        f"/api/v1/audit?resource_id={doc_id}&until={(now - timedelta(days=1)).isoformat()}",
+        headers=admin,
+    )
+    assert empty_window.status_code == 200
+    assert empty_window.json()["events"] == []
+
+    # Invalid timestamp returns 400
+    bad_ts = await client.get("/api/v1/audit?since=not-a-timestamp", headers=admin)
+    assert bad_ts.status_code == 400
+    assert bad_ts.json()["error"]["code"] == "invalid_timestamp"
+
+    # CSV export with same filters writes audit_export and returns valid CSV
+    csv_resp = await client.get(
+        f"/api/v1/audit/export.csv?resource_id={doc_id}", headers=admin
+    )
+    assert csv_resp.status_code == 200
+    assert "text/csv" in csv_resp.headers["content-type"]
+    reader = list(csv.DictReader(io.StringIO(csv_resp.text)))
+    assert len(reader) == len(res_events)
+    assert all(row["resource_id"] == doc_id for row in reader)
+    assert all(len(row["prev_hash"]) == 64 and len(row["row_hash"]) == 64 for row in reader)
+
+    export_audit = await client.get("/api/v1/audit?action=audit_export", headers=admin)
+    assert export_audit.status_code == 200
+    export_events = export_audit.json()["events"]
+    assert len(export_events) >= 1
+    assert export_events[0]["detail"] == {"rows": len(res_events)}
+
+    # Verify AUDIT_HMAC_KEY is used by write_audit and rotating it breaks correlation with old IP hashes
+    settings = app.state.settings
+    old_hmac = settings.audit_hmac_key
+    key_v1 = "audit-hmac-key-v1-0123456789-abcdef-xyz"
+    key_v2 = "audit-hmac-key-v2-9876543210-fedcba-uvw"
+    try:
+        settings.audit_hmac_key = SecretStr(key_v1)
+        await write_audit(
+            settings=settings,
+            actor_id=None,
+            action="ip_hmac_test_v1",
+            ip="198.51.100.42",
+            detail={},
+        )
+        settings.audit_hmac_key = SecretStr(key_v2)
+        await write_audit(
+            settings=settings,
+            actor_id=None,
+            action="ip_hmac_test_v2",
+            ip="198.51.100.42",
+            detail={},
+        )
+    finally:
+        settings.audit_hmac_key = old_hmac
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        v1_hash = (
+            await session.execute(
+                text("SELECT ip_hash FROM audit_events WHERE action = 'ip_hmac_test_v1'")
+            )
+        ).scalar_one()
+        v2_hash = (
+            await session.execute(
+                text("SELECT ip_hash FROM audit_events WHERE action = 'ip_hmac_test_v2'")
+            )
+        ).scalar_one()
+    assert v1_hash == hash_ip("198.51.100.42", key_v1)
+    assert v2_hash == hash_ip("198.51.100.42", key_v2)
+    assert v1_hash != v2_hash
+
+
+async def test_audit_hash_chain_50_concurrent_writes_retention_and_tamper_detection(
+    client: AsyncClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import asyncio
+
+    from app.admin_cli import main as cli_main
+    from app.audit import write_audit
+    from app.main import app
+
+    del client
+    settings = app.state.settings
+
+    # 1. 50 concurrent writes via write_audit
+    await asyncio.gather(
+        *(
+            write_audit(
+                settings=settings,
+                actor_id=None,
+                action="concurrent_chain_test",
+                resource_type="test",
+                resource_id=f"item-{i}",
+                ip="192.0.2.10",
+                detail={"seq": i},
+            )
+            for i in range(50)
+        )
+    )
+
+    assert cli_main(["verify-audit"]) == 0
+    out_ok = capsys.readouterr().out
+    assert "audit chain ok" in out_ok
+
+    # 2. Retention deletes at the head of the table do NOT count as chain breaks
+    maker = get_sessionmaker()
+    async with maker() as session:
+        ids = list(
+            await session.scalars(text("SELECT id FROM audit_events ORDER BY id ASC"))
+        )
+        assert len(ids) == 50
+        cutoff_id = int(ids[5])
+        await session.execute(text("SELECT set_config('labagent.audit_retention', 'on', true)"))
+        await session.execute(
+            text("DELETE FROM audit_events WHERE id < :cutoff_id"),
+            {"cutoff_id": cutoff_id},
+        )
+        await session.commit()
+
+    assert cli_main(["verify-audit"]) == 0
+    capsys.readouterr()
+
+    # 3. Bypass trigger to corrupt a middle row and verify CLI pinpoints that exact row id
+    target_id = int(ids[25])
+    async with maker() as session:
+        await session.execute(
+            text("ALTER TABLE audit_events DISABLE TRIGGER audit_events_append_only")
+        )
+        try:
+            await session.execute(
+                text(
+                    "UPDATE audit_events SET detail = '{\"seq\": 99999}'::jsonb WHERE id = :id"
+                ),
+                {"id": target_id},
+            )
+            await session.commit()
+        finally:
+            await session.execute(
+                text("ALTER TABLE audit_events ENABLE TRIGGER audit_events_append_only")
+            )
+            await session.commit()
+
+    assert cli_main(["verify-audit"]) != 0
+    broken_out = capsys.readouterr().out
+    assert f"id={target_id}" in broken_out
+
+
+
 

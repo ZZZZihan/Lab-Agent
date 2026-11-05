@@ -10,7 +10,7 @@ from collections.abc import Sequence
 
 from sqlalchemy import select
 
-from app.audit import write_audit
+from app.audit import verify_audit_chain, write_audit
 from app.auth import hash_password, validate_password
 from app.config import get_settings
 from app.db import dispose_engine, get_sessionmaker
@@ -41,6 +41,14 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     print(
                         f"{user.id}\t{user.email}\t{user.display_name}\t{user.role}\t{status}\t{created}"
                     )
+                return 0
+
+            if cmd == "verify-audit":
+                broken_id = await verify_audit_chain(session)
+                if broken_id is not None:
+                    print(f"audit chain broken at id={broken_id}")
+                    return 1
+                print("audit chain ok")
                 return 0
 
             email = str(args.email).strip().lower()
@@ -193,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("list-users", help="List all users without password hashes")
+    sub.add_parser("verify-audit", help="Verify audit_events hash chain integrity")
     return parser
 
 

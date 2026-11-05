@@ -67,6 +67,7 @@ fi
 jwt="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 pg="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
 proxy_secret="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+audit_hmac_key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
 umask 077
 
@@ -79,6 +80,7 @@ REDIS_URL=redis://127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
 INTERNAL_PROXY_SECRET=${proxy_secret}
+AUDIT_HMAC_KEY=${audit_hmac_key}
 CORS_ORIGINS=http://127.0.0.1:43123,http://localhost:43123
 LLM_PROVIDER=fake
 LLM_MODEL=fake-grounded-v1
@@ -118,6 +120,7 @@ REDIS_URL=redis://127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
 INTERNAL_PROXY_SECRET=${proxy_secret}
+AUDIT_HMAC_KEY=${audit_hmac_key}
 CORS_ORIGINS=http://127.0.0.1:43123,http://localhost:43123
 LLM_PROVIDER=openai_compatible
 LLM_MODEL=${LLM_MODEL}

@@ -524,17 +524,43 @@ def test_internal_proxy_secret_and_rate_limit_settings(
             load_tuned_config=False,
         )
 
+    with pytest.raises(RuntimeError, match="AUDIT_HMAC_KEY is required when APP_ENV=prod"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            app_env="prod",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+            jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            internal_proxy_secret="ci-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            cors_origins="http://localhost:43123",
+            llm_capture=False,
+            load_tuned_config=False,
+        )
+
+    with pytest.warns(UserWarning, match="AUDIT_HMAC_KEY is not set"):
+        dev_fallback = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            app_env="dev",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+            jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            cors_origins="http://localhost:43123",
+            llm_capture=False,
+            load_tuned_config=False,
+        )
+    assert dev_fallback.resolved_audit_hmac_key == "test-only-jwt-secret-value-0123456789-abcdef"
+
     prod_ok = Settings(
         _env_file=None,  # type: ignore[call-arg]
         app_env="prod",
         database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
         jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
         internal_proxy_secret="ci-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        audit_hmac_key="ci-audit-hmac-secret-5742644509-xbekkg",  # type: ignore[arg-type]
         cors_origins="http://localhost:43123",
         llm_capture=False,
         load_tuned_config=False,
     )
     assert prod_ok.internal_proxy_secret is not None
+    assert prod_ok.resolved_audit_hmac_key == "ci-audit-hmac-secret-5742644509-xbekkg"
 
 
 async def test_rate_limiter_login_ip_and_account_buckets() -> None:

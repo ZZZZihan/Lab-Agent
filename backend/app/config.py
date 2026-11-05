@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import urllib.parse
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self, cast
@@ -147,6 +148,7 @@ class Settings(BaseSettings):
     otel_exporter: Literal["none", "console", "otlp"] = "none"
     otel_endpoint: str | None = None
     internal_proxy_secret: SecretStr | None = None
+    audit_hmac_key: SecretStr | None = None
     rate_limit_enabled: bool = True
     login_ip_rate_limit: int = 30
     login_ip_rate_window_seconds: int = 60
@@ -179,6 +181,23 @@ class Settings(BaseSettings):
         if self.internal_proxy_secret is not None:
             assert_strong_secret(
                 self.internal_proxy_secret.get_secret_value(), "INTERNAL_PROXY_SECRET"
+            )
+        if (
+            self.audit_hmac_key is not None
+            and not self.audit_hmac_key.get_secret_value().strip()
+        ):
+            self.audit_hmac_key = None
+        if self.app_env == "prod" and self.audit_hmac_key is None:
+            raise RuntimeError("AUDIT_HMAC_KEY is required when APP_ENV=prod")
+        if self.audit_hmac_key is not None:
+            assert_strong_secret(
+                self.audit_hmac_key.get_secret_value(), "AUDIT_HMAC_KEY"
+            )
+        elif self.app_env == "dev":
+            warnings.warn(
+                "AUDIT_HMAC_KEY is not set; falling back to JWT_SECRET for IP hashing",
+                UserWarning,
+                stacklevel=2,
             )
         if not 64 <= self.embedding_dim <= 4096:
             raise RuntimeError("EMBEDDING_DIM must be between 64 and 4096")
@@ -341,6 +360,12 @@ class Settings(BaseSettings):
     @property
     def calibrated(self) -> bool:
         return self.calibration_source is not None
+
+    @property
+    def resolved_audit_hmac_key(self) -> str:
+        if self.audit_hmac_key is not None:
+            return self.audit_hmac_key.get_secret_value()
+        return self.jwt_secret.get_secret_value()
 
     @property
     def cors_origin_list(self) -> list[str]:

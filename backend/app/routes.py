@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import csv
 import hmac
+import io
 import ipaddress
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, text
@@ -927,6 +930,57 @@ async def delete_conversation(
     await session.commit()
     return {"status": "deleted"}
 
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if value is None or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    elif "T" in raw and " " in raw.split("T", 1)[1]:
+        date_part, time_part = raw.split("T", 1)
+        raw = f"{date_part}T{time_part.replace(' ', '+', 1)}"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise APIError(400, "invalid_timestamp", "时间格式无效") from exc
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _build_audit_filters(
+    *,
+    action: str | None = None,
+    actor_id: uuid.UUID | None = None,
+    resource_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    before_id: int | None = None,
+) -> tuple[list[str], dict[str, object]]:
+    conditions: list[str] = []
+    params: dict[str, object] = {}
+    if action:
+        conditions.append("a.action = :action")
+        params["action"] = action
+    if actor_id is not None:
+        conditions.append("a.actor_id = CAST(:actor_id AS uuid)")
+        params["actor_id"] = str(actor_id)
+    if resource_id:
+        conditions.append("a.resource_id = :resource_id")
+        params["resource_id"] = resource_id
+    since_dt = _parse_iso_timestamp(since)
+    if since_dt is not None:
+        conditions.append("a.created_at >= :since")
+        params["since"] = since_dt
+    until_dt = _parse_iso_timestamp(until)
+    if until_dt is not None:
+        conditions.append("a.created_at <= :until")
+        params["until"] = until_dt
+    if before_id is not None:
+        conditions.append("a.id < :before_id")
+        params["before_id"] = before_id
+    return conditions, params
+
 
 @router.get("/audit")
 async def list_audit(
@@ -935,6 +989,9 @@ async def list_audit(
     session: Annotated[AsyncSession, Depends(get_session)],
     action: str | None = None,
     actor_id: uuid.UUID | None = None,
+    resource_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     before_id: int | None = None,
     limit: int = 50,
 ) -> dict[str, object]:
@@ -949,17 +1006,15 @@ async def list_audit(
         )
         raise APIError(403, "forbidden", "只有管理员可以查看审计")
     bounded = min(max(limit, 1), 200)
-    conditions: list[str] = []
-    params: dict[str, object] = {"lim": bounded + 1}
-    if action:
-        conditions.append("a.action = :action")
-        params["action"] = action
-    if actor_id is not None:
-        conditions.append("a.actor_id = CAST(:actor_id AS uuid)")
-        params["actor_id"] = str(actor_id)
-    if before_id is not None:
-        conditions.append("a.id < :before_id")
-        params["before_id"] = before_id
+    conditions, params = _build_audit_filters(
+        action=action,
+        actor_id=actor_id,
+        resource_id=resource_id,
+        since=since,
+        until=until,
+        before_id=before_id,
+    )
+    params["lim"] = bounded + 1
     where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     sql = f"""
         SELECT a.id AS id,
@@ -982,6 +1037,109 @@ async def list_audit(
     events = rows[:bounded]
     next_before_id = int(events[-1]["id"]) if has_more and events else None
     return {"events": events, "next_before_id": next_before_id}
+
+
+@router.get("/audit/export.csv")
+async def export_audit_csv(
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    action: str | None = None,
+    actor_id: uuid.UUID | None = None,
+    resource_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> Response:
+    settings = _settings(request)
+    if actor.role != "admin":
+        await write_audit(
+            settings=settings,
+            actor_id=actor.id,
+            action="permission_denied",
+            resource_type="audit",
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={"operation": "export"},
+        )
+        raise APIError(403, "forbidden", "只有管理员可以导出审计")
+    conditions, params = _build_audit_filters(
+        action=action,
+        actor_id=actor_id,
+        resource_id=resource_id,
+        since=since,
+        until=until,
+    )
+    params["lim"] = 50000
+    where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT a.id AS id,
+               a.created_at::text AS created_at,
+               a.actor_id::text AS actor_id,
+               u.display_name AS actor_name,
+               a.action AS action,
+               a.resource_type AS resource_type,
+               a.resource_id AS resource_id,
+               a.request_id AS request_id,
+               a.ip_hash AS ip_hash,
+               a.detail AS detail,
+               a.prev_hash AS prev_hash,
+               a.row_hash AS row_hash
+        FROM audit_events a
+        LEFT JOIN users u ON u.id = a.actor_id
+        {where_sql}
+        ORDER BY a.id DESC
+        LIMIT :lim
+    """
+    rows = [dict(row) for row in (await session.execute(text(sql), params)).mappings()]
+    await write_audit(
+        settings=settings,
+        actor_id=actor.id,
+        action="audit_export",
+        resource_type="audit",
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"rows": len(rows)},
+    )
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "id",
+            "created_at",
+            "actor_id",
+            "actor_name",
+            "action",
+            "resource_type",
+            "resource_id",
+            "request_id",
+            "ip_hash",
+            "detail",
+            "prev_hash",
+            "row_hash",
+        ]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                row.get("id") or "",
+                row.get("created_at") or "",
+                row.get("actor_id") or "",
+                row.get("actor_name") or "",
+                row.get("action") or "",
+                row.get("resource_type") or "",
+                row.get("resource_id") or "",
+                row.get("request_id") or "",
+                row.get("ip_hash") or "",
+                json.dumps(row.get("detail") or {}, ensure_ascii=False, sort_keys=True),
+                (str(row.get("prev_hash") or "")).strip(),
+                (str(row.get("row_hash") or "")).strip(),
+            ]
+        )
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="audit_export.csv"'},
+    )
 
 
 @router.post("/audit/retention")
