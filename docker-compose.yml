@@ -29,19 +29,33 @@ services:
       timeout: 3s
       retries: 20
 
+  api-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    user: "0:0"
+    restart: "no"
+    command: ["api-entrypoint.sh", "--init-only"]
+    secrets:
+      - magpie_key
+    volumes:
+      - uploads:/app/data/uploads
+      - calibrations:/app/data/calibrations
+      - api_secrets:/run/lab-agent-secrets
+
   api:
     build:
       context: .
       dockerfile: backend/Dockerfile
     env_file: .env
     environment:
-      APP_ENV: dev
+      APP_ENV: ${APP_ENV:-dev}
       DATABASE_URL: postgresql+asyncpg://labagent:${POSTGRES_PASSWORD}@postgres:5432/labagent
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET}
       CORS_ORIGINS: http://127.0.0.1:43123,http://localhost:43123
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:3425/v1}
-      LLM_API_KEY_FILE: /run/secrets/magpie_key
+      LLM_API_KEY_FILE: /run/lab-agent-secrets/magpie_key
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
       UPLOAD_DIR: /app/data/uploads
       CALIBRATION_DIR: /app/data/calibrations
@@ -57,7 +71,10 @@ services:
     volumes:
       - uploads:/app/data/uploads
       - calibrations:/app/data/calibrations
+      - api_secrets:/run/lab-agent-secrets:ro
     depends_on:
+      api-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -74,13 +91,13 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        # Local demo only. A production image build leaves this false.
-        NEXT_PUBLIC_DEMO_HINTS: "true"
+        # Local demo only. A production image build sets this to false.
+        NEXT_PUBLIC_DEMO_HINTS: ${NEXT_PUBLIC_DEMO_HINTS:-true}
     environment:
       API_INTERNAL_URL: http://api:8000
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET}
-      COOKIE_SECURE: "false"
-      NEXT_PUBLIC_DEMO_HINTS: "true"
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      NEXT_PUBLIC_DEMO_HINTS: ${NEXT_PUBLIC_DEMO_HINTS:-true}
     ports:
       - "127.0.0.1:43123:3000"
     depends_on:
@@ -97,6 +114,7 @@ volumes:
   pgdata:
   uploads:
   calibrations:
+  api_secrets:
 
 secrets:
   magpie_key:

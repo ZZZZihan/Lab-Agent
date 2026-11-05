@@ -20,8 +20,9 @@ COPY README.md /opt/lab-agent/backend/README.md
 WORKDIR /opt/lab-agent/backend
 RUN uv sync --frozen --no-dev \
     && chmod +x /usr/local/bin/api-entrypoint.sh \
-    && mkdir -p /app/data/uploads /app/data/calibrations \
-    && chown -R 10001:10001 /app/data /opt/lab-agent /home/labagent
+    && mkdir -p /app/data/uploads /app/data/calibrations /run/lab-agent-secrets \
+    && chown -R 10001:10001 /app/data /opt/lab-agent /home/labagent /run/lab-agent-secrets \
+    && chmod 0700 /run/lab-agent-secrets
 
 ENV PATH="/opt/lab-agent/backend/.venv/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1
