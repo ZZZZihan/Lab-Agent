@@ -323,7 +323,11 @@ def test_settings_validation_and_fingerprint_change_rules() -> None:
 
     # APP_ENV=prod requires EMBEDDING_MODEL_VERSION when embedder != hashing
     with pytest.raises(RuntimeError, match="EMBEDDING_MODEL_VERSION"):
-        _make_settings(app_env="prod", embedding_model_version="")
+        _make_settings(
+            app_env="prod",
+            internal_proxy_secret="ci-only-jwt-secret-value-0123456789-abcdef",
+            embedding_model_version="",
+        )
 
     # Template without {query}
     with pytest.raises(RuntimeError, match="must contain \\{query\\}"):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -100,6 +102,27 @@ async def _user(session: AsyncSession, actor: Actor) -> User:
 
 
 def _client_ip(request: Request) -> str | None:
+    settings = _settings(request)
+    configured_secret = (
+        settings.internal_proxy_secret.get_secret_value()
+        if settings.internal_proxy_secret is not None
+        else ""
+    )
+    header_secret = request.headers.get("x-internal-proxy-secret") or ""
+    if (
+        configured_secret
+        and header_secret
+        and hmac.compare_digest(
+            header_secret.encode("utf-8"),
+            configured_secret.encode("utf-8"),
+        )
+    ):
+        forwarded_ip = (request.headers.get("x-client-ip") or "").strip()
+        if forwarded_ip:
+            try:
+                return str(ipaddress.ip_address(forwarded_ip))
+            except ValueError:
+                pass
     if request.client is None:
         return None
     return request.client.host
@@ -147,12 +170,16 @@ async def health(request: Request) -> dict[str, object]:
 async def login(body: LoginBody, request: Request) -> dict[str, object]:
     settings = _settings(request)
     ip = _client_ip(request)
-    allowed = await request.app.state.limiter.allow(
-        f"login:{ip or 'unknown'}",
-        settings.login_rate_limit,
-        settings.login_rate_window_seconds,
-    )
-    if not allowed:
+    limited_bucket = await request.app.state.limiter.check_login(ip, body.email)
+    if limited_bucket is not None:
+        await write_audit(
+            settings=settings,
+            actor_id=None,
+            action="login_rate_limited",
+            request_id=getattr(request.state, "request_id", None),
+            ip=ip,
+            detail={"bucket": limited_bucket},
+        )
         raise APIError(429, "rate_limited", "登录尝试过于频繁")
     async with get_sessionmaker()() as session:
         user = await session.scalar(select(User).where(User.email == body.email.strip().lower()))

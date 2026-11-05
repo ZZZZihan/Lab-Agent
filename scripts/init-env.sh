@@ -7,6 +7,7 @@ if [[ -f .env && "${1:-}" != "--force" ]]; then
 fi
 jwt="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 pg="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
+proxy_secret="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 cat > .env <<EOF
 APP_ENV=dev
 POSTGRES_PASSWORD=${pg}
@@ -14,6 +15,7 @@ DATABASE_URL=postgresql+asyncpg://labagent:${pg}@127.0.0.1:55432/labagent
 REDIS_URL=redis://127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
+INTERNAL_PROXY_SECRET=${proxy_secret}
 CORS_ORIGINS=http://127.0.0.1:43123,http://localhost:43123
 LLM_PROVIDER=fake
 LLM_MODEL=fake-grounded-v1
