@@ -173,7 +173,8 @@ EOF
   if [[ "$LINUX_EMBED" == "true" ]]; then
     echo "==> Starting containerized Ollama (profile: linux-embed) and ensuring lab-agent-qwen3-embed..."
     COMPOSE_STARTED=true
-    docker compose "${COMPOSE_FILES[@]}" up -d --wait --wait-timeout 600 embedder embedder-init
+    docker compose "${COMPOSE_FILES[@]}" up -d --wait --wait-timeout 600 embedder
+    docker compose "${COMPOSE_FILES[@]}" run --rm embedder-init
     model_id="$(docker compose "${COMPOSE_FILES[@]}" exec -T embedder ollama list | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" {print $2; exit}')"
     if [[ -z "$model_id" ]]; then
       echo "Error: Failed to read digest for lab-agent-qwen3-embed from containerized 'ollama list'." >&2
@@ -191,7 +192,8 @@ EOF
     fi
 
     echo "==> Warming up lab-agent-qwen3-embed on containerized Ollama..."
-    ollama_port="${OLLAMA_CONTAINER_PORT:-11435}"
+    ollama_port="${OLLAMA_CONTAINER_PORT:-$(env_val OLLAMA_CONTAINER_PORT)}"
+    ollama_port="${ollama_port:-11435}"
     curl -fsS -o /dev/null --max-time 120 "http://127.0.0.1:${ollama_port}/v1/embeddings" \
       -H 'Content-Type: application/json' \
       -d '{"model":"lab-agent-qwen3-embed","input":["预热"]}'

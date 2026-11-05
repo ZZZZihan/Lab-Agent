@@ -73,11 +73,22 @@ def test_docker_compose_linux_embed_profile_structure(tmp_path: Path) -> None:
         "ollama create lab-agent-qwen3-embed -f /Modelfile.qwen3-embed" in cmd_str
     )
 
+    api_deps = services["api"]["depends_on"]
+    assert api_deps["embedder-init"] == {
+        "condition": "service_completed_successfully",
+        "required": False,
+    }
+
     modelfile = root / "docker" / "ollama" / "Modelfile.qwen3-embed"
     assert modelfile.is_file()
     modelfile_text = modelfile.read_text(encoding="utf-8")
     assert "FROM qwen3-embedding:8b" in modelfile_text
     assert "PARAMETER num_ctx 8192" in modelfile_text
+
+    demo_sh = (root / "scripts" / "demo.sh").read_text(encoding="utf-8")
+    assert 'docker compose "${COMPOSE_FILES[@]}" up -d --wait --wait-timeout 600 embedder' in demo_sh
+    assert 'docker compose "${COMPOSE_FILES[@]}" run --rm embedder-init' in demo_sh
+    assert 'ollama_port="${OLLAMA_CONTAINER_PORT:-$(env_val OLLAMA_CONTAINER_PORT)}"' in demo_sh
 
     if shutil.which("docker") is not None:
         key_file = tmp_path / "magpie.key"
@@ -91,6 +102,27 @@ def test_docker_compose_linux_embed_profile_structure(tmp_path: Path) -> None:
             f"LAB_AGENT_MAGPIE_KEY_FILE={key_file}\n",
             encoding="utf-8",
         )
+        proc_default = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_path),
+                "--env-file",
+                str(env_file),
+                "config",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc_default.returncode == 0:
+            rendered_default = json.loads(proc_default.stdout)
+            assert "api" in rendered_default["services"]
+            assert "embedder" not in rendered_default["services"]
+
         proc = subprocess.run(
             [
                 "docker",

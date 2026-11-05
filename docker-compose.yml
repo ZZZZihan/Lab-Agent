@@ -75,6 +75,9 @@ services:
     depends_on:
       api-init:
         condition: service_completed_successfully
+      embedder-init:
+        condition: service_completed_successfully
+        required: false
       postgres:
         condition: service_healthy
       redis:
