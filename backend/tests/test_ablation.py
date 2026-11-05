@@ -278,6 +278,20 @@ def test_ablation_script_subset_and_optional_e7_skip(tmp_path: Path) -> None:
     assert list(groups.keys()) == ["E1", "E5"]
     assert "Skipping optional group E7" in proc.stdout
 
+    # Non-dry-run with only E7 when q8_0 is absent -> skips E7 without pre-populating corpus
+    e7_only_proc = subprocess.run(
+        [str(script), "E7"],
+        cwd=repo_root(),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert e7_only_proc.returncode == 0, e7_only_proc.stderr
+    assert "Skipping optional group E7" in e7_only_proc.stdout
+    assert "Pre-populating evaluation corpus" not in e7_only_proc.stdout
+
     # Unknown group argument must fail with exit code 1
     bad_proc = subprocess.run(
         [str(script), "--dry-run", "E9"],

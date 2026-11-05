@@ -342,19 +342,42 @@ EOF
 
 EXECUTED_SLUGS=()
 EXECUTED_GROUPS=()
+CORPUS_PREPOPULATED="false"
 
-if [[ "$DRY_RUN" != "true" ]]; then
-  echo "==> Pre-populating evaluation corpus..."
-  (
-    cd "$REPO_ROOT/backend"
-    unset LLM_CAPTURE EVIDENCE_SCORE_MIN RARE_COVERAGE_MIN CITE_MARGIN CITE_K RRF_K RETRIEVAL_MODE
-    export LLM_PROVIDER=fake
-    export LLM_MODEL=fake-grounded-v1
-    export EMBEDDER=hashing
-    export EMBEDDING_DIM=512
-    export EMBEDDING_STORAGE=vector
-    export EMBEDDING_INDEX=auto
-    uv run --frozen python -W ignore::UserWarning - <<'PY'
+for group in "${SELECTED_GROUPS[@]}"; do
+  if [[ "$group" == "E7" && -z "$Q8_DIGEST" ]]; then
+    echo "==> [E7] Skipping optional group E7: model '${Q8_MODEL}' not found in 'ollama list'."
+    continue
+  fi
+
+  resolve_group "$group"
+  print_group_config
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    continue
+  fi
+
+  if [[ "$CORPUS_PREPOPULATED" == "false" ]]; then
+    echo "==> Pre-populating evaluation corpus..."
+    (
+      cd "$REPO_ROOT/backend"
+      unset LLM_CAPTURE EVIDENCE_SCORE_MIN RARE_COVERAGE_MIN CITE_MARGIN CITE_K RRF_K RETRIEVAL_MODE
+      export LLM_PROVIDER=fake
+      export LLM_MODEL=fake-grounded-v1
+      export EMBEDDER="$CFG_EMBEDDER"
+      export EMBEDDING_BASE_URL="$CFG_BASE_URL"
+      export EMBEDDING_MODEL="$CFG_MODEL"
+      export EMBEDDING_MODEL_VERSION="$CFG_VERSION"
+      export EMBEDDING_DIM="$CFG_DIM"
+      export EMBEDDING_NATIVE_DIM="$CFG_NATIVE_DIM"
+      export EMBEDDING_TRUNCATE="$CFG_TRUNCATE"
+      export EMBEDDING_STORAGE="$CFG_STORAGE"
+      export EMBEDDING_INDEX="$CFG_INDEX"
+      export EMBEDDING_QUERY_TEMPLATE="$CFG_QUERY_TEMPLATE"
+      export EMBEDDING_QUERY_INSTRUCTION="$CFG_QUERY_INSTRUCTION"
+      export EMBEDDING_DOCUMENT_PREFIX="$CFG_DOC_PREFIX"
+      export EMBEDDING_REDACT="$CFG_REDACT"
+      uv run --frozen python -W ignore::UserWarning - <<'PY'
 import asyncio
 from app.config import get_settings, reset_settings_cache
 from app.db import dispose_engine
@@ -369,20 +392,8 @@ async def _prepopulate() -> None:
 
 asyncio.run(_prepopulate())
 PY
-  )
-fi
-
-for group in "${SELECTED_GROUPS[@]}"; do
-  if [[ "$group" == "E7" && -z "$Q8_DIGEST" ]]; then
-    echo "==> [E7] Skipping optional group E7: model '${Q8_MODEL}' not found in 'ollama list'."
-    continue
-  fi
-
-  resolve_group "$group"
-  print_group_config
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    continue
+    )
+    CORPUS_PREPOPULATED="true"
   fi
 
   echo "==> [${CFG_GROUP}] Running reindex (python -m app.reindex --apply)..."
