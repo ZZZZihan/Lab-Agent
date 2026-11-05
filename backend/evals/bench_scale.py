@@ -204,7 +204,7 @@ async def _prepare_cached_vectors(
     cache_dir: Path,
     corpus_chunks: list[dict[str, Any]],
     questions: list[dict[str, Any]],
-) -> tuple[list[list[float]], dict[str, list[float]], dict[str, float], list[list[float]]]:
+) -> tuple[list[list[float]], dict[str, list[float]], dict[str, Any], list[list[float]]]:
     """Load or compute corpus, query, and seed distractor vectors, caching .npy files."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     slug = settings.base_embedding_slug
@@ -262,10 +262,15 @@ async def _prepare_cached_vectors(
     q_latencies = [float(x) for x in q_meta["latencies_ms"]]
     sorted_q_lat = sorted(q_latencies)
     query_map = {q_texts[i]: q_vecs[i] for i in range(len(q_texts))}
-    latency_summary = {
+    query_lat_map: dict[str, float] = {
+        q_texts[i]: float(q_latencies[i])
+        for i in range(min(len(q_texts), len(q_latencies)))
+    }
+    latency_summary: dict[str, Any] = {
         "mean": round(sum(q_latencies) / max(len(q_latencies), 1), 4),
         "p50": round(_percentile(sorted_q_lat, 0.50), 4),
         "p95": round(_percentile(sorted_q_lat, 0.95), 4),
+        "per_question_ms": query_lat_map,
     }
     return corpus_vecs, query_map, latency_summary, seed_vecs
 
@@ -574,7 +579,7 @@ async def _evaluate_path(
     user: Principal,
     questions: list[dict[str, Any]],
     corpus_chunks: list[dict[str, Any]],
-    query_embed_latency_ms: dict[str, float],
+    query_embed_latency_ms: dict[str, Any],
 ) -> dict[str, Any]:
     """Run search_knowledge across all v1 questions and compute retrieval + latency metrics."""
     heading_to_key: dict[tuple[str, str], str] = {}
@@ -592,6 +597,10 @@ async def _evaluate_path(
         "cite_k": int(settings.cite_k or 3),
     }
 
+    raw_per_q = query_embed_latency_ms.get("per_question_ms")
+    per_q_lat: dict[str, float] = raw_per_q if isinstance(raw_per_q, dict) else {}
+    default_q_embed_ms = float(query_embed_latency_ms.get("mean", 0.0))
+
     maker = get_sessionmaker()
     rows: list[dict[str, Any]] = []
     async with maker() as session:
@@ -608,16 +617,18 @@ async def _evaluate_path(
                 limit=None,
             )
         for q in questions:
+            q_text = str(q["question"])
             bundle = await search_knowledge(
                 session,
                 settings=settings,
                 embedder=embedder,
                 user=user,
-                query=str(q["question"]),
+                query=q_text,
                 mode="dense",
                 source="eval",
                 limit=None,
             )
+            q_embed_ms = float(per_q_lat.get(q_text, default_q_embed_ms))
             gold_keys = [
                 heading_to_key[(g["doc"], g["heading"])]
                 for g in q.get("gold", [])
@@ -630,8 +641,9 @@ async def _evaluate_path(
                     "type": q["type"],
                     "answerable": bool(q["answerable"]),
                     "gold": gold_keys,
-                    "query_tokens": content_tokens(str(q["question"])),
+                    "query_tokens": content_tokens(q_text),
                     "elapsed_ms": bundle.elapsed_ms,
+                    "total_elapsed_ms": float(bundle.elapsed_ms) + q_embed_ms,
                     "df": bundle.df,
                     "n_docs": bundle.n_docs,
                     "hits": [
@@ -652,6 +664,8 @@ async def _evaluate_path(
 
     all_latencies = [float(r["elapsed_ms"]) for r in rows]
     sorted_lat = sorted(all_latencies)
+    paired_totals = [float(r["total_elapsed_ms"]) for r in rows]
+    sorted_totals = sorted(paired_totals)
     dev_rows = [r for r in rows if r["split"] == "dev"]
     test_rows = [r for r in rows if r["split"] == "test"]
     all_metrics = evaluate(rows, mode=mode, params=params, include_ci=False)
@@ -664,9 +678,9 @@ async def _evaluate_path(
         "p95": round(_percentile(sorted_lat, 0.95), 4),
     }
     e2e_lat = {
-        "mean": round(db_lat["mean"] + float(query_embed_latency_ms["mean"]), 4),
-        "p50": round(db_lat["p50"] + float(query_embed_latency_ms["p50"]), 4),
-        "p95": round(db_lat["p95"] + float(query_embed_latency_ms["p95"]), 4),
+        "mean": round(sum(paired_totals) / max(len(paired_totals), 1), 4),
+        "p50": round(_percentile(sorted_totals, 0.50), 4),
+        "p95": round(_percentile(sorted_totals, 0.95), 4),
     }
 
     return {
@@ -716,18 +730,29 @@ def _make_path_settings(base: Settings, **overrides: Any) -> Settings:
         "cors_origins": base.cors_origins,
         "embedder": base.embedder,
         "embedding_base_url": base.embedding_base_url,
+        "embedding_api_key": (
+            base.embedding_api_key.get_secret_value()
+            if base.embedding_api_key is not None
+            else None
+        ),
+        "embedding_api_key_file": base.embedding_api_key_file,
         "embedding_model": base.embedding_model,
         "embedding_model_version": base.embedding_model_version,
         "embedding_dim": base.embedding_dim,
         "embedding_native_dim": base.embedding_native_dim,
         "embedding_truncate": base.embedding_truncate,
+        "embedding_send_dimensions": base.embedding_send_dimensions,
         "embedding_storage": base.embedding_storage,
         "embedding_index": base.embedding_index,
         "embedding_prefix_dim": base.embedding_prefix_dim,
         "embedding_query_template": base.embedding_query_template,
         "embedding_query_instruction": base.embedding_query_instruction,
         "embedding_document_prefix": base.embedding_document_prefix,
+        "embedding_batch_size": base.embedding_batch_size,
+        "embedding_timeout_seconds": base.embedding_timeout_seconds,
+        "embedding_max_retries": base.embedding_max_retries,
         "embedding_redact": base.embedding_redact,
+        "calibration_dir": base.calibration_dir,
         "load_tuned_config": True,
     }
     params.update(overrides)
@@ -1014,7 +1039,11 @@ async def run_scale_benchmark(
             "distractor_chunks": max(0, chunks - len(corpus_chunks)),
             "embedder": base_settings.embedder,
             "embedding_model": base_settings.embedding_model,
-            "query_embedding_latency_ms": query_embed_lat,
+            "query_embedding_latency_ms": {
+                "mean": query_embed_lat["mean"],
+                "p50": query_embed_lat["p50"],
+                "p95": query_embed_lat["p95"],
+            },
             "exact_scan_sweep": sweep_records,
             "exact_scan_p95_le_300ms_max_chunks": {
                 "db_search_only": max_chunks_under_300ms_db,

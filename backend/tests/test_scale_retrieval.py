@@ -34,6 +34,8 @@ from app.rag.retrieve import (
 from app.reindex import apply_reindex
 from evals.bench_scale import (
     _build_distractor_pools_and_corpus,
+    _evaluate_path,
+    _make_path_settings,
     _prepare_cached_vectors,
     _resolve_benchmark_base_settings,
     run_scale_benchmark,
@@ -444,6 +446,90 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
     )
     assert lat_summary["p95"] >= lat_summary["p50"]
     assert lat_summary["p95"] == pytest.approx(95.5)
+    assert lat_summary["per_question_ms"]["q0"] == 100.0
+    assert lat_summary["per_question_ms"]["q9"] == 1.0
+
+    # 4. Verify _make_path_settings preserves embedding credentials and client options
+    s_with_creds = _settings(
+        embedder="openai_compatible",
+        embedding_base_url="http://127.0.0.1:11434/v1",
+        embedding_api_key="secret-embed-key-123",
+        embedding_api_key_file="/tmp/embed-key-file",
+        embedding_model="qwen3-embedding:8b",
+        embedding_model_version="64b933495768",
+        embedding_dim=1024,
+        embedding_native_dim=4096,
+        embedding_truncate=True,
+        embedding_send_dimensions=True,
+        embedding_batch_size=16,
+        embedding_timeout_seconds=45.0,
+        embedding_max_retries=5,
+        calibration_dir=str(tmp_path / "cal"),
+    )
+    derived = _make_path_settings(s_with_creds, embedding_index="hnsw")
+    assert derived.embedding_api_key is not None
+    assert derived.embedding_api_key.get_secret_value() == "secret-embed-key-123"
+    assert derived.embedding_api_key_file == "/tmp/embed-key-file"
+    assert derived.embedding_send_dimensions is True
+    assert derived.embedding_batch_size == 16
+    assert derived.embedding_timeout_seconds == 45.0
+    assert derived.embedding_max_retries == 5
+    assert derived.calibration_dir == str(tmp_path / "cal")
+
+    # 5. Verify _evaluate_path computes total_search_latency_ms percentiles from paired samples
+    # Anti-correlated timings: db=[10, 50, 90], q_embed=[90, 50, 10] -> paired totals=[100, 100, 100]
+    # Marginal p95 sum would be 86.0 + 86.0 = 172.0, while paired p95 is 100.0
+    from app.rag.retrieve import SearchBundle
+
+    db_timings = {"q-fast-db": 10.0, "q-mid-db": 50.0, "q-slow-db": 90.0}
+
+    async def _fake_search_knowledge(
+        _session: Any,
+        *,
+        query: str,
+        **_kwargs: Any,
+    ) -> SearchBundle:
+        return SearchBundle(
+            hits=[],
+            df={},
+            n_docs=1,
+            coverage=0.0,
+            mode="dense",
+            elapsed_ms=db_timings.get(query, 10.0),
+        )
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr("evals.bench_scale.search_knowledge", _fake_search_knowledge)
+        paired_questions = [
+            {"id": "1", "split": "dev", "type": "fact", "answerable": False, "question": "q-fast-db", "gold": []},
+            {"id": "2", "split": "dev", "type": "fact", "answerable": False, "question": "q-mid-db", "gold": []},
+            {"id": "3", "split": "test", "type": "fact", "answerable": False, "question": "q-slow-db", "gold": []},
+        ]
+        paired_q_lat = {
+            "mean": 50.0,
+            "p50": 50.0,
+            "p95": 86.0,
+            "per_question_ms": {
+                "q-fast-db": 90.0,
+                "q-mid-db": 50.0,
+                "q-slow-db": 10.0,
+            },
+        }
+        path_res = await _evaluate_path(
+            settings=s_hash,
+            embedder=HashingEmbedder(512),
+            user=Principal(id=uuid.uuid4(), role="admin"),
+            questions=paired_questions,
+            corpus_chunks=[],
+            query_embed_latency_ms=paired_q_lat,
+        )
+        assert path_res["db_search_latency_ms"]["p95"] == pytest.approx(86.0)
+        assert path_res["total_search_latency_ms"]["mean"] == pytest.approx(100.0)
+        assert path_res["total_search_latency_ms"]["p50"] == pytest.approx(100.0)
+        assert path_res["total_search_latency_ms"]["p95"] == pytest.approx(100.0)
+    finally:
+        mp.undo()
 
 
 async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
