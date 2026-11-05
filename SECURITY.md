@@ -80,7 +80,18 @@ Retrieval SQL and direct document reads use the same rule: admins see everything
 | **安全与审计** | `RATE_LIMIT_ENABLED` / `LOGIN_IP_RATE_LIMIT` / `LOGIN_IP_RATE_WINDOW_SECONDS` / `LOGIN_ACCOUNT_RATE_LIMIT` / `LOGIN_ACCOUNT_RATE_WINDOW_SECONDS` | 登录双桶限流（按 IP 默认 30 次/60 秒，按账号默认 10 次/900 秒） |
 | **安全与审计** | `CHAT_RATE_LIMIT` / `CHAT_RATE_WINDOW_SECONDS` / `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_WINDOW_SECONDS` | 问答与文档上传按用户限流 |
 | **安全与审计** | `AUDIT_RETENTION_DAYS` | 审计保留天数（`1–3650`，默认 `180`） |
+| **保留期与维护** | `DELETED_DOCUMENT_RETENTION_DAYS` / `MESSAGE_RETENTION_DAYS` / `MAINTENANCE_INTERVAL_SECONDS` | 软删除文档硬擦除宽限天数（默认 `30`）、对话消息保留天数（默认 `180`）与后台维护任务执行间隔秒数（默认 `86400`） |
 | **入库** | `MAX_UPLOAD_BYTES` / `MAX_DOCUMENT_CHARS` / `INGEST_WORKER_ENABLED` / `INGEST_MAX_ATTEMPTS` / `INGEST_POLL_SECONDS` | 上传字节与字符上限、进程内异步入库 worker 开关与重试参数 |
+
+## 保留期与擦除 (Retention and erasure)
+
+- **删除即擦除（`DELETE /api/v1/documents/{id}?purge=true`）**：文档所有者或管理员可执行硬删除（`purge=true`）。数据库级联删除该文档的所有分块（`chunks`）与授权记录（`document_acl`），同时扫描历史对话消息（`WHERE citations @> '[{"document_id": "<id>"}]'::jsonb`），将命中引用项的 `excerpt` 替换为 `"[已删除]"`、`title` 替换为 `"[已删除文档]"`，并记录审计事件 `document_purged`（`detail={"messages_scrubbed": n}`）。擦除后，文档原文与分块摘录不再残留在 `documents`、`chunks` 或 `messages.citations` 中。
+- **用户自主删除对话（`DELETE /api/v1/conversations/{id}`）**：登录用户可随时删除自己的会话，数据库级联硬删除该会话下的全部 `messages` 记录。
+- **每日定时维护任务（`app/maintenance.py`）**：默认每 `MAINTENANCE_INTERVAL_SECONDS=86400` 秒运行一次，通过 Redis 分布式锁（`SET maintenance:lock NX EX 3600`）保证多实例部署下同一周期仅执行一次，完成后写入 `maintenance_run` 审计事件（记录各项清理计数）：
+  1. **审计日志保留期清理**：清理早于 `AUDIT_RETENTION_DAYS`（默认 `180` 天）的 `audit_events` 记录（事务内临时开启 `labagent.audit_retention = 'on'`）。
+  2. **软删除文档到期硬擦除**：对 `deleted_at` 早于 `DELETED_DOCUMENT_RETENTION_DAYS`（默认 `30` 天）的软删除文档执行完整 `purge_document`（硬删除文档、级联删除分块与 ACL，并擦除 `messages.citations` 中的引用摘录和标题）。
+  3. **历史消息保留期清理**：硬删除 `created_at` 早于 `MESSAGE_RETENTION_DAYS`（默认 `180` 天）的 `messages` 记录。
+  4. **过期吊销令牌清理**：清理 `expires_at` 已过期的 `revoked_tokens` 记录。
 
 ## Grounding
 

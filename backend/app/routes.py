@@ -31,6 +31,7 @@ from app.auth import (
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.llm import LLM
+from app.maintenance import purge_document
 from app.models import Conversation, Document, DocumentACL, Group, Message, User
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
@@ -641,11 +642,12 @@ async def delete_document(
     request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict[str, str]:
+    purge: bool = False,
+) -> dict[str, object]:
     settings = _settings(request)
     user = await _user(session, actor)
     document = await session.get(Document, document_id)
-    if document is None or document.deleted_at is not None:
+    if document is None or (document.deleted_at is not None and not purge):
         raise APIError(404, "not_found", "文档不存在")
     if user.role != "admin" and document.owner_id != user.id:
         await write_audit(
@@ -655,9 +657,28 @@ async def delete_document(
             resource_type="document",
             resource_id=str(document.id),
             request_id=getattr(request.state, "request_id", None),
-            detail={"operation": "delete"},
+            ip=_client_ip(request),
+            detail={"operation": "purge" if purge else "delete"},
         )
+        if document.deleted_at is not None:
+            raise APIError(404, "not_found", "文档不存在")
         raise APIError(403, "forbidden", "只能删除自己上传的文档")
+    if purge:
+        doc_id_str = str(document.id)
+        messages_scrubbed = await purge_document(session, document.id)
+        await session.commit()
+        await write_audit(
+            settings=settings,
+            actor_id=user.id,
+            action="document_purged",
+            resource_type="document",
+            resource_id=doc_id_str,
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={"messages_scrubbed": messages_scrubbed},
+        )
+        return {"status": "purged", "messages_scrubbed": messages_scrubbed}
+
     from datetime import UTC, datetime
 
     document.deleted_at = datetime.now(UTC)
@@ -891,6 +912,20 @@ async def get_conversation(
             for item in messages
         ],
     }
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, str]:
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None or conversation.user_id != actor.id:
+        raise APIError(404, "not_found", "会话不存在")
+    await session.delete(conversation)
+    await session.commit()
+    return {"status": "deleted"}
 
 
 @router.get("/audit")
