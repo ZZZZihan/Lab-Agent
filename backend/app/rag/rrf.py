@@ -24,6 +24,7 @@ class Hit(TypedDict, total=False):
     bm25: float
     rrf: float
     rerank: float
+    rerank_score: float
     dense_rank: int | None
     bm25_rank: int | None
     key: str
@@ -87,6 +88,36 @@ def order_for_mode(
     working.sort(key=lambda hit: (-_num(hit.get("rrf")), -_num(hit.get("cosine"))))
     if mode == "hybrid_rrf":
         return working
+    if mode == "hybrid_rrf_rerank":
+        reranked = [
+            hit
+            for hit in working
+            if hit.get("rerank_score") is not None or hit.get("rerank") is not None
+        ]
+        if not reranked:
+            return working
+        unreranked = [
+            hit
+            for hit in working
+            if hit.get("rerank_score") is None and hit.get("rerank") is None
+        ]
+        for hit in reranked:
+            score_val = (
+                _num(hit.get("rerank_score"))
+                if hit.get("rerank_score") is not None
+                else _num(hit.get("rerank"))
+            )
+            hit["rerank_score"] = score_val
+            hit["rerank"] = score_val
+        reranked.sort(
+            key=lambda hit: (
+                -_num(hit.get("rerank_score")),
+                -_num(hit.get("rrf")),
+                -_num(hit.get("cosine")),
+                str(hit["key"]),
+            )
+        )
+        return reranked + unreranked
     pool = 15 if mode.endswith("15") else 40
     head = working[:pool]
     tail = working[pool:]
@@ -100,6 +131,8 @@ def order_for_mode(
 
 def decision_score(hit: Hit, mode: str) -> float:
     if "rerank" in mode:
+        if hit.get("rerank_score") is not None:
+            return float(hit["rerank_score"])
         return float(hit.get("rerank") or 0.0)
     return float(hit.get("cosine") or 0.0)
 

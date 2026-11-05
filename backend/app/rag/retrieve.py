@@ -6,14 +6,17 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import Principal, acl_sql
-from app.config import Settings
+from app.audit import write_audit
+from app.config import MODES, Settings
 from app.rag.bm25 import bm25_score, document_frequencies, rare_coverage
 from app.rag.embedder import Embedder
+from app.rag.rerank import RerankClient, get_rerank_client
 from app.rag.rrf import Hit, order_for_mode
 from app.rag.tokenize import content_tokens, tokenize, tsquery
 
@@ -26,6 +29,10 @@ class SearchBundle:
     n_docs: int
     elapsed_ms: float
     mode: str
+    rerank_failed: bool = False
+
+
+RetrievalBundle = SearchBundle
 
 
 ALLOWED_STORAGES = frozenset({"vector", "halfvec"})
@@ -82,12 +89,16 @@ async def search_knowledge(
     collection: str | None = None,
     source: str | None = None,
     limit: int | None = None,
+    rerank_client: RerankClient | None = None,
+    request_id: str | None = None,
 ) -> SearchBundle:
     started = time.perf_counter()
     storage = settings.embedding_storage
     if storage not in ALLOWED_STORAGES:
         raise ValueError(f"Unsupported embedding storage: {storage!r}")
     active_mode = mode or settings.retrieval_mode or "dense"
+    if settings.reranker == "api" and mode is None:
+        active_mode = "hybrid_rrf_rerank"
     query_tokens = content_tokens(query)
     params = {
         "is_admin": user.role == "admin",
@@ -266,18 +277,80 @@ async def search_knowledge(
             k1=settings.bm25_k1,
             b=settings.bm25_b,
         )
-    ranked = order_for_mode(
-        hits,
-        active_mode,
-        rrf_k=int(settings.rrf_k or 60),
-        query_tokens=query_tokens,
-        df=df,
-        n_docs=n_docs,
+    rerank_failed = False
+    use_api_rerank = (
+        active_mode == "hybrid_rrf_rerank"
+        or (settings.reranker == "api" and mode is None)
     )
+    if use_api_rerank:
+        rrf_ranked = order_for_mode(
+            hits,
+            "hybrid_rrf",
+            rrf_k=int(settings.rrf_k or 60),
+            query_tokens=query_tokens,
+            df=df,
+            n_docs=n_docs,
+        )
+        if rrf_ranked:
+            pool_size = int(settings.rerank_pool or 20)
+            head = [cast(Hit, dict(h)) for h in rrf_ranked[:pool_size]]
+            tail = [cast(Hit, dict(h)) for h in rrf_ranked[pool_size:]]
+            try:
+                client = rerank_client or get_rerank_client(settings)
+                rerank_items = await client.rerank(
+                    query,
+                    [str(h.get("content") or "") for h in head],
+                    top_n=len(head),
+                )
+                score_by_idx = {
+                    int(item["index"]): float(item["relevance_score"])
+                    for item in rerank_items
+                }
+                for idx, h in enumerate(head):
+                    score_val = score_by_idx.get(idx, 0.0)
+                    h["rerank_score"] = score_val
+                    h["rerank"] = score_val
+                head.sort(
+                    key=lambda hit: (
+                        -float(hit.get("rerank_score") or 0.0),
+                        -float(hit.get("rrf") or 0.0),
+                        -float(hit.get("cosine") or 0.0),
+                        str(hit["key"]),
+                    )
+                )
+                ranked = head + tail
+                active_mode = "hybrid_rrf_rerank"
+            except Exception:
+                rerank_failed = True
+                ranked = rrf_ranked
+                await write_audit(
+                    settings=settings,
+                    actor_id=user.id,
+                    action="rerank_failed",
+                    resource_type="reranker",
+                    request_id=request_id,
+                    detail={
+                        "model": settings.rerank_model or "unknown",
+                        "reason": "upstream_error",
+                    },
+                )
+        else:
+            ranked = rrf_ranked
+    else:
+        ranked = order_for_mode(
+            hits,
+            active_mode,
+            rrf_k=int(settings.rrf_k or 60),
+            query_tokens=query_tokens,
+            df=df,
+            n_docs=n_docs,
+        )
     if limit is not None:
         ranked_for_return = ranked[:limit]
     else:
         ranked_for_return = ranked
+    for hit in ranked_for_return:
+        hit["_rerank_failed"] = rerank_failed  # type: ignore[typeddict-unknown-key]
     evidence: list[str] = []
     for hit in ranked[:3]:
         evidence.extend(list(hit.get("tokens") or []))
@@ -290,6 +363,7 @@ async def search_knowledge(
         n_docs=n_docs,
         elapsed_ms=elapsed,
         mode=active_mode,
+        rerank_failed=rerank_failed,
     )
 
 
@@ -307,6 +381,8 @@ def principal_from_user(
 
 # tokenize is used by callers that need the same analyzer as retrieval.
 __all__ = [
+    "MODES",
+    "RetrievalBundle",
     "SearchBundle",
     "get_pgvector_version",
     "principal_from_user",

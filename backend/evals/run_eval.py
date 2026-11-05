@@ -267,13 +267,16 @@ async def _featurize(
             group_ids = await load_user_group_ids(session, user.id)
             principal = Principal(id=user.id, role=user.role, group_ids=group_ids)
             for question in questions:
+                featurize_mode = (
+                    "hybrid_rrf_rerank" if settings.reranker == "api" else "dense"
+                )
                 bundle = await search_knowledge(
                     session,
                     settings=settings,
                     embedder=embedder,
                     user=principal,
                     query=str(question["question"]),
-                    mode="dense",
+                    mode=featurize_mode,
                     source="eval",
                     limit=None,
                 )
@@ -304,6 +307,11 @@ async def _featurize(
                                 "key": hit["key"],
                                 "cosine": float(hit.get("cosine") or 0.0),
                                 "bm25": float(hit.get("bm25") or 0.0),
+                                "rerank_score": (
+                                    float(hit["rerank_score"])
+                                    if hit.get("rerank_score") is not None
+                                    else None
+                                ),
                                 "tokens": list(hit.get("tokens") or []),
                                 "chunk_id": hit["chunk_id"],
                                 "document_id": hit["document_id"],
@@ -527,7 +535,10 @@ async def _run(
     selected_mode = "dense"
     selected_params: dict[str, object] = {}
     best_recall = (-1.0, -1.0)
-    for mode in MODES:
+    eval_modes: tuple[str, ...] = (
+        (*MODES, "hybrid_rrf_rerank") if settings.reranker == "api" else MODES
+    )
+    for mode in eval_modes:
         dev_rows = [row for row in features if row["split"] == "dev"]
         test_rows = [row for row in features if row["split"] == "test"]
         if tune_dev:

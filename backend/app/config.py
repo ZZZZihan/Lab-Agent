@@ -36,6 +36,7 @@ MODES = (
     "hybrid_rrf",
     "hybrid_lexical_rerank",
     "hybrid_lexical_rerank15",
+    "hybrid_rrf_rerank",
 )
 
 REDACTION_VERSION = 2
@@ -126,8 +127,15 @@ class Settings(BaseSettings):
     embedding_query_instruction: str = ""
     embedding_document_prefix: str = ""
     embedding_redact: bool = False
-    reranker: Literal["off", "lexical", "bge"] = "off"
+    reranker: Literal["off", "api", "lexical", "bge"] = "off"
     reranker_model: str = "BAAI/bge-reranker-base"
+    rerank_base_url: str | None = None
+    rerank_api_key: SecretStr | None = None
+    rerank_api_key_file: str | None = None
+    rerank_model: str | None = None
+    rerank_model_version: str = ""
+    rerank_pool: int = Field(default=20, ge=1, le=100)
+    rerank_timeout_seconds: float = Field(default=10.0, gt=0.0, le=120.0)
     retrieval_mode: str | None = None
     dense_pool: int | None = None
     lexical_pool: int | None = None
@@ -322,6 +330,41 @@ class Settings(BaseSettings):
                 raise RuntimeError("LLM_MODEL must be explicitly set for openai_compatible")
         if not self.judge_base_url.strip() and self.llm_base_url:
             self.judge_base_url = self.llm_base_url
+        if (
+            self.rerank_api_key is not None
+            or (self.rerank_api_key_file and self.rerank_api_key_file.strip())
+        ):
+            self.rerank_api_key = read_secret(
+                self.rerank_api_key.get_secret_value()
+                if self.rerank_api_key is not None
+                else None,
+                (self.rerank_api_key_file or "").strip() or None,
+                "RERANK_API_KEY",
+                app_env=self.app_env,
+            )
+        elif self.reranker == "api":
+            if not self.rerank_api_key_file and self.llm_api_key_file:
+                self.rerank_api_key_file = self.llm_api_key_file
+            if self.llm_api_key is not None:
+                self.rerank_api_key = self.llm_api_key
+            elif self.llm_api_key_file and self.llm_api_key_file.strip():
+                self.rerank_api_key = read_secret(
+                    None,
+                    self.llm_api_key_file.strip(),
+                    "RERANK_API_KEY",
+                    app_env=self.app_env,
+                )
+        if self.reranker == "api":
+            if self.rerank_base_url is None or not self.rerank_base_url.strip():
+                if self.llm_base_url and self.llm_base_url.strip():
+                    self.rerank_base_url = self.llm_base_url.strip()
+                else:
+                    raise RuntimeError("RERANK_BASE_URL is required when RERANKER=api")
+            else:
+                self.rerank_base_url = self.rerank_base_url.strip()
+            if self.rerank_model is None or not self.rerank_model.strip():
+                raise RuntimeError("RERANK_MODEL is required when RERANKER=api")
+            self.rerank_model = self.rerank_model.strip()
         if self.llm_capture and self.app_env != "test":
             raise RuntimeError("LLM_CAPTURE is only allowed when APP_ENV=test")
         if not 1 <= self.audit_retention_days <= 3650:
@@ -380,7 +423,8 @@ class Settings(BaseSettings):
                     self.calibration_source = str(found_path)
         if explicit_env:
             self.calibration_source = "env"
-        self.retrieval_mode = _pick(self.retrieval_mode, tuned, "retrieval_mode", "dense")
+        default_mode = "hybrid_rrf_rerank" if self.reranker == "api" else "dense"
+        self.retrieval_mode = _pick(self.retrieval_mode, tuned, "retrieval_mode", default_mode)
         self.dense_pool = int(_pick(self.dense_pool, tuned, "dense_pool", 80))
         self.lexical_pool = int(_pick(self.lexical_pool, tuned, "lexical_pool", 80))
         self.rrf_k = int(_pick(self.rrf_k, tuned, "rrf_k", 60))
@@ -451,10 +495,18 @@ class Settings(BaseSettings):
         dp_text = "" if self.embedder == "hashing" else self.embedding_document_prefix
         qp_hash = hashlib.sha256(qp_text.encode("utf-8")).hexdigest()[:8]
         dp_hash = hashlib.sha256(dp_text.encode("utf-8")).hexdigest()[:8]
-        return (
+        base = (
             f"{self.embedder}|{model_id}|{self.embedding_dim}{storage_suffix}"
             f"|redact={redact_flag}|qp={qp_hash}|dp={dp_hash}"
         )
+        if self.reranker == "api" and self.rerank_model:
+            rr_ver = self.rerank_model_version.strip()
+            if rr_ver:
+                return f"{base}|rr={self.rerank_model}@{rr_ver}"
+            if "@" in self.rerank_model:
+                return f"{base}|rr={self.rerank_model}"
+            return f"{base}|rr={self.rerank_model}@v1"
+        return base
 
     @property
     def embedding_fingerprint(self) -> str:

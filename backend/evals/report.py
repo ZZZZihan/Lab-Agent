@@ -18,6 +18,7 @@ MODE_LABELS: dict[str, str] = {
     "hybrid_rrf": "hybrid RRF",
     "hybrid_lexical_rerank": "lexical rerank, pool 40",
     "hybrid_lexical_rerank15": "lexical rerank, pool 15",
+    "hybrid_rrf_rerank": "hybrid RRF + API rerank",
 }
 
 

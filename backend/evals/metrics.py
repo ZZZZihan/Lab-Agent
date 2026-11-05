@@ -9,6 +9,14 @@ from typing import Any
 from app.rag.bm25 import rare_coverage
 from app.rag.rrf import Hit, decide, order_for_mode
 
+MODES = (
+    "dense",
+    "hybrid_rrf",
+    "hybrid_lexical_rerank",
+    "hybrid_lexical_rerank15",
+    "hybrid_rrf_rerank",
+)
+
 PRIMARY_METRICS = (
     "recall_at_5",
     "mrr",
@@ -99,20 +107,25 @@ def _gold(row: dict[str, Any]) -> set[str]:
 def _ranked_keys(row: dict[str, Any], mode: str, rrf_k: int) -> list[Hit]:
     hits: list[Hit] = []
     for item in row["hits"]:
-        hits.append(
-            Hit(
-                key=str(item["key"]),
-                cosine=float(item["cosine"]),
-                bm25=float(item["bm25"]),
-                tokens=list(item.get("tokens") or []),
-                content=str(item.get("content") or ""),
-                chunk_id=str(item.get("chunk_id") or item["key"]),
-                document_id=str(item.get("document_id") or ""),
-                heading=str(item.get("heading") or ""),
-                title=str(item.get("title") or ""),
-                chunk_index=int(item.get("chunk_index") or 0),
-            )
+        hit = Hit(
+            key=str(item["key"]),
+            cosine=float(item["cosine"]),
+            bm25=float(item["bm25"]),
+            tokens=list(item.get("tokens") or []),
+            content=str(item.get("content") or ""),
+            chunk_id=str(item.get("chunk_id") or item["key"]),
+            document_id=str(item.get("document_id") or ""),
+            heading=str(item.get("heading") or ""),
+            title=str(item.get("title") or ""),
+            chunk_index=int(item.get("chunk_index") or 0),
         )
+        if item.get("rerank_score") is not None:
+            hit["rerank_score"] = float(item["rerank_score"])
+            hit["rerank"] = float(item["rerank_score"])
+        elif item.get("rerank") is not None:
+            hit["rerank"] = float(item["rerank"])
+            hit["rerank_score"] = float(item["rerank"])
+        hits.append(hit)
     return order_for_mode(
         hits,
         mode,

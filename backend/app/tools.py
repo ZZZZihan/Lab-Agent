@@ -13,6 +13,7 @@ from app.audit import write_audit
 from app.config import Settings
 from app.models import Document, DocumentACL, User
 from app.rag.embedder import Embedder
+from app.rag.rerank import RerankClient
 from app.rag.retrieve import principal_from_user, search_knowledge
 from app.rag.rrf import Hit
 
@@ -49,6 +50,7 @@ async def search_knowledge_base(
     source: str | None = None,
     request_id: str | None = None,
     group_ids: frozenset[str] | None = None,
+    rerank_client: RerankClient | None = None,
 ) -> list[Hit]:
     resolved_groups = (
         group_ids if group_ids is not None else await load_user_group_ids(session, user.id)
@@ -62,6 +64,8 @@ async def search_knowledge_base(
         collection=collection,
         source=source,
         limit=k,
+        rerank_client=rerank_client,
+        request_id=request_id,
     )
     await write_audit(
         settings=settings,
@@ -84,6 +88,7 @@ async def search_knowledge_base(
         hit["_coverage"] = bundle.coverage  # type: ignore[typeddict-unknown-key]
         hit["_elapsed_ms"] = bundle.elapsed_ms  # type: ignore[typeddict-unknown-key]
         hit["_mode"] = bundle.mode  # type: ignore[typeddict-unknown-key]
+        hit["_rerank_failed"] = bundle.rerank_failed  # type: ignore[typeddict-unknown-key]
     return bundle.hits
 
 
@@ -144,6 +149,7 @@ async def query_lab_projects(
     k: int = 8,
     request_id: str | None = None,
     group_ids: frozenset[str] | None = None,
+    rerank_client: RerankClient | None = None,
 ) -> dict[str, object]:
     hits = await search_knowledge_base(
         session,
@@ -155,6 +161,7 @@ async def query_lab_projects(
         collection="project",
         request_id=request_id,
         group_ids=group_ids,
+        rerank_client=rerank_client,
     )
     return {"status": "ok", "source": "knowledge_base", "hits": hits}
 
@@ -169,6 +176,7 @@ async def query_meetings(
     k: int = 8,
     request_id: str | None = None,
     group_ids: frozenset[str] | None = None,
+    rerank_client: RerankClient | None = None,
 ) -> dict[str, object]:
     hits = await search_knowledge_base(
         session,
@@ -180,6 +188,7 @@ async def query_meetings(
         collection="meeting",
         request_id=request_id,
         group_ids=group_ids,
+        rerank_client=rerank_client,
     )
     return {"status": "ok", "source": "knowledge_base", "hits": hits}
 
