@@ -80,6 +80,8 @@ const copy = {
     role: "角色",
     loading: "正在读取…",
     noSession: "登录状态已失效，请重新登录。",
+    uncalibratedBanner:
+      "当前嵌入模型尚未校准，系统会拒答绝大多数问题。请运行校准（见 README）。",
   },
   en: {
     brand: "Lab Agent",
@@ -156,6 +158,8 @@ const copy = {
     role: "Role",
     loading: "Loading…",
     noSession: "The session expired. Sign in again.",
+    uncalibratedBanner:
+      "The current embedding model is not calibrated; the system will refuse almost all questions. Please run calibration (see README).",
   },
 } as const;
 

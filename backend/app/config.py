@@ -129,7 +129,8 @@ class Settings(BaseSettings):
     cite_k: int | None = None
     rare_coverage_min: float | None = None
     load_tuned_config: bool = True
-    tuned_config_path: str = ""
+    calibration_dir: str = "./data/calibrations"
+    calibration_source: str | None = None
     corpus_dir: str = ""
     seed_only_dir: str = ""
     questions_path: str = ""
@@ -261,14 +262,33 @@ class Settings(BaseSettings):
             self.seed_only_dir = str(root / "evals" / "data" / "v1" / "seed_only")
         if not self.questions_path:
             self.questions_path = str(root / "evals" / "data" / "v1" / "questions.jsonl")
+        slug = self.embedding_slug
+        explicit_env = self.evidence_score_min is not None
         tuned: dict[str, object] = {}
-        path = (
-            Path(self.tuned_config_path)
-            if self.tuned_config_path
-            else root / "evals" / "data" / "v1" / "selected_config.json"
-        )
-        if self.load_tuned_config and path.is_file():
-            tuned = json.loads(path.read_text(encoding="utf-8"))
+        self.calibration_source = None
+        if self.load_tuned_config:
+            candidates = [
+                Path(self.calibration_dir) / f"{slug}.json",
+                root / "evals" / "calibrations" / f"{slug}.json",
+            ]
+            found_path: Path | None = None
+            for candidate in candidates:
+                if candidate.is_file():
+                    found_path = candidate
+                    break
+            if found_path is not None:
+                try:
+                    loaded = json.loads(found_path.read_text(encoding="utf-8"))
+                except Exception:
+                    loaded = None
+                if (
+                    isinstance(loaded, dict)
+                    and loaded.get("embedder_fingerprint") == self.embedding_fingerprint
+                ):
+                    tuned = loaded
+                    self.calibration_source = str(found_path)
+        if explicit_env:
+            self.calibration_source = "env"
         self.retrieval_mode = _pick(self.retrieval_mode, tuned, "retrieval_mode", "dense")
         self.dense_pool = int(_pick(self.dense_pool, tuned, "dense_pool", 80))
         self.lexical_pool = int(_pick(self.lexical_pool, tuned, "lexical_pool", 80))
@@ -285,6 +305,10 @@ class Settings(BaseSettings):
         if self.retrieval_mode not in MODES:
             raise RuntimeError(f"Unknown retrieval mode: {self.retrieval_mode}")
         return self
+
+    @property
+    def calibrated(self) -> bool:
+        return self.calibration_source is not None
 
     @property
     def cors_origin_list(self) -> list[str]:

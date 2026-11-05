@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic import command
@@ -67,6 +70,12 @@ async def _prepare(settings: object) -> User:
     maker = get_sessionmaker()
     try:
         async with maker() as session:
+            from app.rag.index_meta import column_type
+            from app.reindex import apply_reindex
+
+            col_storage, col_dim = await column_type(session)
+            if (col_storage, col_dim) != (settings.embedding_storage, settings.embedding_dim):
+                await apply_reindex(session, settings, embedder, if_needed=True)
             user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
             if user is None:
                 user = User(
@@ -189,17 +198,61 @@ def _round_metrics(metrics: dict[str, float]) -> dict[str, float]:
     return {key: round(value, 4) for key, value in metrics.items()}
 
 
-async def _run(tune_dev: bool, check: bool) -> None:
+def _git_sha(root: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+              cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
     settings = get_settings()
+    root = repo_root()
+    slug = settings.embedding_slug
+    fingerprint = settings.embedding_fingerprint
+    runtime_dir = Path(settings.calibration_dir)
+    repo_cal_path = root / "evals" / "calibrations" / f"{slug}.json"
+    repo_results_path = root / "evals" / "results" / "v1" / f"{slug}.json"
+    runtime_cal_path = runtime_dir / f"{slug}.json"
+    runtime_results_path = runtime_dir / f"results-{slug}.json"
+
+    if check and not (tune_dev and commit) and not repo_results_path.is_file():
+        print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)
+        raise SystemExit(3)
+
     questions = _load_questions(Path(settings.questions_path))
     if len(questions) < 60:
         raise SystemExit(f"eval set has {len(questions)} questions, need at least 60")
     user = await _prepare(settings)
     features = await _featurize(settings, user, questions)
-    root = repo_root()
-    config_path = root / "evals" / "data" / "v1" / "selected_config.json"
-    baseline_path = root / "evals" / "baseline_results.json"
-    existing = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
+
+    existing: dict[str, object] | None = None
+    for candidate in (runtime_cal_path, repo_cal_path):
+        if candidate.is_file():
+            try:
+                loaded = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                loaded = None
+            if isinstance(loaded, dict) and loaded.get("embedder_fingerprint") == fingerprint:
+                existing = loaded
+            break
+    if existing is None and repo_results_path.is_file():
+        committed_doc = json.loads(repo_results_path.read_text(encoding="utf-8"))
+        if isinstance(committed_doc, dict) and isinstance(
+            committed_doc.get("selected_config"), dict
+        ):
+            existing = dict(committed_doc["selected_config"])
+
     mode_reports: dict[str, object] = {}
     selected_mode = "dense"
     selected_params: dict[str, object] = {}
@@ -214,7 +267,8 @@ async def _run(tune_dev: bool, check: bool) -> None:
             dev_metrics = tuned["dev"]
         else:
             if existing is None:
-                raise SystemExit("selected_config.json is missing; run with --tune first")
+                await dispose_engine()
+                raise SystemExit(f"Calibration for {slug} is missing; run with --tune first")
             params = {
                 "rrf_k": existing.get("rrf_k", 60) if mode == existing.get("retrieval_mode") else 60,
                 "evidence_score_min": existing.get("evidence_score_min", 0.99),
@@ -260,11 +314,30 @@ async def _run(tune_dev: bool, check: bool) -> None:
         selected_params["retrieval_mode"] = selected_mode
         selected_params["dense_pool"] = 80
         selected_params["lexical_pool"] = 80
-        config_path.write_text(
-            json.dumps(selected_params, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        calibration_payload = {
+            "embedder_fingerprint": fingerprint,
+            "dataset": "v1",
+            "split_used": "dev",
+            "tuned_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "git_sha": _git_sha(root),
+            "retrieval_mode": selected_mode,
+            "rrf_k": selected_params["rrf_k"],
+            "evidence_score_min": selected_params["evidence_score_min"],
+            "rare_coverage_min": selected_params["rare_coverage_min"],
+            "cite_margin": selected_params["cite_margin"],
+            "cite_k": selected_params["cite_k"],
+            "dense_pool": 80,
+            "lexical_pool": 80,
+        }
+        target_cal_path = repo_cal_path if commit else runtime_cal_path
+        target_cal_path.parent.mkdir(parents=True, exist_ok=True)
+        target_cal_path.write_text(
+            json.dumps(calibration_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
     report = {
-        "label": "hashing-embedder-ci-baseline",
+        "label": f"{slug}-v1",
+        "embedder_fingerprint": fingerprint,
         "embedder": settings.embedder,
         "embedding_model_when_bge": settings.embedding_model,
         "neural_weights_used": settings.embedder != "hashing",
@@ -282,26 +355,41 @@ async def _run(tune_dev: bool, check: bool) -> None:
         "questions": {"total": len(questions), "dev": sum(1 for q in questions if q["split"] == "dev"), "test": sum(1 for q in questions if q["split"] == "test")},
     }
     if tune_dev:
-        baseline_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        target_results_path = repo_results_path if commit else runtime_results_path
+        target_results_path.parent.mkdir(parents=True, exist_ok=True)
+        target_results_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     print(json.dumps({"selected_mode": selected_mode, "test": mode_reports[selected_mode]["test"]}, ensure_ascii=False, indent=2))  # type: ignore[index]
-    if check and baseline_path.is_file():
-        committed = json.loads(baseline_path.read_text(encoding="utf-8"))
+    if check:
+        if not repo_results_path.is_file():
+            print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)
+            await dispose_engine()
+            raise SystemExit(3)
+        committed = json.loads(repo_results_path.read_text(encoding="utf-8"))
         current = mode_reports[selected_mode]["test"]  # type: ignore[index]
         reference = committed["modes"][selected_mode]["test"]
         for key in ("recall_at_5", "mrr", "refusal_correctness", "citation_f1"):
             delta = abs(float(current[key]) - float(reference[key]))  # type: ignore[index]
             if delta > 0.03:
+                await dispose_engine()
                 raise SystemExit(f"{key} drifted by {delta:.3f}")
     await dispose_engine()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tune", action="store_true", help="Fit thresholds on dev and write the baseline")
+    parser.add_argument("--tune", action="store_true", help="Fit thresholds on dev and write calibration")
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="With --tune, write calibration and baseline results to the repository",
+    )
     parser.add_argument("--check", action="store_true", help="Fail if test metrics drift from the committed baseline")
     args = parser.parse_args()
     command.upgrade(Config(str(repo_root() / "backend" / "alembic.ini")), "head")
-    asyncio.run(_run(tune_dev=args.tune, check=args.check))
+    asyncio.run(_run(tune_dev=args.tune, check=args.check, commit=args.commit))
 
 
 if __name__ == "__main__":

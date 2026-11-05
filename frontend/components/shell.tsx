@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "cn";
-import { currentUser, logout, type User } from "@/lib/api";
+import { api, currentUser, logout, type User } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 export function Shell({ children }: { children: React.ReactNode }) {
@@ -15,6 +15,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
+  const [calibrated, setCalibrated] = useState<boolean | null>(null);
 
   useEffect(() => {
     currentUser()
@@ -25,6 +26,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
         }
         setUser(found);
         setReady(true);
+        api<{ calibrated?: boolean }>("health")
+          .then((health) => {
+            setCalibrated(health.calibrated ?? null);
+          })
+          .catch(() => {
+            setCalibrated(null);
+          });
       })
       .catch(() => router.replace("/login"));
   }, [router]);
@@ -82,6 +90,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ) : null}
         </div>
       </header>
+      {calibrated === false ? (
+        <div
+          role="alert"
+          className="border-b border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-800 dark:text-amber-300"
+        >
+          <div className="mx-auto w-full max-w-5xl">{t.uncalibratedBanner}</div>
+        </div>
+      ) : null}
       <main className="mx-auto w-full max-w-5xl px-4 py-6">
         {ready ? children : <p className="text-sm text-muted-foreground">{t.loading}</p>}
       </main>

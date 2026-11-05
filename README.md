@@ -53,12 +53,23 @@ cd frontend && npm ci && API_INTERNAL_URL=http://127.0.0.1:43124 npm run dev -- 
 
 默认回答器是抽取式本地回退。设置 `LLM_PROVIDER=deepseek`（或 `openai` / `ollama` / `vllm` / `openai_compatible`）以及相应的 `LLM_API_KEY`（或 `LLM_API_KEY_FILE`）、`LLM_BASE_URL` 后，拒绝门槛仍然在模型调用之前。
 
-评测：
+评测与阈值校准（按嵌入指纹 `embedding_fingerprint` 绑定）：
 
 ```bash
-cd backend && uv run python -m evals.run_eval --tune    # 只在开发集上调阈值
-uv run python -m evals.run_eval --check                  # 对照已提交的基线
+# 在开发集 (dev) 上拟合阈值，写入运行时目录 ${CALIBRATION_DIR}/<slug>.json
+cd backend && uv run python -m evals.run_eval --tune
+
+# 容器内校准当前嵌入模型（只调用嵌入服务，不调用 LLM），校准后重启 api 生效
+docker compose exec api python -m evals.run_eval --tune && docker compose restart api
+
+# 将校准文件与评测报告写入仓库 evals/calibrations/<slug>.json 与 evals/results/v1/<slug>.json（供提交）
+cd backend && uv run python -m evals.run_eval --tune --commit
+
+# 对照仓库内当前指纹对应的已提交基线（无基线时退出码为 3）
+cd backend && uv run python -m evals.run_eval --check
 ```
+
+若当前嵌入指纹尚未校准（`${CALIBRATION_DIR}/<slug>.json` 与 `evals/calibrations/<slug>.json` 均不存在或指纹不匹配，且未显式设置 `EVIDENCE_SCORE_MIN`），系统会失败关闭（拒答阈值回退为 `0.99`），`/api/v1/health` 返回 `calibrated: false`，前端顶部显示黄色未校准提示横幅。
 
 ## Architecture
 
@@ -79,7 +90,7 @@ flowchart LR
 
 ## What the baseline actually measured
 
-The committed file `evals/baseline_results.json` is the **hashing embedder**, not bge. Thresholds, citation margin, and RRF `k` were chosen on the dev split only (51 questions). The test split (27 questions) was scored once. Refusal uses cosine similarity. Fusion is reciprocal rank fusion, not a weighted sum of min-max scores.
+The committed files `evals/calibrations/hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442.json` and `evals/results/v1/hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442.json` are for the **hashing embedder** (`hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442`), not bge. Thresholds, citation margin, and RRF `k` were chosen on the dev split only (51 questions). The test split (27 questions) was scored once. Refusal uses cosine similarity. Fusion is reciprocal rank fusion, not a weighted sum of min-max scores.
 
 | Mode | Split | Recall@5 | MRR | Citation F1 | Refusal | False refusal | False answer |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |

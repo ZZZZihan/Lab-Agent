@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -135,6 +136,10 @@ async def health(request: Request) -> dict[str, object]:
         "llm_model": settings.llm_model,
         "llm_base_host": settings.llm_base_host,
         "retrieval_mode": settings.retrieval_mode,
+        "calibrated": settings.calibrated,
+        "calibration_source": (
+            Path(settings.calibration_source).name if settings.calibration_source else None
+        ),
     }
 
 
