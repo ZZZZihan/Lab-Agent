@@ -958,3 +958,98 @@ async def test_pending_document_visibility_and_file_upload_workflow(
         assert deleted_doc is not None
         assert deleted_doc.deleted_at is not None
         assert deleted_doc.status == "ready"
+
+
+async def test_audit_actor_name_and_cursor_pagination(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    admin = await _login(client, "admin@lab.local")
+    member = await _login(client, "member@lab.local")
+    viewer = await _login(client, "viewer@lab.local")
+
+    # Non-admin cannot view audit
+    forbidden = await client.get("/api/v1/audit", headers=member)
+    assert forbidden.status_code == 403
+
+    # Trigger several distinct audit events (unknown-email failed login, upload, delete)
+    await client.post(
+        "/api/v1/auth/login",
+        json={"email": "nobody@qingheng.lab", "password": "wrong"},
+    )
+    doc_id = await _upload(
+        client,
+        member,
+        title="审计分页测试文档",
+        body="## 第一节\n这是一条测试审计游标分页的记录。",
+        visibility="lab",
+    )
+    await client.delete(f"/api/v1/documents/{doc_id}", headers=member)
+    await client.post("/api/v1/auth/logout", headers=viewer)
+
+    # Fetch full list
+    full_resp = await client.get("/api/v1/audit?limit=100", headers=admin)
+    assert full_resp.status_code == 200, full_resp.text
+    full_body = full_resp.json()
+    all_events: list[dict[str, object]] = full_body["events"]
+    assert len(all_events) >= 6
+    assert full_body["next_before_id"] is None
+
+    # Verify actor_name is populated via LEFT JOIN users and emails are never returned
+    serialized = json.dumps(all_events, ensure_ascii=False)
+    assert "admin@lab.local" not in serialized
+    assert "member@lab.local" not in serialized
+    assert "viewer@lab.local" not in serialized
+    assert "nobody@qingheng.lab" not in serialized
+    for ev in all_events:
+        assert "email" not in ev
+        assert "actor_name" in ev
+
+    actor_names = {ev["actor_name"] for ev in all_events}
+    assert "沈昭" in actor_names
+    assert "林可" in actor_names
+    assert "王敏" in actor_names
+    assert None in actor_names  # from login_failed for unknown user
+
+    # Verify actor_id filter
+    member_me = (await client.get("/api/v1/auth/me", headers=member)).json()
+    member_id = member_me["id"]
+    by_actor_resp = await client.get(
+        f"/api/v1/audit?actor_id={member_id}&limit=100",
+        headers=admin,
+    )
+    assert by_actor_resp.status_code == 200
+    by_actor_events = by_actor_resp.json()["events"]
+    assert len(by_actor_events) >= 3
+    assert all(
+        ev["actor_id"] == member_id and ev["actor_name"] == "林可"
+        for ev in by_actor_events
+    )
+
+    # Verify cursor pagination (before_id / next_before_id): no duplicates and no missing rows
+    paginated_events: list[dict[str, object]] = []
+    cursor: int | None = None
+    pages = 0
+    while True:
+        url = "/api/v1/audit?limit=2"
+        if cursor is not None:
+            url += f"&before_id={cursor}"
+        page_resp = await client.get(url, headers=admin)
+        assert page_resp.status_code == 200
+        page_body = page_resp.json()
+        page_items: list[dict[str, object]] = page_body["events"]
+        assert len(page_items) <= 2
+        if cursor is not None:
+            assert all(int(item["id"]) < cursor for item in page_items)  # type: ignore[arg-type]
+        paginated_events.extend(page_items)
+        pages += 1
+        cursor = page_body["next_before_id"]
+        if cursor is None:
+            break
+
+    assert pages >= 3
+    all_ids = [int(ev["id"]) for ev in all_events]  # type: ignore[arg-type]
+    paginated_ids = [int(ev["id"]) for ev in paginated_events]  # type: ignore[arg-type]
+    assert len(paginated_ids) == len(set(paginated_ids)), "cursor pagination returned duplicate rows"
+    assert paginated_ids == all_ids, "cursor pagination missed or reordered rows"
+

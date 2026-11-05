@@ -704,6 +704,8 @@ async def list_audit(
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
     action: str | None = None,
+    actor_id: uuid.UUID | None = None,
+    before_id: int | None = None,
     limit: int = 50,
 ) -> dict[str, object]:
     if actor.role != "admin":
@@ -717,18 +719,39 @@ async def list_audit(
         )
         raise APIError(403, "forbidden", "只有管理员可以查看审计")
     bounded = min(max(limit, 1), 200)
-    sql = """
-        SELECT id, created_at::text AS created_at, actor_id::text AS actor_id, action,
-               resource_type, resource_id, request_id, detail
-        FROM audit_events
-    """
-    params: dict[str, object] = {"lim": bounded}
+    conditions: list[str] = []
+    params: dict[str, object] = {"lim": bounded + 1}
     if action:
-        sql += " WHERE action = :action"
+        conditions.append("a.action = :action")
         params["action"] = action
-    sql += " ORDER BY id DESC LIMIT :lim"
-    rows = await session.execute(text(sql), params)
-    return {"events": [dict(row) for row in rows.mappings()]}
+    if actor_id is not None:
+        conditions.append("a.actor_id = CAST(:actor_id AS uuid)")
+        params["actor_id"] = str(actor_id)
+    if before_id is not None:
+        conditions.append("a.id < :before_id")
+        params["before_id"] = before_id
+    where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT a.id AS id,
+               a.created_at::text AS created_at,
+               a.actor_id::text AS actor_id,
+               u.display_name AS actor_name,
+               a.action AS action,
+               a.resource_type AS resource_type,
+               a.resource_id AS resource_id,
+               a.request_id AS request_id,
+               a.detail AS detail
+        FROM audit_events a
+        LEFT JOIN users u ON u.id = a.actor_id
+        {where_sql}
+        ORDER BY a.id DESC
+        LIMIT :lim
+    """
+    rows = [dict(row) for row in (await session.execute(text(sql), params)).mappings()]
+    has_more = len(rows) > bounded
+    events = rows[:bounded]
+    next_before_id = int(events[-1]["id"]) if has_more and events else None
+    return {"events": events, "next_before_id": next_before_id}
 
 
 @router.post("/audit/retention")
