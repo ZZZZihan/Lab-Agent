@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import app.tools as tools_mod
 import httpx
 from alembic import command
 from alembic.config import Config
@@ -24,11 +25,11 @@ from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import Settings, get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
 from app.llm import LLM, build_llm
-from app.models import Document, User
+from app.models import User
 from app.rag.chunker import chunk_markdown, parse_front_matter
 from app.rag.embedder import build_embedder
-from app.rag.index_meta import column_type
 from app.rag.ingest import upsert_source
+from app.rag.redact import redact_text
 from app.reindex import apply_reindex
 from app.secrets import read_secret
 from sqlalchemy import select
@@ -202,7 +203,13 @@ def score_question_e2e(
     ttft_ms: float | None,
     total_latency_ms: float,
     usage: Mapping[str, Any],
+    llm_error: str | None = None,
+    embedding_error: str | None = None,
 ) -> dict[str, Any]:
+    qid = str(question_row.get("id") or "unknown")
+    if llm_error or embedding_error or decision_reason in {"llm_unavailable", "embedding_unavailable"}:
+        err_detail = llm_error or embedding_error or decision_reason
+        raise RuntimeError(f"Agent execution failed on {qid}: {err_detail}")
     answerable = bool(question_row["answerable"])
     e2e_refused = bool(
         refused
@@ -408,19 +415,36 @@ def aggregate_e2e_metrics(question_results: Sequence[Mapping[str, Any]]) -> dict
     }
 
 
+_SENTENCE_DELIM_RE = re.compile(
+    r"((?:[。！？!?]+|\.(?=(?:[ \t　]*\[[0-9]{1,2}\])*(?:\s|$)))(?:[ \t　]*\[[0-9]{1,2}\])*|\n+)"
+)
+
+
 def _extract_judgable_sentences(answer: str) -> list[str]:
     sentences: list[str] = []
-    for raw_line in re.split(r"(?<=[。！？\n])", answer):
-        cleaned = raw_line.strip()
+    parts = _SENTENCE_DELIM_RE.split(answer)
+    idx = 0
+    while idx < len(parts):
+        chunk = parts[idx]
+        if idx + 1 < len(parts):
+            chunk += parts[idx + 1]
+        idx += 2
+        cleaned = chunk.strip()
         if not cleaned:
             continue
-        if cleaned in {
+        without_cites = _CITATION_TAG_RE.sub("", cleaned).strip()
+        if without_cites in {
             "根据实验室文档中可核对的段落，回答如下。",
             "以上内容只复述检索到的原文，没有使用这些段落之外的信息。",
         }:
             continue
+        if not normalize_for_fact_match(without_cites):
+            continue
         sentences.append(cleaned)
     return sentences
+
+
+_extract_sentences = _extract_judgable_sentences
 
 
 def _resolve_judge_api_key(settings: Settings) -> str | None:
@@ -485,14 +509,22 @@ async def run_judge_on_results(
                 else:
                     ev_texts = [str(v) for v in cite_map.values()]
                 cited_evidence = " | ".join(ev_texts)
-                if not cited_evidence:
+                outbound_sentence = (
+                    redact_text(sentence)[0] if settings.llm_redact else sentence
+                )
+                outbound_evidence = (
+                    redact_text(cited_evidence)[0]
+                    if settings.llm_redact
+                    else cited_evidence
+                )
+                if not outbound_evidence:
                     score = 0
                 else:
                     prompt = (
                         "请判断下述【待核对句子】中的事实陈述是否完全被【所引证据】支持。\n"
                         "如果完全支持，只输出数字 1；如果存在证据未提及或与证据矛盾的内容，只输出数字 0。\n\n"
-                        f"【所引证据】\n{cited_evidence}\n\n"
-                        f"【待核对句子】\n{sentence}"
+                        f"【所引证据】\n{outbound_evidence}\n\n"
+                        f"【待核对句子】\n{outbound_sentence}"
                     )
                     resp = await client.post(
                         f"{base_url}/chat/completions",
@@ -526,8 +558,8 @@ async def run_judge_on_results(
                 judged_rows.append(
                     {
                         "question_id": str(q_res["id"]),
-                        "sentence": sentence,
-                        "cited_evidence": cited_evidence,
+                        "sentence": outbound_sentence,
+                        "cited_evidence": outbound_evidence,
                         "judge_score": score,
                         "human_score": "",
                         "notes": "",
@@ -622,17 +654,32 @@ async def _run_single_model_questions(
                 ttft_ms = (time.perf_counter() - _start) * 1000.0
             _sink.append(event)
 
-        agent_out = await run_agent(
-            session=session,
-            user=user,
-            settings=settings,
-            embedder=embedder,
-            llm=llm,
-            question=str(q["question"]),
-            emit=_emit,
-            request_id=f"e2e-{q['id']}",
-            group_ids=frozenset(),
-        )
+        orig_tools_sk = tools_mod.search_knowledge
+
+        async def _eval_scoped_sk(
+            *args: Any,
+            _orig: Any = orig_tools_sk,
+            **kwargs: Any,
+        ) -> Any:
+            if kwargs.get("source") is None:
+                kwargs["source"] = "eval"
+            return await _orig(*args, **kwargs)
+
+        tools_mod.search_knowledge = _eval_scoped_sk  # type: ignore[assignment]
+        try:
+            agent_out = await run_agent(
+                session=session,
+                user=user,
+                settings=settings,
+                embedder=embedder,
+                llm=llm,
+                question=str(q["question"]),
+                emit=_emit,
+                request_id=f"e2e-{q['id']}",
+                group_ids=frozenset(),
+            )
+        finally:
+            tools_mod.search_knowledge = orig_tools_sk  # type: ignore[assignment]
         total_ms = (time.perf_counter() - t0) * 1000.0
         emitted.append(
             {
@@ -643,15 +690,24 @@ async def _run_single_model_questions(
         )
         await session.commit()
 
+        llm_err = str(agent_out.get("llm_error") or "").strip() or None
+        emb_err = str(agent_out.get("embedding_error") or "").strip() or None
+        stream_err: str | None = None
         initial_citations: list[Mapping[str, Any]] = []
         citation_check_event: Mapping[str, Any] | None = None
         for ev in emitted:
-            if ev.get("type") == "citations":
+            if ev.get("type") == "error" and stream_err is None:
+                stream_err = str(ev.get("code") or "error")
+            elif ev.get("type") == "citations":
                 items = ev.get("items")
                 if isinstance(items, list):
                     initial_citations = [c for c in items if isinstance(c, dict)]
             elif ev.get("type") == "citation_check":
                 citation_check_event = ev
+
+        if llm_err or emb_err or stream_err:
+            err_detail = llm_err or emb_err or stream_err
+            raise RuntimeError(f"Agent execution failed on {q['id']}: {err_detail}")
 
         if not initial_citations:
             raw_cites = agent_out.get("citations")
@@ -677,6 +733,8 @@ async def _run_single_model_questions(
             ttft_ms=ttft_ms,
             total_latency_ms=total_ms,
             usage=usage_dict,
+            llm_error=llm_err,
+            embedding_error=emb_err,
         )
         question_results.append(q_score)
     return question_results
@@ -729,12 +787,7 @@ async def _run(
     reports: list[dict[str, Any]] = []
     try:
         async with maker() as session:
-            col_storage, col_dim = await column_type(session)
-            if (col_storage, col_dim) != (
-                base_settings.embedding_storage,
-                base_settings.embedding_dim,
-            ):
-                await apply_reindex(session, base_settings, embedder, if_needed=True)
+            await apply_reindex(session, base_settings, embedder, if_needed=True)
 
             user = await session.scalar(
                 select(User).where(User.email == "eval@lab.local")
@@ -755,158 +808,136 @@ async def _run(
                 user.is_active = False
                 await session.flush()
 
-            # Temporarily soft-hide non-corpus seed documents (such as private-review) during E2E
-            corpus_keys = {meta["key"] for meta, _ in corpus_records if meta.get("key")}
             await upsert_source(
                 session,
                 embedder=embedder,
                 owner_id=user.id,
-                source="seed",
+                source="eval",
                 records=corpus_records,
                 storage=base_settings.embedding_storage,
             )
-            other_docs = list(
-                await session.scalars(
-                    select(Document).where(
-                        Document.deleted_at.is_(None),
-                        Document.source != "eval",
-                        Document.source != "seed",
-                    )
-                )
-            )
-            hidden_doc_ids = [doc.id for doc in other_docs if doc.doc_key not in corpus_keys]
-            now_ts = datetime.now(UTC)
-            for doc in other_docs:
-                if doc.id in set(hidden_doc_ids):
-                    doc.deleted_at = now_ts
             await session.commit()
 
-            try:
-                for model_name in model_list:
-                    provider = base_settings.llm_provider
-                    if (
-                        provider == "fake"
-                        and model_name != "fake-grounded-v1"
-                        and base_settings.llm_base_url
-                    ):
-                        provider = "openai_compatible"
-                    model_settings = base_settings.model_copy(
-                        update={
-                            "llm_provider": provider,
-                            "llm_model": model_name,
-                            "corpus_dir": str(corpus_dir),
-                            "questions_path": str(questions_path),
-                        }
-                    )
-                    llm = build_llm(model_settings)
-                    try:
-                        q_results = await _run_single_model_questions(
-                            session=session,
-                            user=user,
-                            settings=model_settings,
-                            embedder=embedder,
-                            llm=llm,
-                            questions=selected_questions,
-                            gold_map=gold_map,
-                        )
-                    finally:
-                        await llm.aclose()
-
-                    metrics = aggregate_e2e_metrics(q_results)
-                    llm_slug = slugify_model(model_name)
-                    embed_slug = model_settings.embedding_slug
-                    run_slug = f"{llm_slug}__{embed_slug}"
-
-                    repo_e2e_dir = root / "evals" / "results" / "e2e"
-                    runtime_e2e_dir = Path(model_settings.calibration_dir) / "e2e"
-                    out_dir = repo_e2e_dir if commit else runtime_e2e_dir
-                    out_path = out_dir / f"{run_slug}.json"
-
-                    judge_section: dict[str, Any] | None = None
-                    if use_judge:
-                        audit_csv_path = out_dir / run_slug / "human_audit.csv"
-                        judge_section = await run_judge_on_results(
-                            settings=model_settings,
-                            llm_model=model_name,
-                            question_results=q_results,
-                            audit_csv_path=audit_csv_path,
-                            transport=judge_transport,
-                        )
-                        if commit:
-                            judge_section["human_audit_csv"] = str(
-                                audit_csv_path.relative_to(root)
-                            )
-
-                    generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    git_sha = _git_sha(root)
-                    returned_ids = list(metrics["usage"]["returned_models"]) or [model_name]
-
-                    report: dict[str, Any] = {
-                        "label": f"{run_slug}-{dataset}-{split}",
-                        "suite": "e2e",
-                        "dataset": dataset,
-                        "split": split,
-                        "n_questions": len(selected_questions),
-                        "n_answerable": sum(
-                            1 for q in selected_questions if q.get("answerable")
-                        ),
-                        "n_unanswerable": sum(
-                            1 for q in selected_questions if not q.get("answerable")
-                        ),
-                        "llm_provider": model_settings.llm_provider,
+            for model_name in model_list:
+                provider = base_settings.llm_provider
+                if (
+                    provider == "fake"
+                    and model_name != "fake-grounded-v1"
+                    and base_settings.llm_base_url
+                ):
+                    provider = "openai_compatible"
+                model_settings = base_settings.model_copy(
+                    update={
+                        "llm_provider": provider,
                         "llm_model": model_name,
-                        "returned_model_ids": returned_ids,
-                        "embedding_fingerprint": model_settings.embedding_fingerprint,
-                        "embedding_slug": embed_slug,
-                        "retrieval_mode": model_settings.retrieval_mode,
-                        "date": generated_at[:10],
-                        "generated_at": generated_at,
-                        "git_sha": git_sha,
-                        "metrics": metrics,
-                        "judge": judge_section,
-                        "questions": [
-                            {
-                                k: v
-                                for k, v in item.items()
-                                if k != "cite_text_by_index"
-                            }
-                            for item in q_results
-                        ],
+                        "corpus_dir": str(corpus_dir),
+                        "questions_path": str(questions_path),
                     }
-
-                    out_dir.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(
-                        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
+                )
+                llm = build_llm(model_settings)
+                try:
+                    q_results = await _run_single_model_questions(
+                        session=session,
+                        user=user,
+                        settings=model_settings,
+                        embedder=embedder,
+                        llm=llm,
+                        questions=selected_questions,
+                        gold_map=gold_map,
                     )
-                    print(
-                        json.dumps(
-                            {
-                                "llm_model": model_name,
-                                "returned_model_ids": returned_ids,
-                                "embedding_fingerprint": model_settings.embedding_fingerprint,
-                                "n_questions": len(selected_questions),
-                                "metrics": metrics,
-                                "judge": judge_section,
-                            },
-                            ensure_ascii=False,
-                            indent=2,
+                finally:
+                    await llm.aclose()
+
+                metrics = aggregate_e2e_metrics(q_results)
+                llm_slug = slugify_model(model_name)
+                embed_slug = model_settings.embedding_slug
+                run_slug = f"{llm_slug}__{embed_slug}"
+
+                repo_e2e_dir = root / "evals" / "results" / "e2e"
+                runtime_e2e_dir = Path(model_settings.calibration_dir) / "e2e"
+                out_dir = repo_e2e_dir if commit else runtime_e2e_dir
+                out_path = out_dir / f"{run_slug}.json"
+
+                judge_section: dict[str, Any] | None = None
+                if use_judge:
+                    audit_csv_path = out_dir / run_slug / "human_audit.csv"
+                    judge_section = await run_judge_on_results(
+                        settings=model_settings,
+                        llm_model=model_name,
+                        question_results=q_results,
+                        audit_csv_path=audit_csv_path,
+                        transport=judge_transport,
+                    )
+                    if commit:
+                        judge_section["human_audit_csv"] = str(
+                            audit_csv_path.relative_to(root)
                         )
-                    )
 
-                    if check:
-                        committed_path = repo_e2e_dir / f"{run_slug}.json"
-                        if not committed_path.is_file():
-                            await dispose_engine()
-                            raise SystemExit(
-                                f"Missing committed E2E baseline report: {committed_path}"
-                            )
-                    reports.append(report)
-            finally:
-                for doc in other_docs:
-                    if doc.id in set(hidden_doc_ids):
-                        doc.deleted_at = None
-                await session.commit()
+                generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                git_sha = _git_sha(root)
+                returned_ids = list(metrics["usage"]["returned_models"]) or [model_name]
+
+                report: dict[str, Any] = {
+                    "label": f"{run_slug}-{dataset}-{split}",
+                    "suite": "e2e",
+                    "dataset": dataset,
+                    "split": split,
+                    "n_questions": len(selected_questions),
+                    "n_answerable": sum(
+                        1 for q in selected_questions if q.get("answerable")
+                    ),
+                    "n_unanswerable": sum(
+                        1 for q in selected_questions if not q.get("answerable")
+                    ),
+                    "llm_provider": model_settings.llm_provider,
+                    "llm_model": model_name,
+                    "returned_model_ids": returned_ids,
+                    "embedding_fingerprint": model_settings.embedding_fingerprint,
+                    "embedding_slug": embed_slug,
+                    "retrieval_mode": model_settings.retrieval_mode,
+                    "date": generated_at[:10],
+                    "generated_at": generated_at,
+                    "git_sha": git_sha,
+                    "metrics": metrics,
+                    "judge": judge_section,
+                    "questions": [
+                        {
+                            k: v
+                            for k, v in item.items()
+                            if k != "cite_text_by_index"
+                        }
+                        for item in q_results
+                    ],
+                }
+
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                print(
+                    json.dumps(
+                        {
+                            "llm_model": model_name,
+                            "returned_model_ids": returned_ids,
+                            "embedding_fingerprint": model_settings.embedding_fingerprint,
+                            "n_questions": len(selected_questions),
+                            "metrics": metrics,
+                            "judge": judge_section,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+
+                if check:
+                    committed_path = repo_e2e_dir / f"{run_slug}.json"
+                    if not committed_path.is_file():
+                        await dispose_engine()
+                        raise SystemExit(
+                            f"Missing committed E2E baseline report: {committed_path}"
+                        )
+                reports.append(report)
     finally:
         await embedder.aclose()
         await dispose_engine()

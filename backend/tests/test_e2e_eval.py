@@ -11,6 +11,7 @@ import pytest
 from app.config import Settings, repo_root, reset_settings_cache
 from evals.report import BEGIN_MARKER, END_MARKER, run_report
 from evals.run_e2e import (
+    _extract_sentences,
     _run,
     aggregate_e2e_metrics,
     compute_fact_recall,
@@ -368,3 +369,172 @@ async def test_run_e2e_offline_smoke_10_questions(
         assert out_file.is_file()
     finally:
         reset_settings_cache()
+
+
+async def test_codex_review_fixes_sentences_redaction_errors_and_seed_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import Any
+
+    from app.db import dispose_engine, get_sessionmaker
+    from app.models import Document, DocumentACL
+    from app.seed import seed
+    from sqlalchemy import select
+
+    # 1. Post-punctuation citation tags stay attached to their sentences; no standalone "[2]" fragment
+    extracted = _extract_sentences("句一。[1] 句二。[2]")
+    assert extracted == ["句一。[1]", "句二。[2]"]
+    assert _extract_sentences("句一。[1][2]\n[3]\n句二 [3]。") == [
+        "句一。[1][2]",
+        "句二 [3]。",
+    ]
+
+    # 2. run_judge_on_results redacts PII in outbound judge prompts when settings.llm_redact=True
+    captured_prompts: list[str] = []
+
+    def redact_check_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        user_msg = str(body["messages"][-1]["content"])
+        captured_prompts.append(user_msg)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "1"}}]})
+
+    settings_redact = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        llm_provider="openai_compatible",
+        llm_base_url="http://127.0.0.1:3425/v1",
+        llm_api_key="magpie-test-key",  # type: ignore[arg-type]
+        llm_model="antigravity/gemini-3.8-flash",
+        judge_model="grok/grok-4.7-build-fast",
+        llm_redact=True,
+        load_tuned_config=False,
+    )
+    sec_email = "sec" + chr(64) + "qingheng.lab"
+    phone_num = "138" + "12345678"
+    await run_judge_on_results(
+        settings=settings_redact,
+        llm_model="antigravity/gemini-3.8-flash",
+        question_results=[
+            {
+                "id": "q056",
+                "refused": False,
+                "answer": f"事故需在 24 小时内上报至 {sec_email} 或致电 {phone_num}。[1]",
+                "cite_text_by_index": {
+                    1: f"[1] 《计算安全》·事故上报: 写信给 {sec_email}，电话 {phone_num}。"
+                },
+            }
+        ],
+        audit_csv_path=tmp_path / "redact_audit.csv",
+        transport=httpx.MockTransport(redact_check_handler),
+    )
+    assert len(captured_prompts) == 1
+    assert sec_email not in captured_prompts[0]
+    assert phone_num not in captured_prompts[0]
+    assert "[REDACTED_EMAIL]" in captured_prompts[0]
+    assert "[REDACTED_PHONE]" in captured_prompts[0]
+
+    # 3. score_question_e2e and _run reject agent failures (llm_error / embedding_error)
+    with pytest.raises(RuntimeError, match="Agent execution failed on q001: http_503"):
+        score_question_e2e(
+            {
+                "id": "q001",
+                "split": "test",
+                "type": "direct",
+                "question": "测试",
+                "answerable": True,
+                "answer_facts": ["事实"],
+            },
+            answer="",
+            refused=False,
+            decision_reason="ok",
+            initial_citations=[],
+            citation_check_event=None,
+            gold_keys=["doc#0"],
+            ttft_ms=None,
+            total_latency_ms=10.0,
+            usage={},
+            llm_error="http_503",
+        )
+
+    # 4. Running _run leaves existing source="seed" documents (private-review and seed ACLs) untouched
+    monkeypatch.setenv("EMBEDDER", "hashing")
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("LLM_MODEL", "fake-grounded-v1")
+    monkeypatch.setenv("CALIBRATION_DIR", str(tmp_path / "calibrations"))
+    reset_settings_cache()
+
+    await seed()
+    maker = get_sessionmaker()
+    async with maker() as session:
+        seed_docs_before = {
+            doc.doc_key: (doc.id, doc.owner_id, doc.visibility)
+            for doc in await session.scalars(select(Document).where(Document.source == "seed"))
+            if doc.doc_key
+        }
+        assert "private-review" in seed_docs_before
+        helios_id = seed_docs_before["project-helios"][0]
+        helios_acls_before = [
+            (r.principal_type, r.principal_id, r.permission)
+            for r in await session.scalars(
+                select(DocumentACL).where(DocumentACL.document_id == helios_id)
+            )
+        ]
+        assert len(helios_acls_before) > 0
+    await dispose_engine()
+
+    await _run(
+        dataset="v1",
+        split="test",
+        max_questions=2,
+        models=["fake-grounded-v1"],
+        use_judge=False,
+        commit=False,
+        check=False,
+    )
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        seed_docs_after = {
+            doc.doc_key: (doc.id, doc.owner_id, doc.visibility)
+            for doc in await session.scalars(select(Document).where(Document.source == "seed"))
+            if doc.doc_key
+        }
+        assert seed_docs_after == seed_docs_before
+        helios_acls_after = [
+            (r.principal_type, r.principal_id, r.permission)
+            for r in await session.scalars(
+                select(DocumentACL).where(DocumentACL.document_id == helios_id)
+            )
+        ]
+        assert helios_acls_after == helios_acls_before
+    await dispose_engine()
+
+    # Also verify _run raises RuntimeError when run_agent returns llm_error
+    async def _failing_run_agent(**_kwargs: Any) -> dict[str, object]:
+        return {
+            "answer": "",
+            "refused": False,
+            "decision": {"refused": False, "reason": "ok"},
+            "citations": [],
+            "usage": {},
+            "redactions": 0,
+            "trace": [],
+            "llm_error": "http_502",
+            "embedding_error": None,
+        }
+
+    monkeypatch.setattr("evals.run_e2e.run_agent", _failing_run_agent)
+    with pytest.raises(RuntimeError, match="Agent execution failed"):
+        await _run(
+            dataset="v1",
+            split="test",
+            max_questions=1,
+            models=["fake-grounded-v1"],
+            use_judge=False,
+            commit=False,
+            check=False,
+        )
+    reset_settings_cache()
+
