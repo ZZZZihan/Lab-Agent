@@ -337,6 +337,13 @@ The committed files `evals/calibrations/hashing-hashing-cjk-v1-512-redact-0-qp-e
 | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v2` | test | `synonym` | 18 | 0.833 | 0.889 | 2026-11-05 | `4576097` |
 | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v2` | test | `unanswerable_far` | 12 | — | 1.000 | 2026-11-05 | `4576097` |
 | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v2` | test | `unanswerable_near` | 25 | — | 0.360 | 2026-11-05 | `4576097` |
+
+### End-to-End Generation Evaluation
+
+| LLM Model | Returned Model | Embedding | Dataset | Split | Questions | Refusal | False Refusal | False Answer | Citation P | Citation R | Citation F1 | Invalid Cite | Unannotated | Fact Recall | TTFT p50/p95 (ms) | Latency p50/p95 (ms) | Tokens | Date | Git SHA |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `antigravity/gemini-3.8-flash` | `gemini-3.8-flash` | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v1` | test | 27 | 0.852 | 0.191 | 0.000 | 0.738 | 0.762 | 0.746 | 0.000 | 0.000 | 0.762 | 2608 / 5021 | 2635 / 5123 | 8520 | 2026-11-05 | `4576097` |
+| `grok/grok-4.7-build-fast` | `grok-4.7-build-fast` | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v1` | test | 27 | 0.852 | 0.191 | 0.000 | 0.738 | 0.762 | 0.746 | 0.000 | 0.000 | 0.738 | 2030 / 3215 | 2005 / 3307 | 37366 | 2026-11-05 | `4576097` |
 <!-- eval:end -->
 
 Mode choice is the best dev Recall@5, then MRR, so dense stays selected when hybrid ties it on dev. Hybrid RRF does not show the collapse that a naive BM25-weighted fusion produced on an earlier paraphrase set. The lexical reranker is not a cross-encoder. Multi-chunk Recall@5 is 1.0 on this set; citation F1 is lower because the tuned policy cites a single section. The hashing embedder still answers two thirds of the unanswerable test questions that share vocabulary with the corpus. That gap is why a calibrated neural embedder (`qwen3-embedding:8b`) is evaluated separately per fingerprint, not a claim this table already makes.
