@@ -114,6 +114,23 @@ const copy = {
     noSession: "登录状态已失效，请重新登录。",
     uncalibratedBanner:
       "当前嵌入模型尚未校准，系统会拒答绝大多数问题。请运行校准（见 README）。",
+    users: "用户",
+    usersTitle: "用户管理",
+    usersHint:
+      "创建实验室账号、修改角色、停用账号或重置密码。密码至少 12 位且包含至少 3 类字符，不能包含邮箱用户名或使用演示密码。",
+    createUser: "创建用户",
+    displayName: "姓名",
+    userStatus: "状态",
+    userActive: "启用",
+    userInactive: "已停用",
+    activateUser: "启用",
+    deactivateUser: "停用",
+    resetPassword: "重置密码",
+    newPassword: "新密码",
+    roleAdmin: "管理员 (admin)",
+    roleMember: "成员 (member)",
+    roleViewer: "查看者 (viewer)",
+    adminOnly: "只有管理员可以访问用户管理。",
   },
   en: {
     brand: "Lab Agent",
@@ -224,6 +241,23 @@ const copy = {
     noSession: "The session expired. Sign in again.",
     uncalibratedBanner:
       "The current embedding model is not calibrated; the system will refuse almost all questions. Please run calibration (see README).",
+    users: "Users",
+    usersTitle: "User Management",
+    usersHint:
+      "Create lab accounts, change roles, deactivate accounts, or reset passwords. Passwords require at least 12 characters and 3 character classes, and cannot contain the email local part or use demo passwords.",
+    createUser: "Create user",
+    displayName: "Display name",
+    userStatus: "Status",
+    userActive: "Active",
+    userInactive: "Inactive",
+    activateUser: "Activate",
+    deactivateUser: "Deactivate",
+    resetPassword: "Reset password",
+    newPassword: "New password",
+    roleAdmin: "Admin",
+    roleMember: "Member",
+    roleViewer: "Viewer",
+    adminOnly: "Only administrators can access user management.",
   },
 } as const;
 

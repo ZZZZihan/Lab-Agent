@@ -1053,3 +1053,266 @@ async def test_audit_actor_name_and_cursor_pagination(
     assert len(paginated_ids) == len(set(paginated_ids)), "cursor pagination returned duplicate rows"
     assert paginated_ids == all_ids, "cursor pagination missed or reordered rows"
 
+
+async def test_admin_cli_subcommands_and_prod_bootstrap(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import io
+
+    from app.admin_cli import main as cli_main
+
+    admin_email = "firstadmin@qingheng.lab"
+    init_secret = "ProdAdmin#2026_Valid"
+    reset_secret = "ResetAdmin$2026_Next"
+
+    # 1. Weak password rejected by CLI
+    monkeypatch.setattr("sys.stdin", io.StringIO("short"))
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                admin_email,
+                "--name",
+                "首任管理员",
+                "--role",
+                "admin",
+                "--password-stdin",
+            ]
+        )
+        != 0
+    )
+
+    # 2. Create first admin via CLI (without running seed, simulating APP_ENV=prod bootstrap)
+    monkeypatch.setattr("sys.stdin", io.StringIO(init_secret + "\n"))
+    rc = cli_main(
+        [
+            "create-user",
+            "--email",
+            admin_email,
+            "--name",
+            "首任管理员",
+            "--role",
+            "admin",
+            "--password-stdin",
+        ]
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    # 3. list-users outputs user info without password_hash
+    assert cli_main(["list-users"]) == 0
+    listed_out = capsys.readouterr().out
+    assert admin_email in listed_out
+    assert "首任管理员" in listed_out
+    assert "$argon2" not in listed_out
+    assert init_secret not in listed_out
+
+    # 4. Login as the CLI-created admin and access admin API
+    login_resp = await client.post(
+        "/api/v1/auth/login",
+        json={"email": admin_email, "password": init_secret},
+    )
+    assert login_resp.status_code == 200
+    token = login_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    users_resp = await client.get("/api/v1/admin/users", headers=headers)
+    assert users_resp.status_code == 200
+
+    # 5. set-role, deactivate, activate, reset-password via CLI
+    assert cli_main(["set-role", "--email", admin_email, "--role", "member"]) == 0
+    assert cli_main(["deactivate", "--email", admin_email]) == 0
+
+    # While deactivated, login fails
+    deact_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": admin_email, "password": init_secret},
+    )
+    assert deact_login.status_code == 401
+
+    assert cli_main(["activate", "--email", admin_email]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO(reset_secret + "\n"))
+    assert cli_main(["reset-password", "--email", admin_email, "--password-stdin"]) == 0
+
+    new_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": admin_email, "password": reset_secret},
+    )
+    assert new_login.status_code == 200
+    assert new_login.json()["user"]["role"] == "member"
+
+    # 6. Verify CLI audit events have actor_id=None, via='cli', and no secrets
+    maker = get_sessionmaker()
+    async with maker() as session:
+        rows = list(
+            await session.execute(
+                text(
+                    "SELECT action, actor_id, detail FROM audit_events "
+                    "WHERE action IN ('user_created', 'user_updated', 'user_password_reset') "
+                    "ORDER BY id ASC"
+                )
+            )
+        )
+    actions = [r[0] for r in rows]
+    assert actions == [
+        "user_created",
+        "user_updated",
+        "user_updated",
+        "user_updated",
+        "user_password_reset",
+    ]
+    for action, actor_id, detail in rows:
+        assert actor_id is None
+        assert detail["via"] == "cli"
+        serialized = json.dumps(detail, ensure_ascii=False)
+        assert init_secret not in serialized
+        assert reset_secret not in serialized
+        assert admin_email not in serialized
+        if action == "user_updated" and "role_from" in detail:
+            assert detail["fields"] == ["role"]
+            assert detail["role_from"] == "admin"
+            assert detail["role_to"] == "member"
+
+
+async def test_admin_users_api_crud_and_deactivated_token_revocation(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    admin_headers = await _login(client, "admin@lab.local")
+    member_headers = await _login(client, "member@lab.local")
+
+    # 1. Non-admin gets 403 and writes permission_denied audit
+    forbidden = await client.get("/api/v1/admin/users", headers=member_headers)
+    assert forbidden.status_code == 403
+    assert forbidden.json()["error"]["code"] == "forbidden"
+
+    # 2. Admin creates a new user (weak password rejected first)
+    new_email = "newresearcher@qingheng.lab"
+    bad_pw_resp = await client.post(
+        "/api/v1/admin/users",
+        json={
+            "email": new_email,
+            "display_name": "新研究员",
+            "role": "member",
+            "password": "LabAgent-Demo-" + "2026-Member",
+        },
+        headers=admin_headers,
+    )
+    assert bad_pw_resp.status_code == 400
+    assert bad_pw_resp.json()["error"]["code"] == "weak_password"
+
+    initial_secret = "Researcher#2026_Init"
+    create_resp = await client.post(
+        "/api/v1/admin/users",
+        json={
+            "email": new_email,
+            "display_name": "新研究员",
+            "role": "member",
+            "password": initial_secret,
+        },
+        headers=admin_headers,
+    )
+    assert create_resp.status_code == 200
+    created_user = create_resp.json()
+    new_user_id = created_user["id"]
+    assert created_user["email"] == new_email
+    assert created_user["role"] == "member"
+    assert created_user["is_active"] is True
+    assert "password_hash" not in created_user
+
+    # 3. GET /api/v1/admin/users lists the new user without password_hash
+    list_resp = await client.get("/api/v1/admin/users", headers=admin_headers)
+    assert list_resp.status_code == 200
+    users_list = list_resp.json()["users"]
+    assert any(u["id"] == new_user_id and "password_hash" not in u for u in users_list)
+
+    # 4. PATCH /api/v1/admin/users/{id} updates display_name and role
+    patch_resp = await client.patch(
+        f"/api/v1/admin/users/{new_user_id}",
+        json={"display_name": "资深研究员", "role": "viewer"},
+        headers=admin_headers,
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["display_name"] == "资深研究员"
+    assert patch_resp.json()["role"] == "viewer"
+
+    # 5. Admin cannot demote or deactivate themselves -> 400 cannot_modify_self
+    me_admin = (await client.get("/api/v1/auth/me", headers=admin_headers)).json()
+    admin_id = me_admin["id"]
+
+    demote_self = await client.patch(
+        f"/api/v1/admin/users/{admin_id}",
+        json={"role": "member"},
+        headers=admin_headers,
+    )
+    assert demote_self.status_code == 400
+    assert demote_self.json()["error"]["code"] == "cannot_modify_self"
+
+    deact_self = await client.patch(
+        f"/api/v1/admin/users/{admin_id}",
+        json={"is_active": False},
+        headers=admin_headers,
+    )
+    assert deact_self.status_code == 400
+    assert deact_self.json()["error"]["code"] == "cannot_modify_self"
+
+    # 6. POST /api/v1/admin/users/{id}/password resets password
+    updated_secret = "Researcher$2026_Next"
+    pw_resp = await client.post(
+        f"/api/v1/admin/users/{new_user_id}/password",
+        json={"password": updated_secret},
+        headers=admin_headers,
+    )
+    assert pw_resp.status_code == 200
+
+    # User logs in with the new password and obtains an active token
+    user_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": new_email, "password": updated_secret},
+    )
+    assert user_login.status_code == 200
+    user_token = user_login.json()["access_token"]
+    user_headers = {"Authorization": f"Bearer {user_token}"}
+    assert (await client.get("/api/v1/auth/me", headers=user_headers)).status_code == 200
+
+    # 7. Deactivating the user immediately invalidates their existing token
+    deact_resp = await client.patch(
+        f"/api/v1/admin/users/{new_user_id}",
+        json={"is_active": False},
+        headers=admin_headers,
+    )
+    assert deact_resp.status_code == 200
+    assert deact_resp.json()["is_active"] is False
+
+    me_after_deact = await client.get("/api/v1/auth/me", headers=user_headers)
+    assert me_after_deact.status_code == 401
+    docs_after_deact = await client.get("/api/v1/documents", headers=user_headers)
+    assert docs_after_deact.status_code == 401
+
+    # 8. Verify audit trail contains no field values or passwords
+    maker = get_sessionmaker()
+    async with maker() as session:
+        audit_rows = list(
+            await session.execute(
+                text(
+                    "SELECT action, detail FROM audit_events "
+                    "WHERE action IN ('permission_denied', 'user_created', 'user_updated', 'user_password_reset') "
+                    "ORDER BY id ASC"
+                )
+            )
+        )
+    recorded_actions = {r[0] for r in audit_rows}
+    assert {
+        "permission_denied",
+        "user_created",
+        "user_updated",
+        "user_password_reset",
+    } <= recorded_actions
+    blob = json.dumps([r[1] for r in audit_rows], ensure_ascii=False)
+    assert "资深研究员" not in blob
+    assert new_email not in blob
+    assert initial_secret not in blob
+    assert updated_secret not in blob
+

@@ -29,6 +29,30 @@ class Actor:
 
 
 UNUSABLE_PASSWORD_HASH = "!unusable"
+_DEMO_PREFIX = "labagent-demo-" + "2026-"
+
+
+def validate_password(password: str, email: str | None = None) -> None:
+    """Enforce password policy: >=12 chars, not a demo password, no email local part, >=3 char classes."""
+    if len(password) < 12:
+        raise ValueError("密码长度至少为 12 个字符")
+    lowered = password.lower()
+    if lowered.startswith(_DEMO_PREFIX):
+        raise ValueError("不能使用演示账号密码")
+    if email:
+        local_part = email.split("@", 1)[0].strip().lower()
+        if local_part and local_part in lowered:
+            raise ValueError("密码不能包含邮箱的本地部分")
+    classes = sum(
+        (
+            any(ch.islower() for ch in password),
+            any(ch.isupper() for ch in password),
+            any(ch.isdigit() for ch in password),
+            any(not ch.isalnum() for ch in password),
+        )
+    )
+    if classes < 3:
+        raise ValueError("密码至少需包含大写字母、小写字母、数字和特殊字符中的 3 类")
 
 
 def hash_password(password: str) -> str:

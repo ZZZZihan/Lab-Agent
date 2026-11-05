@@ -177,3 +177,30 @@ cd frontend && npm run lint && npx tsc --noEmit
 ```
 
 Pytest uses the compose database `labagent_test` on port 55432 unless `TEST_DATABASE_URL` is set.
+
+## 生产引导
+
+当 `APP_ENV=prod` 时，入口脚本会跳过演示种子（`app.seed`），不会写入任何 `LabAgent-Demo-2026-*` 演示账号。首次部署生产环境时，通过 `python -m app.admin_cli` 从标准输入传入初始管理员密码（避免密码进入命令行历史或进程列表）：
+
+```bash
+# 1. 创建第一个管理员账号（密码至少 12 个字符、包含至少 3 类字符，不能包含邮箱本地部分，也不能使用任何 LabAgent-Demo-2026-* 演示密码）
+read -r -s INIT_ADMIN_PW && printf '%s\n' "$INIT_ADMIN_PW" | \
+  docker compose exec -T api python -m app.admin_cli create-user \
+    --email admin@example.org --name "实验室管理员" --role admin --password-stdin
+unset INIT_ADMIN_PW
+
+# 2. 查看已有用户（不输出密码哈希）
+docker compose exec -T api python -m app.admin_cli list-users
+
+# 3. 修改角色、停用/启用账号或重置密码
+docker compose exec -T api python -m app.admin_cli set-role --email member@example.org --role member
+docker compose exec -T api python -m app.admin_cli deactivate --email member@example.org
+docker compose exec -T api python -m app.admin_cli activate --email member@example.org
+read -r -s NEW_PW && printf '%s\n' "$NEW_PW" | \
+  docker compose exec -T api python -m app.admin_cli reset-password \
+    --email member@example.org --password-stdin
+unset NEW_PW
+```
+
+登录后，管理员也可以在前端导航栏进入 **用户**（`/admin/users`）页面在线创建账号、调整角色、停用或启用用户，以及重置密码。
+

@@ -736,5 +736,35 @@ async def test_run_smoke_offline_and_real_modes() -> None:
     assert "S9 cleanup" in table_real
 
 
+@pytest.mark.parametrize(
+    ("candidate", "email", "valid"),
+    [
+        ("StrongPass-2026!", "alice@qingheng.lab", True),
+        ("Another#Valid99", "bob@qingheng.lab", True),
+        ("UpperLower1234", "carol@qingheng.lab", True),
+        ("lower!12345678", "dave@qingheng.lab", True),
+        ("UPPER!12345678", "erin@qingheng.lab", True),
+        ("Short1!Aa", "alice@qingheng.lab", False),
+        ("LabAgent-Demo-" + "2026-Admin", "alice@qingheng.lab", False),
+        ("LabAgent-Demo-" + "2026-Custom", "alice@qingheng.lab", False),
+        ("labagent-demo-" + "2026-member", "alice@qingheng.lab", False),
+        ("My-alice-Pass99!", "alice@qingheng.lab", False),
+        ("ALICE_Secure99!", "alice@qingheng.lab", False),
+        ("alllowercase1234", "alice@qingheng.lab", False),
+        ("ALLUPPERCASE1234", "alice@qingheng.lab", False),
+        ("OnlyLettersHere", "alice@qingheng.lab", False),
+        ("12345678901234", "alice@qingheng.lab", False),
+    ],
+)
+def test_validate_password_policy_table(candidate: str, email: str, valid: bool) -> None:
+    from app.auth import validate_password
+
+    if valid:
+        validate_password(candidate, email)
+    else:
+        with pytest.raises(ValueError):
+            validate_password(candidate, email)
+
+
 
 
