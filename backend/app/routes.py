@@ -33,8 +33,9 @@ from app.db import get_session, get_sessionmaker
 from app.llm import LLM
 from app.models import Conversation, Document, DocumentACL, Message, User
 from app.rag.embedder import Embedder
+from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
 from app.rag.index_meta import check_index
-from app.rag.ingest import ingest_text
+from app.rag.ingest import create_document
 from app.tools import search_knowledge_base
 
 router = APIRouter(prefix="/api/v1")
@@ -251,11 +252,26 @@ async def list_documents(
     rows = await session.execute(
         text(
             f"""
-            SELECT d.id::text, d.title, d.collection, d.visibility, d.source, d.status,
-                   d.doc_key, d.created_at::text
+            SELECT d.id::text AS id,
+                   d.title AS title,
+                   d.collection AS collection,
+                   d.visibility AS visibility,
+                   d.source AS source,
+                   d.status AS status,
+                   CASE
+                     WHEN CAST(:is_admin AS boolean) OR d.owner_id = CAST(:uid AS uuid)
+                     THEN d.error_code
+                     ELSE NULL
+                   END AS error_code,
+                   d.source_format AS source_format,
+                   d.original_filename AS original_filename,
+                   d.doc_key AS doc_key,
+                   d.created_at::text AS created_at
             FROM documents d
-            WHERE d.deleted_at IS NULL AND d.status = 'ready'
-              AND d.source <> 'eval' AND {acl_sql()}
+            WHERE d.deleted_at IS NULL
+              AND d.source <> 'eval'
+              AND (d.status = 'ready' OR d.owner_id = CAST(:uid AS uuid))
+              AND {acl_sql()}
             ORDER BY d.created_at DESC
             """
         ),
@@ -269,7 +285,7 @@ async def list_documents(
     return {"documents": [dict(row) for row in rows.mappings()]}
 
 
-@router.post("/documents")
+@router.post("/documents", status_code=202)
 async def upload_document(
     request: Request,
     actor: Annotated[Actor, Depends(_actor)],
@@ -293,25 +309,58 @@ async def upload_document(
             detail={"operation": "upload"},
         )
         raise APIError(403, "forbidden", "查看者不能上传文档")
+    allowed = await request.app.state.limiter.allow(
+        f"upload:{user.id}",
+        settings.upload_rate_limit,
+        settings.upload_rate_window_seconds,
+    )
+    if not allowed:
+        raise APIError(429, "rate_limited", "上传过于频繁")
     if collection not in {"knowledge", "project", "meeting", "paper_note"}:
         raise APIError(400, "invalid_collection", "不支持的文档类型")
     if visibility not in {"lab", "restricted", "private"}:
         raise APIError(400, "invalid_visibility", "不支持的可见性")
-    raw = text or ""
-    if file is not None:
+
+    has_file = file is not None and bool((file.filename or "").strip())
+    has_text = text is not None and bool(text.strip())
+    if has_file and has_text:
+        raise APIError(400, "ambiguous_input", "不能同时提供文件和粘贴文本")
+    if not has_file and not has_text:
+        raise APIError(400, "empty_document", "文档没有可用文本")
+
+    original_filename: str | None = None
+    if has_file and file is not None:
         payload = await file.read()
         if len(payload) > settings.max_upload_bytes:
             raise APIError(413, "file_too_large", "文件超过 5 MB")
-        name = (file.filename or "").lower()
-        if name.endswith(".pdf"):
-            import io
+        original_filename = (file.filename or "").strip()[:255] or None
+        try:
+            extracted = extract_upload(
+                original_filename or "",
+                payload,
+                settings.max_document_chars,
+            )
+        except UploadRejected as exc:
+            raise APIError(exc.status, exc.code, exc.message) from exc
+        raw = extracted.text
+        source_format = extracted.source_format
+        byte_len = len(payload)
+    else:
+        raw_input = (text or "").strip()
+        byte_payload = raw_input.encode("utf-8")
+        byte_len = len(byte_payload)
+        source_format = detect_pasted_format(raw_input)
+        pseudo_name = "pasted.md" if source_format == "markdown" else "pasted.txt"
+        try:
+            extracted = extract_upload(
+                pseudo_name,
+                byte_payload,
+                settings.max_document_chars,
+            )
+        except UploadRejected as exc:
+            raise APIError(exc.status, exc.code, exc.message) from exc
+        raw = extracted.text
 
-            from pypdf import PdfReader
-
-            reader = PdfReader(io.BytesIO(payload))
-            raw = "\n".join(page.extract_text() or "" for page in reader.pages)
-        else:
-            raw = payload.decode("utf-8", errors="replace")
     raw = raw.strip()
     if not raw:
         raise APIError(400, "empty_document", "文档没有可用文本")
@@ -323,16 +372,17 @@ async def upload_document(
                 raise APIError(400, "unknown_grantee", "授权名单里有不存在的账号")
             grants.append(granted.id)
     try:
-        document = await ingest_text(
+        document = await create_document(
             session,
-            embedder=_embedder(request),
             owner_id=user.id,
             title=title.strip()[:300] or "未命名",
             text=raw,
+            source_format=source_format,
             collection=collection,
             visibility=visibility,
             source="upload",
             grant_user_ids=grants,
+            original_filename=original_filename,
         )
     except ValueError as exc:
         raise APIError(400, "empty_document", "文档没有可用文本") from exc
@@ -347,6 +397,8 @@ async def upload_document(
         detail={
             "visibility": visibility,
             "collection": collection,
+            "format": source_format,
+            "bytes": byte_len,
             "chars": len(raw),
             "grants": len(grants),
         },
@@ -414,7 +466,6 @@ async def delete_document(
     from datetime import UTC, datetime
 
     document.deleted_at = datetime.now(UTC)
-    document.status = "failed"
     await session.commit()
     await write_audit(
         settings=settings,

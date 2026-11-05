@@ -11,8 +11,9 @@ import pytest
 from app.audit import AuditRejected, sanitize_detail
 from app.auth import UNUSABLE_PASSWORD_HASH, verify_password
 from app.config import Settings, assert_strong_secret, get_settings
-from app.rag.chunker import chunk_markdown, parse_front_matter
+from app.rag.chunker import chunk_document, chunk_markdown, parse_front_matter
 from app.rag.embedder import BGEEmbedder, HashingEmbedder
+from app.rag.extract import detect_pasted_format
 from app.rag.redact import redact_text
 from app.rag.rrf import Hit, decide
 from app.secrets import read_secret
@@ -98,6 +99,13 @@ def test_chunker_keeps_heading_with_its_fact() -> None:
     assert "8 台" in chunks[1].text
     assert "24 小时" not in chunks[1].text
     assert "24 小时" in chunks[2].text
+    assert detect_pasted_format(body) == "markdown"
+    assert detect_pasted_format("第一段没有二级标题。\n\n第二段也没有。") == "text"
+    assert [c.heading for c in chunk_document("纯文本第一段。", "text")] == ["第 1 段"]
+    assert [c.heading for c in chunk_document("第一页内容\f第二页内容", "pdf")] == [
+        "第 1 页",
+        "第 2 页",
+    ]
 
 
 def test_corpus_headings_are_unique_and_bait_terms_absent() -> None:
