@@ -22,11 +22,11 @@ from app.agent import run_agent
 from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import Settings, get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
+from app.ingest_worker import process_next_pending
 from app.llm import build_llm
 from app.models import Document, DocumentACL, Group, GroupMember, User
 from app.rag.chunker import parse_front_matter
 from app.rag.embedder import build_embedder
-from app.rag.index_meta import column_type
 from app.rag.ingest import _add_acl_grants, upsert_source
 from app.rag.retrieve import search_knowledge
 from app.reindex import apply_reindex
@@ -356,13 +356,12 @@ async def _run(
 
     try:
         async with maker() as session:
-            col_storage, col_dim = await column_type(session)
-            if (col_storage, col_dim) != (
-                agent_settings.embedding_storage,
-                agent_settings.embedding_dim,
-            ):
-                await apply_reindex(session, agent_settings, embedder, if_needed=True)
+            rebuilt = await apply_reindex(session, agent_settings, embedder, if_needed=True)
+        if rebuilt:
+            while await process_next_pending(embedder, agent_settings) is not None:
+                pass
 
+        async with maker() as session:
             owner, owner_created = await _get_or_create_user(
                 session,
                 email=ACL_OWNER_EMAIL,

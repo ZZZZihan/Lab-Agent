@@ -248,6 +248,56 @@ async def test_run_acl_isolates_seed_visibility_and_catches_agent_tail_hit(
             assert restored_doc.visibility == "private"
         await dispose_engine()
 
+        # Verify fingerprint mismatch with identical (storage, dim) triggers apply_reindex
+        # AND drains pre-existing source="seed" documents back to status="ready" with chunks.
+        from app.models import Chunk
+        from app.rag.index_meta import read_meta
+        from sqlalchemy import func, text
+
+        maker = get_sessionmaker()
+        async with maker() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO embedding_index_meta (id, fingerprint, embedder, model, dim, storage, index_kind, updated_at)
+                    VALUES (1, 'openai_compatible|stale-model|512|redact=0|qp=e3b0c442|dp=e3b0c442', 'openai_compatible', 'stale-model', 512, 'vector', 'hnsw', now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        fingerprint = EXCLUDED.fingerprint,
+                        embedder = EXCLUDED.embedder,
+                        model = EXCLUDED.model,
+                        dim = EXCLUDED.dim,
+                        storage = EXCLUDED.storage,
+                        index_kind = EXCLUDED.index_kind,
+                        updated_at = now()
+                    """
+                )
+            )
+            await session.commit()
+        await dispose_engine()
+
+        expected_fp = get_settings().embedding_fingerprint
+        await _run(commit=False, check=False, cases=all_cases)
+        maker = get_sessionmaker()
+        async with maker() as session:
+            meta = await read_meta(session)
+            assert meta is not None
+            assert meta.fingerprint == expected_fp
+            seed_docs = list(
+                await session.scalars(select(Document).where(Document.source == "seed"))
+            )
+            assert len(seed_docs) > 0
+            for sdoc in seed_docs:
+                assert sdoc.status == "ready"
+                chunk_cnt = int(
+                    (
+                        await session.execute(
+                            select(func.count()).where(Chunk.document_id == sdoc.id)
+                        )
+                    ).scalar_one()
+                )
+                assert chunk_cnt > 0
+        await dispose_engine()
+
         # Now verify that a forbidden hit at position > 8 (index 10 of 12) returned only via
         # the agent tool path (beyond _grade_node's [:8] SSE preview slice) is caught as a leak.
         async def _clean_direct_search(*_args: Any, **_kwargs: Any) -> SearchBundle:
