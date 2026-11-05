@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import Principal, acl_sql, can_read
@@ -35,7 +35,7 @@ from app.models import Conversation, Document, DocumentACL, Group, Message, User
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
 from app.rag.index_meta import check_index
-from app.rag.ingest import create_document
+from app.rag.ingest import _add_acl_grants, create_document
 from app.tools import search_knowledge_base
 
 router = APIRouter(prefix="/api/v1")
@@ -67,6 +67,57 @@ class ChatBody(BaseModel):
 
 class RetentionBody(BaseModel):
     days: int | None = None
+
+
+class DocumentACLBody(BaseModel):
+    visibility: str
+    user_emails: list[str] = Field(default_factory=list)
+    group_slugs: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+
+
+async def _serialize_document_acl(
+    session: AsyncSession,
+    document: Document,
+    grants: list[DocumentACL],
+) -> dict[str, object]:
+    user_ids: list[uuid.UUID] = []
+    group_ids: list[uuid.UUID] = []
+    roles: list[str] = []
+    for grant in grants:
+        if grant.permission != "read":
+            continue
+        if grant.principal_type == "user":
+            try:
+                user_ids.append(uuid.UUID(grant.principal_id))
+            except ValueError:
+                pass
+        elif grant.principal_type == "group":
+            try:
+                group_ids.append(uuid.UUID(grant.principal_id))
+            except ValueError:
+                pass
+        elif grant.principal_type == "role":
+            roles.append(grant.principal_id)
+
+    user_emails: list[str] = []
+    if user_ids:
+        user_rows = list(await session.scalars(select(User).where(User.id.in_(user_ids))))
+        email_by_id = {u.id: u.email for u in user_rows}
+        user_emails = [email_by_id[uid] for uid in user_ids if uid in email_by_id]
+
+    group_slugs: list[str] = []
+    if group_ids:
+        group_rows = list(await session.scalars(select(Group).where(Group.id.in_(group_ids))))
+        slug_by_id = {g.id: g.slug for g in group_rows}
+        group_slugs = [slug_by_id[gid] for gid in group_ids if gid in slug_by_id]
+
+    return {
+        "visibility": document.visibility,
+        "user_emails": user_emails,
+        "group_slugs": group_slugs,
+        "roles": roles,
+    }
 
 
 def _settings(request: Request) -> Settings:
@@ -471,13 +522,116 @@ async def get_document(
             detail={"operation": "read"},
         )
         raise APIError(404, "not_found", "文档不存在")
-    return {
+    response_payload: dict[str, object] = {
         "id": str(document.id),
         "title": document.title,
         "collection": document.collection,
         "visibility": document.visibility,
         "doc_key": document.doc_key,
         "content": document.content_text,
+    }
+    if actor.role == "admin" or document.owner_id == actor.id:
+        response_payload["acl"] = await _serialize_document_acl(session, document, grants)
+    return response_payload
+
+
+@router.put("/documents/{document_id}/acl")
+async def update_document_acl(
+    document_id: uuid.UUID,
+    body: DocumentACLBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    settings = _settings(request)
+    user = await _user(session, actor)
+    document = await session.get(Document, document_id)
+    if document is None or document.deleted_at is not None:
+        raise APIError(404, "not_found", "文档不存在")
+    if user.role != "admin" and document.owner_id != user.id:
+        await write_audit(
+            settings=settings,
+            actor_id=user.id,
+            action="permission_denied",
+            resource_type="document",
+            resource_id=str(document.id),
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={"operation": "acl_edit"},
+        )
+        raise APIError(404, "not_found", "文档不存在")
+
+    visibility = body.visibility.strip()
+    if visibility not in {"lab", "restricted", "private"}:
+        raise APIError(400, "invalid_visibility", "不支持的可见性")
+
+    user_ids: list[uuid.UUID] = []
+    for raw_email in body.user_emails:
+        email = raw_email.strip().lower()
+        if not email:
+            continue
+        granted = await session.scalar(select(User).where(User.email == email))
+        if granted is None:
+            raise APIError(400, "unknown_grantee", "授权名单里有不存在的账号")
+        if granted.id not in user_ids:
+            user_ids.append(granted.id)
+
+    group_ids: list[uuid.UUID] = []
+    for raw_slug in body.group_slugs:
+        slug = raw_slug.strip().lower()
+        if not slug:
+            continue
+        group = await session.scalar(select(Group).where(Group.slug == slug))
+        if group is None:
+            raise APIError(400, "unknown_group", "授权名单里有不存在的项目组")
+        if group.id not in group_ids:
+            group_ids.append(group.id)
+
+    role_names: list[str] = []
+    for raw_role in body.roles:
+        role_name = raw_role.strip()
+        if not role_name:
+            continue
+        if role_name not in {"admin", "member", "viewer"}:
+            raise APIError(400, "invalid_role", "授权角色必须是 admin、member 或 viewer")
+        if role_name not in role_names:
+            role_names.append(role_name)
+
+    document.visibility = visibility
+    await session.execute(delete(DocumentACL).where(DocumentACL.document_id == document.id))
+    _add_acl_grants(
+        session,
+        document.id,
+        grant_user_ids=user_ids,
+        grant_group_ids=group_ids,
+        grant_roles=role_names,
+    )
+    await session.flush()
+    new_grants = list(
+        await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
+    )
+    acl_payload = await _serialize_document_acl(session, document, new_grants)
+    await session.commit()
+
+    await write_audit(
+        settings=settings,
+        actor_id=user.id,
+        action="acl_changed",
+        resource_type="document",
+        resource_id=str(document.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "visibility": visibility,
+            "users": len(user_ids),
+            "groups": len(group_ids),
+            "roles": len(role_names),
+        },
+    )
+    return {
+        "id": str(document.id),
+        "visibility": document.visibility,
+        "acl": acl_payload,
     }
 
 

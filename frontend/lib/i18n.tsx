@@ -142,6 +142,12 @@ const copy = {
     grantGroups: "授权项目组",
     grantGroupsHint: "仅在“按名单授权”时生效。勾选的组成员均可阅读此文档。",
     noGroups: "暂无可选项目组",
+    permissions: "权限",
+    permissionsHint: "修改可见性或受限授权名单会立即影响文档与段落检索。",
+    grantRoles: "授权角色",
+    savePermissions: "保存权限",
+    permissionsSaved: "权限已更新",
+    action_acl_changed: "修改文档权限",
   },
   en: {
     brand: "Lab Agent",
@@ -282,6 +288,13 @@ const copy = {
     grantGroupsHint:
       "Used only for restricted notes. Members of selected groups can read this document.",
     noGroups: "No project groups available",
+    permissions: "Permissions",
+    permissionsHint:
+      "Updating visibility or restricted grants takes effect immediately for document and chunk retrieval.",
+    grantRoles: "Allowed roles",
+    savePermissions: "Save permissions",
+    permissionsSaved: "Permissions updated",
+    action_acl_changed: "Document ACL changed",
   },
 } as const;
 
