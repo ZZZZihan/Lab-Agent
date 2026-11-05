@@ -1,12 +1,12 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.0-pg16
     environment:
       POSTGRES_USER: labagent
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: labagent
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
@@ -19,7 +19,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "56379:6379"
+      - "127.0.0.1:56379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -42,7 +42,9 @@ services:
       CORPUS_DIR: /opt/lab-agent/evals/data/v1/corpus
       SEED_ONLY_DIR: /opt/lab-agent/evals/data/v1/seed_only
     ports:
-      - "43124:8000"
+      - "127.0.0.1:43124:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - uploads:/app/data/uploads
     depends_on:
@@ -50,6 +52,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; r=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=3)); sys.exit(0 if r.get('database') and r.get('redis') else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   web:
     build:
@@ -63,9 +71,16 @@ services:
       COOKIE_SECURE: "false"
       NEXT_PUBLIC_DEMO_HINTS: "true"
     ports:
-      - "43123:3000"
+      - "127.0.0.1:43123:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
 
 volumes:
   pgdata:
