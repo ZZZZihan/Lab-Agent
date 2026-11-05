@@ -549,7 +549,9 @@ async def update_document_acl(
 ) -> dict[str, object]:
     settings = _settings(request)
     user = await _user(session, actor)
-    document = await session.get(Document, document_id)
+    document = await session.scalar(
+        select(Document).where(Document.id == document_id).with_for_update()
+    )
     if document is None or document.deleted_at is not None:
         raise APIError(404, "not_found", "文档不存在")
     if user.role != "admin" and document.owner_id != user.id:

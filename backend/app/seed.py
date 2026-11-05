@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.auth import hash_password
 from app.config import get_settings
@@ -69,16 +69,21 @@ async def seed() -> None:
                 helios_group = Group(slug="helios", name="项目赫利俄斯组")
                 session.add(helios_group)
                 await session.flush()
-            await session.execute(
-                delete(GroupMember).where(GroupMember.group_id == helios_group.id)
-            )
-            session.add(
-                GroupMember(
-                    group_id=helios_group.id,
-                    user_id=users["member@lab.local"].id,
+            member_user = users["member@lab.local"]
+            existing_membership = await session.scalar(
+                select(GroupMember).where(
+                    GroupMember.group_id == helios_group.id,
+                    GroupMember.user_id == member_user.id,
                 )
             )
-            await session.flush()
+            if existing_membership is None:
+                session.add(
+                    GroupMember(
+                        group_id=helios_group.id,
+                        user_id=member_user.id,
+                    )
+                )
+                await session.flush()
 
             grants = {
                 "procurement": [users["zhou@lab.local"].id],
