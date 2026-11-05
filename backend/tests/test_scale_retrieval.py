@@ -32,7 +32,13 @@ from app.rag.retrieve import (
     search_knowledge,
 )
 from app.reindex import apply_reindex
-from evals.bench_scale import run_scale_benchmark
+from evals.bench_scale import (
+    _build_distractor_pools_and_corpus,
+    _prepare_cached_vectors,
+    _resolve_benchmark_base_settings,
+    run_scale_benchmark,
+    save_npy_f32,
+)
 from sqlalchemy import text
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
@@ -356,11 +362,127 @@ async def test_hnsw_prefix_reindex_check_index_and_two_stage_accuracy() -> None:
             )
 
 
+async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
+    tmp_path: Path,
+) -> None:
+    # 1. Verify BGE embedder configuration in _resolve_benchmark_base_settings
+    s_default = _settings(embedder="hashing", embedding_dim=512)
+    bge_settings, chosen, full_dim, prefix_dim, trunc_dim = (
+        _resolve_benchmark_base_settings(s_default, "bge")
+    )
+    assert chosen == "bge"
+    assert bge_settings.embedder == "bge"
+    assert bge_settings.embedding_model == "BAAI/bge-small-zh-v1.5"
+    assert full_dim == 512
+    assert prefix_dim == 128
+    assert trunc_dim == 128
+
+    # 2. Verify MRL distractor prefix consistency between full_dim (512) and trunc_dim (128)
+    corpus_vecs = [
+        _l2_normalize([math.sin((i + 1) * (j + 1) * 0.03) for j in range(512)])
+        for i in range(8)
+    ]
+    seed_vecs = [
+        _l2_normalize([math.cos((i + 1) * (j + 1) * 0.05) for j in range(512)])
+        for i in range(16)
+    ]
+    tc_512, pools_512 = _build_distractor_pools_and_corpus(corpus_vecs, seed_vecs, 512)
+    tc_128, pools_128 = _build_distractor_pools_and_corpus(corpus_vecs, seed_vecs, 128)
+    for g in (1, 17, 65, 250):
+        sum_512 = [
+            tc_512[g % 8][j]
+            + pools_512[0][g % 64][j]
+            + pools_512[1][(g * 3 + g // 64) % 64][j]
+            + pools_512[2][(g * 7 + (g // 64) * 13 + g // 4096) % 64][j]
+            + pools_512[3][(g * 19 + (g // 64) * 29 + (g // 4096) * 5) % 64][j]
+            for j in range(512)
+        ]
+        sum_128 = [
+            tc_128[g % 8][j]
+            + pools_128[0][g % 64][j]
+            + pools_128[1][(g * 3 + g // 64) % 64][j]
+            + pools_128[2][(g * 7 + (g // 64) * 13 + g // 4096) % 64][j]
+            + pools_128[3][(g * 19 + (g // 64) * 29 + (g // 4096) * 5) % 64][j]
+            for j in range(128)
+        ]
+        d_512 = _l2_normalize(sum_512)
+        d_128_from_512 = _l2_normalize(d_512[:128])
+        d_128_direct = _l2_normalize(sum_128)
+        assert d_128_direct == pytest.approx(d_128_from_512, abs=1e-6)
+
+    # 3. Verify _prepare_cached_vectors sorts latencies before computing p50 and p95
+    s_hash = _settings(
+        embedder="hashing",
+        embedding_dim=512,
+        embedding_storage="halfvec",
+        embedding_index="none",
+    )
+    slug = s_hash.base_embedding_slug
+    cache_dir = tmp_path / "lat_cache"
+    save_npy_f32(cache_dir / f"corpus_{slug}_512.npy", [[1.0] + [0.0] * 511])
+    save_npy_f32(
+        cache_dir / f"queries_{slug}_512.npy",
+        [[1.0] + [0.0] * 511 for _ in range(10)],
+    )
+    save_npy_f32(cache_dir / f"distractor_seeds_{slug}_512.npy", [[1.0] + [0.0] * 511])
+    # Deliberately unsorted latencies where index 9 is small (1.0) and index 0 is huge (100.0)
+    unsorted_lats = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 1.0]
+    (cache_dir / f"queries_{slug}_512.meta.json").write_text(
+        json.dumps(
+            {
+                "questions": [f"q{i}" for i in range(10)],
+                "latencies_ms": unsorted_lats,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, _, lat_summary, _ = await _prepare_cached_vectors(
+        settings=s_hash,
+        cache_dir=cache_dir,
+        corpus_chunks=[],
+        questions=[],
+    )
+    assert lat_summary["p95"] >= lat_summary["p50"]
+    assert lat_summary["p95"] == pytest.approx(95.5)
+
+
 async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
     out_file = tmp_path / "bench_scale_200.json"
     cache_dir = tmp_path / "cache"
     maker = get_sessionmaker()
+    seed_user_id = uuid.uuid4()
+    seed_doc_id = uuid.uuid4()
     try:
+        async with maker() as session:
+            session.add(
+                User(
+                    id=seed_user_id,
+                    email="seed-owner@lab.test",
+                    display_name="种子维护员",
+                    role="admin",
+                    password_hash=hash_password("LabAgent-Demo-2026-Admin"),
+                    is_active=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                Document(
+                    id=seed_doc_id,
+                    owner_id=seed_user_id,
+                    title="持久种子文档",
+                    collection="knowledge",
+                    source="seed",
+                    source_format="markdown",
+                    doc_key="persistent-seed-doc",
+                    visibility="lab",
+                    status="pending",
+                    content_text="## 种子段落\n\n清衡集群基础种子文档内容。",
+                )
+            )
+            await session.commit()
+        s_init = _settings(embedder="hashing", embedding_dim=512, embedding_storage="vector")
+        await _drain_pending(HashingEmbedder(512), s_init)
+
         report = await run_scale_benchmark(
             chunks=200,
             embedder_kind="hashing",
@@ -375,6 +497,8 @@ async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
         assert report["target_chunks"] == 200
         assert len(report["exact_scan_sweep"]) == 2
         assert [r["chunks"] for r in report["exact_scan_sweep"]] == [100, 200]
+        for step in report["exact_scan_sweep"]:
+            assert step["db_search_p95_ms"] >= step["db_search_p50_ms"]
         assert "exact_scan_p95_le_300ms_max_chunks" in report
         assert "known_limitations" in report and len(report["known_limitations"]) >= 1
 
@@ -384,6 +508,11 @@ async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
             "two_stage_prefix1024",
             "truncated_1024_hnsw",
         }
+        for path_info in paths.values():
+            assert (
+                path_info["db_search_latency_ms"]["p95"]
+                >= path_info["db_search_latency_ms"]["p50"]
+            )
         assert paths["two_stage_prefix1024"]["index_kind"] == "hnsw_prefix"
         assert paths["truncated_1024_hnsw"]["index_kind"] == "hnsw"
         assert (
@@ -391,9 +520,26 @@ async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
             > paths["truncated_1024_hnsw"]["all"]["recall_at_5"]
         )
         assert report["two_stage_vs_exact"]["recall_at_5_ratio_all"] >= 0.80
+
+        # Verify cleanup restored base index and drained pending non-eval documents
+        async with maker() as session:
+            assert await check_index(session, s_init) == "ok"
+            restored_doc = await session.get(Document, seed_doc_id)
+            assert restored_doc is not None
+            assert restored_doc.status == "ready"
+            chunk_cnt = int(
+                (
+                    await session.execute(
+                        text("SELECT COUNT(*) FROM chunks WHERE document_id = :doc_id"),
+                        {"doc_id": str(seed_doc_id)},
+                    )
+                ).scalar_one()
+            )
+            assert chunk_cnt >= 1
     finally:
         s_restore = _settings(embedder="hashing", embedding_dim=512, embedding_storage="vector")
         async with maker() as session:
             await apply_reindex(
                 session, s_restore, HashingEmbedder(512), if_needed=False, force=True
             )
+        await _drain_pending(HashingEmbedder(512), s_restore)

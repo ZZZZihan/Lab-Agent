@@ -1,8 +1,8 @@
 {
   "suite": "scale",
   "dataset": "v1",
-  "generated_at": "2026-11-05T17:44:33Z",
-  "git_sha": "0c51133",
+  "generated_at": "2026-11-05T18:16:18Z",
+  "git_sha": "63a470d",
   "target_chunks": 20000,
   "corpus_chunks": 48,
   "distractor_chunks": 19952,
@@ -10,44 +10,44 @@
   "embedding_model": "qwen3-embedding:8b",
   "query_embedding_latency_ms": {
     "mean": 104.6699,
-    "p50": 105.5848,
-    "p95": 118.4033
+    "p50": 103.1438,
+    "p95": 124.0334
   },
   "exact_scan_sweep": [
     {
       "chunks": 1000,
-      "db_search_p50_ms": 114.3566,
-      "db_search_p95_ms": 115.9663,
-      "total_search_p50_ms": 219.9414,
-      "total_search_p95_ms": 234.3696,
-      "recall_at_5_all": 0.9917,
+      "db_search_p50_ms": 92.4892,
+      "db_search_p95_ms": 115.3493,
+      "total_search_p50_ms": 195.633,
+      "total_search_p95_ms": 239.3827,
+      "recall_at_5_all": 1.0,
       "recall_at_5_test": 1.0
     },
     {
       "chunks": 5000,
-      "db_search_p50_ms": 403.3567,
-      "db_search_p95_ms": 398.7531,
-      "total_search_p50_ms": 508.9415,
-      "total_search_p95_ms": 517.1564,
-      "recall_at_5_all": 0.9917,
+      "db_search_p50_ms": 393.0336,
+      "db_search_p95_ms": 403.022,
+      "total_search_p50_ms": 496.1774,
+      "total_search_p95_ms": 527.0554,
+      "recall_at_5_all": 1.0,
       "recall_at_5_test": 1.0
     },
     {
       "chunks": 10000,
-      "db_search_p50_ms": 798.9794,
-      "db_search_p95_ms": 787.3676,
-      "total_search_p50_ms": 904.5642,
-      "total_search_p95_ms": 905.7709,
-      "recall_at_5_all": 0.9917,
+      "db_search_p50_ms": 771.1128,
+      "db_search_p95_ms": 795.1167,
+      "total_search_p50_ms": 874.2566,
+      "total_search_p95_ms": 919.1501,
+      "recall_at_5_all": 1.0,
       "recall_at_5_test": 1.0
     },
     {
       "chunks": 20000,
-      "db_search_p50_ms": 1663.4699,
-      "db_search_p95_ms": 1667.0566,
-      "total_search_p50_ms": 1769.0547,
-      "total_search_p95_ms": 1785.4599,
-      "recall_at_5_all": 0.9917,
+      "db_search_p50_ms": 1637.8188,
+      "db_search_p95_ms": 1660.0905,
+      "total_search_p50_ms": 1740.9626,
+      "total_search_p95_ms": 1784.1239,
+      "recall_at_5_all": 1.0,
       "recall_at_5_test": 1.0
     }
   ],
@@ -69,26 +69,26 @@
       "storage": "halfvec(4096)",
       "index_kind": "none",
       "selected_mode": "hybrid_rrf",
-      "chunks_table_bytes": 181403648,
+      "chunks_table_bytes": 181321728,
       "db_search_latency_ms": {
-        "mean": 1678.7694,
-        "p50": 1663.4699,
-        "p95": 1667.0566
+        "mean": 1640.6727,
+        "p50": 1637.8188,
+        "p95": 1660.0905
       },
       "total_search_latency_ms": {
-        "mean": 1783.4393,
-        "p50": 1769.0547,
-        "p95": 1785.4599
+        "mean": 1745.3426,
+        "p50": 1740.9626,
+        "p95": 1784.1239
       },
       "all": {
-        "recall_at_5": 0.9917,
-        "mrr": 0.9583,
+        "recall_at_5": 1.0,
+        "mrr": 0.9556,
         "citation_f1": 0.8611,
         "refusal_correctness": 0.8205
       },
       "dev": {
-        "recall_at_5": 0.9872,
-        "mrr": 0.9615,
+        "recall_at_5": 1.0,
+        "mrr": 0.9573,
         "citation_f1": 0.9145,
         "refusal_correctness": 0.8824
       },
@@ -97,8 +97,8 @@
         "mrr": 0.9524,
         "citation_f1": 0.7619,
         "refusal_correctness": 0.7037,
-        "latency_ms_p50": 1667.8876,
-        "latency_ms_p95": 1895.7662
+        "latency_ms_p50": 1635.1703,
+        "latency_ms_p95": 1660.7193
       }
     },
     "two_stage_prefix1024": {
@@ -106,26 +106,26 @@
       "storage": "halfvec(4096)",
       "index_kind": "hnsw_prefix",
       "selected_mode": "hybrid_rrf",
-      "chunks_table_bytes": 236027904,
+      "chunks_table_bytes": 235945984,
       "db_search_latency_ms": {
-        "mean": 64.6074,
-        "p50": 50.7771,
-        "p95": 54.1174
+        "mean": 62.5189,
+        "p50": 64.2657,
+        "p95": 77.2079
       },
       "total_search_latency_ms": {
-        "mean": 169.2773,
-        "p50": 156.3619,
-        "p95": 172.5207
+        "mean": 167.1888,
+        "p50": 167.4095,
+        "p95": 201.2413
       },
       "all": {
-        "recall_at_5": 0.9917,
-        "mrr": 0.9583,
+        "recall_at_5": 1.0,
+        "mrr": 0.9556,
         "citation_f1": 0.8611,
         "refusal_correctness": 0.8205
       },
       "dev": {
-        "recall_at_5": 0.9872,
-        "mrr": 0.9615,
+        "recall_at_5": 1.0,
+        "mrr": 0.9573,
         "citation_f1": 0.9145,
         "refusal_correctness": 0.8824
       },
@@ -134,36 +134,36 @@
         "mrr": 0.9524,
         "citation_f1": 0.7619,
         "refusal_correctness": 0.7037,
-        "latency_ms_p50": 66.0752,
-        "latency_ms_p95": 75.5723
+        "latency_ms_p50": 66.4319,
+        "latency_ms_p95": 81.3675
       },
-      "index_build_seconds": 286.51
+      "index_build_seconds": 273.6777
     },
     "truncated_1024_hnsw": {
       "fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|1024|redact=0|qp=e1e90dad|dp=e3b0c442",
       "storage": "vector(1024)",
       "index_kind": "hnsw",
       "selected_mode": "hybrid_rrf",
-      "chunks_table_bytes": 284246016,
+      "chunks_table_bytes": 284237824,
       "db_search_latency_ms": {
-        "mean": 52.2164,
-        "p50": 47.7622,
-        "p95": 52.2593
+        "mean": 45.8286,
+        "p50": 45.1117,
+        "p95": 59.3918
       },
       "total_search_latency_ms": {
-        "mean": 156.8863,
-        "p50": 153.347,
-        "p95": 170.6626
+        "mean": 150.4985,
+        "p50": 148.2555,
+        "p95": 183.4252
       },
       "all": {
-        "recall_at_5": 0.9917,
-        "mrr": 0.9556,
+        "recall_at_5": 1.0,
+        "mrr": 0.9528,
         "citation_f1": 0.7167,
         "refusal_correctness": 0.7692
       },
       "dev": {
-        "recall_at_5": 0.9872,
-        "mrr": 0.9615,
+        "recall_at_5": 1.0,
+        "mrr": 0.9573,
         "citation_f1": 0.7949,
         "refusal_correctness": 0.8431
       },
@@ -172,10 +172,10 @@
         "mrr": 0.9444,
         "citation_f1": 0.5714,
         "refusal_correctness": 0.6296,
-        "latency_ms_p50": 51.9042,
-        "latency_ms_p95": 60.9921
+        "latency_ms_p50": 43.2245,
+        "latency_ms_p95": 60.1897
       },
-      "index_build_seconds": 33.7685
+      "index_build_seconds": 29.5588
     }
   }
 }

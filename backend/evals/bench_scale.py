@@ -32,6 +32,7 @@ from app.acl import Principal
 from app.auth import hash_password
 from app.config import Settings, get_settings, repo_root, reset_settings_cache
 from app.db import dispose_engine, get_sessionmaker
+from app.ingest_worker import process_next_pending
 from app.models import Document, User
 from app.rag.chunker import chunk_markdown, parse_front_matter
 from app.rag.embedder import Embedder, HashingEmbedder, build_embedder
@@ -259,11 +260,12 @@ async def _prepare_cached_vectors(
 
     q_texts = list(q_meta["questions"])
     q_latencies = [float(x) for x in q_meta["latencies_ms"]]
+    sorted_q_lat = sorted(q_latencies)
     query_map = {q_texts[i]: q_vecs[i] for i in range(len(q_texts))}
     latency_summary = {
         "mean": round(sum(q_latencies) / max(len(q_latencies), 1), 4),
-        "p50": round(_percentile(q_latencies, 0.50), 4),
-        "p95": round(_percentile(q_latencies, 0.95), 4),
+        "p50": round(_percentile(sorted_q_lat, 0.50), 4),
+        "p95": round(_percentile(sorted_q_lat, 0.95), 4),
     }
     return corpus_vecs, query_map, latency_summary, seed_vecs
 
@@ -369,6 +371,46 @@ async def _ensure_eval_user_and_corpus_docs(
     return principal, distractor_doc_id
 
 
+def _build_distractor_pools_and_corpus(
+    corpus_vecs: list[list[float]],
+    seed_vecs: list[list[float]],
+    dim: int,
+) -> tuple[list[list[float]], list[list[list[float]]]]:
+    """Build distractor components at native_dim and slice to dim so truncated runs are exact MRL prefixes."""
+    native_dim = (
+        len(corpus_vecs[0])
+        if corpus_vecs
+        else (len(seed_vecs[0]) if seed_vecs else dim)
+    )
+    n_seeds = max(len(seed_vecs), 1)
+    rng = random.Random(20261106)
+    pools: list[list[list[float]]] = []
+    for p_idx in range(4):
+        pool: list[list[float]] = []
+        for idx in range(64):
+            s_vec_full = _l2_normalize(
+                seed_vecs[(p_idx * 16 + idx) % n_seeds][:native_dim]
+            )
+            r_vec_full = _l2_normalize(
+                [rng.gauss(0.0, 1.0) for _ in range(native_dim)]
+            )
+            mixed_full = _l2_normalize(
+                [
+                    0.25 * s_vec_full[j] + 0.968 * r_vec_full[j]
+                    for j in range(native_dim)
+                ]
+            )
+            pool.append(mixed_full[:dim])
+        pools.append(pool)
+
+    scaled_corpus: list[list[float]] = []
+    for cvec in corpus_vecs:
+        full_norm = _l2_normalize(cvec[:native_dim])
+        scaled_full = [x * 1.15 for x in full_norm]
+        scaled_corpus.append(scaled_full[:dim])
+    return scaled_corpus, pools
+
+
 async def _populate_distractors_up_to(
     *,
     distractor_doc_id: uuid.UUID,
@@ -382,18 +424,9 @@ async def _populate_distractors_up_to(
     maker = get_sessionmaker()
     n_corpus = len(corpus_vecs)
     n_seeds = max(len(seed_vecs), 1)
-    rng = random.Random(20261106)
-    pools: list[list[list[float]]] = []
-    for p_idx in range(4):
-        pool: list[list[float]] = []
-        for idx in range(64):
-            s_vec = _l2_normalize(seed_vecs[(p_idx * 16 + idx) % n_seeds][:dim])
-            r_vec = _l2_normalize([rng.gauss(0.0, 1.0) for _ in range(dim)])
-            mixed = _l2_normalize(
-                [0.25 * s_vec[j] + 0.968 * r_vec[j] for j in range(dim)]
-            )
-            pool.append(mixed)
-        pools.append(pool)
+    scaled_corpus, pools = _build_distractor_pools_and_corpus(
+        corpus_vecs, seed_vecs, dim
+    )
 
     async with maker() as session:
         cur_total = int(
@@ -417,9 +450,7 @@ async def _populate_distractors_up_to(
             )
         )
         await session.execute(text("TRUNCATE _bench_corpus"))
-        for idx, cvec in enumerate(corpus_vecs):
-            trunc = _l2_normalize(cvec[:dim])
-            scaled = [x * 1.15 for x in trunc]
+        for idx, scaled in enumerate(scaled_corpus):
             await session.execute(
                 text(
                     f"INSERT INTO _bench_corpus (id, v) VALUES (:id, CAST(:v AS {storage}({dim})))"
@@ -574,7 +605,7 @@ async def _evaluate_path(
                 query=str(questions[0]["question"]),
                 mode="dense",
                 source="eval",
-                limit=20,
+                limit=None,
             )
         for q in questions:
             bundle = await search_knowledge(
@@ -585,7 +616,7 @@ async def _evaluate_path(
                 query=str(q["question"]),
                 mode="dense",
                 source="eval",
-                limit=20,
+                limit=None,
             )
             gold_keys = [
                 heading_to_key[(g["doc"], g["heading"])]
@@ -620,6 +651,7 @@ async def _evaluate_path(
         chunks_table_bytes = int(bytes_row.scalar_one() or 0)
 
     all_latencies = [float(r["elapsed_ms"]) for r in rows]
+    sorted_lat = sorted(all_latencies)
     dev_rows = [r for r in rows if r["split"] == "dev"]
     test_rows = [r for r in rows if r["split"] == "test"]
     all_metrics = evaluate(rows, mode=mode, params=params, include_ci=False)
@@ -628,8 +660,8 @@ async def _evaluate_path(
 
     db_lat = {
         "mean": round(sum(all_latencies) / max(len(all_latencies), 1), 4),
-        "p50": round(_percentile(all_latencies, 0.50), 4),
-        "p95": round(_percentile(all_latencies, 0.95), 4),
+        "p50": round(_percentile(sorted_lat, 0.50), 4),
+        "p95": round(_percentile(sorted_lat, 0.95), 4),
     }
     e2e_lat = {
         "mean": round(db_lat["mean"] + float(query_embed_latency_ms["mean"]), 4),
@@ -702,24 +734,10 @@ def _make_path_settings(base: Settings, **overrides: Any) -> Settings:
     return Settings(**params)
 
 
-async def run_scale_benchmark(
-    *,
-    chunks: int = 20000,
-    embedder_kind: str | None = None,
-    output_path: Path | None = None,
-    cache_dir: Path | None = None,
-    sweep_counts: list[int] | None = None,
-) -> dict[str, Any]:
-    """Execute the Spec T3.7 scale benchmark across exact, two-stage prefix HNSW, and truncated 1024 HNSW."""
-    reset_settings_cache()
-    reset_pgvector_version_cache()
-    root = repo_root()
-    resolved_cache_dir = cache_dir or (root / ".cache" / "bench_scale")
-    resolved_output = output_path or (
-        root / "evals" / "results" / "scale" / f"bench_scale_{chunks}.json"
-    )
-
-    base_env = get_settings()
+def _resolve_benchmark_base_settings(
+    base_env: Settings, embedder_kind: str | None = None
+) -> tuple[Settings, str, int, int, int]:
+    """Resolve base Settings and (chosen_embedder, full_dim, prefix_dim, trunc_dim) for benchmark."""
     chosen_embedder = embedder_kind or base_env.embedder
     if chosen_embedder == "openai_compatible":
         full_dim = 4096
@@ -741,6 +759,7 @@ async def run_scale_benchmark(
             embedding_truncate=False,
             embedding_storage="halfvec",
             embedding_index="none",
+            embedding_prefix_dim=prefix_dim,
             embedding_query_template=(
                 base_env.embedding_query_template
                 if base_env.embedding_query_template != "{query}"
@@ -750,6 +769,21 @@ async def run_scale_benchmark(
                 base_env.embedding_query_instruction
                 or "Given a question from a research lab member, retrieve the lab document passage that answers it"
             ),
+        )
+    elif chosen_embedder == "bge":
+        full_dim = int(base_env.embedding_dim) if base_env.embedder == "bge" else 512
+        prefix_dim = max(64, full_dim // 4)
+        trunc_dim = prefix_dim
+        base_settings = _make_path_settings(
+            base_env,
+            embedder="bge",
+            embedding_model=base_env.embedding_model or "BAAI/bge-small-zh-v1.5",
+            embedding_dim=full_dim,
+            embedding_native_dim=full_dim,
+            embedding_truncate=False,
+            embedding_storage="halfvec",
+            embedding_index="none",
+            embedding_prefix_dim=prefix_dim,
         )
     else:
         full_dim = 512
@@ -765,6 +799,30 @@ async def run_scale_benchmark(
             embedding_index="none",
             embedding_prefix_dim=prefix_dim,
         )
+    return base_settings, chosen_embedder, full_dim, prefix_dim, trunc_dim
+
+
+async def run_scale_benchmark(
+    *,
+    chunks: int = 20000,
+    embedder_kind: str | None = None,
+    output_path: Path | None = None,
+    cache_dir: Path | None = None,
+    sweep_counts: list[int] | None = None,
+) -> dict[str, Any]:
+    """Execute the Spec T3.7 scale benchmark across exact, two-stage prefix HNSW, and truncated 1024 HNSW."""
+    reset_settings_cache()
+    reset_pgvector_version_cache()
+    root = repo_root()
+    resolved_cache_dir = cache_dir or (root / ".cache" / "bench_scale")
+    resolved_output = output_path or (
+        root / "evals" / "results" / "scale" / f"bench_scale_{chunks}.json"
+    )
+
+    base_env = get_settings()
+    base_settings, chosen_embedder, full_dim, prefix_dim, trunc_dim = (
+        _resolve_benchmark_base_settings(base_env, embedder_kind)
+    )
 
     corpus_chunks, questions = _load_v1_corpus_and_questions(root)
     corpus_vecs, query_map, query_embed_lat, seed_vecs = await _prepare_cached_vectors(
@@ -986,29 +1044,30 @@ async def run_scale_benchmark(
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return report
     finally:
-        # Always restore database to default 512-dim vector + hnsw so subsequent runs/tests start cleanly
-        restore_settings = _make_path_settings(
-            base_env,
-            embedder="hashing",
-            embedding_dim=512,
-            embedding_native_dim=None,
-            embedding_truncate=False,
-            embedding_storage="vector",
-            embedding_index="auto",
-        )
-        async with maker() as session:
-            await session.execute(
-                text("DELETE FROM documents WHERE source = 'eval' AND doc_key = 'scale-distractors'")
-            )
-            await session.commit()
-            await apply_reindex(
-                session,
-                restore_settings,
-                HashingEmbedder(512),
-                if_needed=False,
-                force=True,
-            )
-        await dispose_engine()
+        restore_settings = _make_path_settings(base_env)
+        restore_embedder = build_embedder(restore_settings)
+        try:
+            async with maker() as session:
+                await session.execute(
+                    text("DELETE FROM documents WHERE source = 'eval'")
+                )
+                await session.commit()
+                rebuilt = await apply_reindex(
+                    session,
+                    restore_settings,
+                    restore_embedder,
+                    if_needed=False,
+                    force=True,
+                )
+            if rebuilt:
+                while (
+                    await process_next_pending(restore_embedder, restore_settings)
+                    is not None
+                ):
+                    pass
+        finally:
+            await restore_embedder.aclose()
+            await dispose_engine()
 
 
 def main(argv: list[str] | None = None) -> int:
