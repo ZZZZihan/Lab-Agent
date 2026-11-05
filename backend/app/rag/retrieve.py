@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -192,8 +193,16 @@ async def search_knowledge(
     )
 
 
-def principal_from_user(user_id: uuid.UUID, role: str) -> Principal:
-    return Principal(id=user_id, role=role)
+def principal_from_user(
+    user_id: uuid.UUID,
+    role: str,
+    group_ids: Iterable[str] = (),
+) -> Principal:
+    return Principal(
+        id=user_id,
+        role=role,
+        group_ids=frozenset(str(group_id) for group_id in group_ids),
+    )
 
 
 # tokenize is used by callers that need the same analyzer as retrieval.

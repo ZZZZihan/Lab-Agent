@@ -106,7 +106,7 @@ async def _prepare(settings: object) -> User:
 
 
 async def _featurize(settings: object, user: User, questions: list[dict[str, object]]) -> list[dict[str, object]]:
-    from app.acl import Principal
+    from app.acl import Principal, load_user_group_ids
     from app.config import Settings
 
     assert isinstance(settings, Settings)
@@ -116,12 +116,14 @@ async def _featurize(settings: object, user: User, questions: list[dict[str, obj
     features: list[dict[str, object]] = []
     try:
         async with maker() as session:
+            group_ids = await load_user_group_ids(session, user.id)
+            principal = Principal(id=user.id, role=user.role, group_ids=group_ids)
             for question in questions:
                 bundle = await search_knowledge(
                     session,
                     settings=settings,
                     embedder=embedder,
-                    user=Principal(id=user.id, role=user.role),
+                    user=principal,
                     query=str(question["question"]),
                     mode="dense",
                     source="eval",

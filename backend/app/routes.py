@@ -31,7 +31,7 @@ from app.auth import (
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.llm import LLM
-from app.models import Conversation, Document, DocumentACL, Message, User
+from app.models import Conversation, Document, DocumentACL, Group, Message, User
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
 from app.rag.index_meta import check_index
@@ -246,6 +246,21 @@ async def me(
     return {"id": str(user.id), "display_name": user.display_name, "role": user.role}
 
 
+@router.get("/groups")
+async def list_public_groups(
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _user(session, actor)
+    rows = list(await session.scalars(select(Group).order_by(Group.slug.asc())))
+    return {
+        "groups": [
+            {"slug": group.slug, "name": group.name}
+            for group in rows
+        ]
+    }
+
+
 @router.get("/documents")
 async def list_documents(
     actor: Annotated[Actor, Depends(_actor)],
@@ -297,6 +312,8 @@ async def upload_document(
     visibility: Annotated[str, Form()] = "lab",
     text: Annotated[str | None, Form()] = None,
     grant_emails: Annotated[str | None, Form()] = None,
+    grant_groups: Annotated[str | None, Form()] = None,
+    grant_roles: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
 ) -> dict[str, str]:
     settings = _settings(request)
@@ -372,7 +389,23 @@ async def upload_document(
             granted = await session.scalar(select(User).where(User.email == email))
             if granted is None:
                 raise APIError(400, "unknown_grantee", "授权名单里有不存在的账号")
-            grants.append(granted.id)
+            if granted.id not in grants:
+                grants.append(granted.id)
+    group_grants: list[uuid.UUID] = []
+    if grant_groups:
+        for slug in [part.strip().lower() for part in grant_groups.split(",") if part.strip()]:
+            group = await session.scalar(select(Group).where(Group.slug == slug))
+            if group is None:
+                raise APIError(400, "unknown_group", "授权名单里有不存在的项目组")
+            if group.id not in group_grants:
+                group_grants.append(group.id)
+    role_grants: list[str] = []
+    if grant_roles:
+        for role_name in [part.strip() for part in grant_roles.split(",") if part.strip()]:
+            if role_name not in {"admin", "member", "viewer"}:
+                raise APIError(400, "invalid_role", "授权角色必须是 admin、member 或 viewer")
+            if role_name not in role_grants:
+                role_grants.append(role_name)
     try:
         document = await create_document(
             session,
@@ -384,6 +417,8 @@ async def upload_document(
             visibility=visibility,
             source="upload",
             grant_user_ids=grants,
+            grant_group_ids=group_grants,
+            grant_roles=role_grants,
             original_filename=original_filename,
         )
     except ValueError as exc:
@@ -402,7 +437,7 @@ async def upload_document(
             "format": source_format,
             "bytes": byte_len,
             "chars": len(raw),
-            "grants": len(grants),
+            "grants": len(grants) + len(group_grants) + len(role_grants),
         },
     )
     return {"id": str(document.id), "status": document.status}
@@ -421,7 +456,11 @@ async def get_document(
     grants = list(
         await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
     )
-    if not can_read(Principal(id=actor.id, role=actor.role), document, grants):
+    if not can_read(
+        Principal(id=actor.id, role=actor.role, group_ids=actor.group_ids),
+        document,
+        grants,
+    ):
         await write_audit(
             settings=_settings(request),
             actor_id=actor.id,
@@ -498,6 +537,7 @@ async def search(
         k=body.k,
         collection=body.collection,
         request_id=getattr(request.state, "request_id", None),
+        group_ids=actor.group_ids,
     )
     return {
         "hits": [
@@ -576,6 +616,7 @@ async def chat_stream(
                         question=body.message,
                         emit=emit,
                         request_id=request_id,
+                        group_ids=actor.group_ids,
                     )
                     decision = result["decision"]
                     refused = bool(result["refused"])

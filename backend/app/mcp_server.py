@@ -8,6 +8,7 @@ import os
 from mcp.server.mcpserver import MCPServer
 from sqlalchemy import select
 
+from app.acl import load_user_group_ids
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.models import User
@@ -38,7 +39,7 @@ def build_server() -> MCPServer:
         ),
     )
 
-    async def _user(session: object) -> User:
+    async def _user(session: object) -> tuple[User, frozenset[str]]:
         email = os.environ.get("MCP_ACTOR_EMAIL", "").strip().lower()
         if not email:
             raise RuntimeError("MCP_ACTOR_EMAIL is required")
@@ -48,7 +49,8 @@ def build_server() -> MCPServer:
         user = await session.scalar(select(User).where(User.email == email))
         if user is None or not user.is_active:
             raise RuntimeError("MCP actor is not provisioned")
-        return user
+        group_ids = await load_user_group_ids(session, user.id)
+        return user, group_ids
 
     @server.tool(
         name="search_knowledge_base",
@@ -59,7 +61,7 @@ def build_server() -> MCPServer:
         embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
-                user = await _user(session)
+                user, group_ids = await _user(session)
                 hits = await search_knowledge_base(
                     session,
                     settings=settings,
@@ -67,6 +69,7 @@ def build_server() -> MCPServer:
                     user=user,
                     query=query,
                     k=k,
+                    group_ids=group_ids,
                 )
                 await session.commit()
         finally:
@@ -88,9 +91,13 @@ def build_server() -> MCPServer:
     async def fetch_document_tool(document_id: str) -> str:
         settings = get_settings()
         async with get_sessionmaker()() as session:
-            user = await _user(session)
+            user, group_ids = await _user(session)
             document = await fetch_document(
-                session, settings=settings, user=user, document_id=document_id
+                session,
+                settings=settings,
+                user=user,
+                document_id=document_id,
+                group_ids=group_ids,
             )
             await session.commit()
         return json.dumps(document or {"status": "not_found"}, ensure_ascii=False)
@@ -99,7 +106,7 @@ def build_server() -> MCPServer:
     async def search_papers_tool(query: str) -> str:
         settings = get_settings()
         async with get_sessionmaker()() as session:
-            user = await _user(session)
+            user, _group_ids = await _user(session)
             result = await search_papers(settings=settings, user=user, query=query)
             await session.commit()
         return json.dumps(result, ensure_ascii=False)
@@ -110,7 +117,7 @@ def build_server() -> MCPServer:
         embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
-                user = await _user(session)
+                user, group_ids = await _user(session)
                 result = await query_lab_projects(
                     session,
                     settings=settings,
@@ -118,6 +125,7 @@ def build_server() -> MCPServer:
                     user=user,
                     query=query,
                     k=k,
+                    group_ids=group_ids,
                 )
                 await session.commit()
         finally:
@@ -136,7 +144,7 @@ def build_server() -> MCPServer:
         embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
-                user = await _user(session)
+                user, group_ids = await _user(session)
                 result = await query_meetings(
                     session,
                     settings=settings,
@@ -144,6 +152,7 @@ def build_server() -> MCPServer:
                     user=user,
                     query=query,
                     k=k,
+                    group_ids=group_ids,
                 )
                 await session.commit()
         finally:

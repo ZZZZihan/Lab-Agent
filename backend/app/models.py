@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -84,6 +85,31 @@ class Document(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Group(Base):
+    __tablename__ = "groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    __table_args__ = (Index("group_members_user_idx", "user_id"),)
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
 class DocumentACL(Base):
     __tablename__ = "document_acl"
     __table_args__ = (
@@ -93,6 +119,14 @@ class DocumentACL(Base):
             "principal_id",
             "permission",
             name="document_acl_unique",
+        ),
+        CheckConstraint(
+            "principal_type IN ('user', 'role', 'group')",
+            name="document_acl_principal_type",
+        ),
+        CheckConstraint(
+            "permission IN ('read')",
+            name="document_acl_permission",
         ),
     )
 

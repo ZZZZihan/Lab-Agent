@@ -1,24 +1,26 @@
-"""Administrator API for user management (/api/v1/admin)."""
+"""Administrator API for user and group management (/api/v1/admin)."""
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
 from app.auth import Actor, hash_password, validate_password
 from app.db import get_session
-from app.models import User
+from app.models import Group, GroupMember, User
 from app.routes import APIError, _actor, _client_ip, _settings
 
 router = APIRouter(prefix="/api/v1/admin")
 
 ALLOWED_ROLES = frozenset({"admin", "member", "viewer"})
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class CreateUserBody(BaseModel):
@@ -38,6 +40,15 @@ class ResetPasswordBody(BaseModel):
     password: str
 
 
+class CreateGroupBody(BaseModel):
+    slug: str
+    name: str
+
+
+class SetGroupMembersBody(BaseModel):
+    user_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
 def _serialize_user(user: User) -> dict[str, object]:
     return {
         "id": str(user.id),
@@ -49,11 +60,39 @@ def _serialize_user(user: User) -> dict[str, object]:
     }
 
 
+async def _serialize_group(session: AsyncSession, group: Group) -> dict[str, object]:
+    member_rows = list(
+        await session.scalars(
+            select(User)
+            .join(GroupMember, GroupMember.user_id == User.id)
+            .where(GroupMember.group_id == group.id)
+            .order_by(User.created_at.asc(), User.email.asc())
+        )
+    )
+    return {
+        "id": str(group.id),
+        "slug": group.slug,
+        "name": group.name,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+        "member_ids": [str(member.id) for member in member_rows],
+        "members": [
+            {
+                "id": str(member.id),
+                "email": member.email,
+                "display_name": member.display_name,
+                "role": member.role,
+            }
+            for member in member_rows
+        ],
+    }
+
+
 async def _require_admin(
     request: Request,
     actor: Actor,
     *,
     operation: str,
+    resource_type: str = "user",
     resource_id: str | None = None,
 ) -> None:
     if actor.role != "admin":
@@ -61,13 +100,13 @@ async def _require_admin(
             settings=_settings(request),
             actor_id=actor.id,
             action="permission_denied",
-            resource_type="user",
+            resource_type=resource_type,
             resource_id=resource_id,
             request_id=getattr(request.state, "request_id", None),
             ip=_client_ip(request),
             detail={"operation": operation},
         )
-        raise APIError(403, "forbidden", "只有管理员可以管理用户")
+        raise APIError(403, "forbidden", "只有管理员可以执行此操作")
 
 
 @router.get("/users")
@@ -232,3 +271,115 @@ async def reset_user_password(
         detail={},
     )
     return {"status": "ok", "id": str(user.id)}
+
+
+@router.get("/groups")
+async def list_groups(
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(request, actor, operation="list_groups", resource_type="group")
+    groups = list(await session.scalars(select(Group).order_by(Group.slug.asc())))
+    return {
+        "groups": [await _serialize_group(session, group) for group in groups],
+    }
+
+
+@router.post("/groups")
+async def create_group(
+    body: CreateGroupBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(request, actor, operation="create_group", resource_type="group")
+    slug = body.slug.strip().lower()
+    name = body.name.strip()
+    if not slug or not SLUG_RE.match(slug):
+        raise APIError(400, "invalid_slug", "组标识需为小写字母、数字、连字符或下划线")
+    if not name or len(name) > 120:
+        raise APIError(400, "invalid_name", "组名称不能为空且不超过 120 个字符")
+
+    existing = await session.scalar(select(Group).where(Group.slug == slug))
+    if existing is not None:
+        raise APIError(409, "group_exists", "该组标识已存在")
+
+    group = Group(slug=slug, name=name)
+    session.add(group)
+    await session.flush()
+    serialized = await _serialize_group(session, group)
+    await session.commit()
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="group_created",
+        resource_type="group",
+        resource_id=str(group.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"slug": slug},
+    )
+    return {**serialized, "group": serialized}
+
+
+@router.put("/groups/{group_id}/members")
+async def set_group_members(
+    group_id: uuid.UUID,
+    body: SetGroupMembersBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="set_group_members",
+        resource_type="group",
+        resource_id=str(group_id),
+    )
+    group = await session.get(Group, group_id)
+    if group is None:
+        raise APIError(404, "not_found", "项目组不存在")
+
+    desired_ids: set[uuid.UUID] = set()
+    ordered_desired: list[uuid.UUID] = []
+    for uid in body.user_ids:
+        if uid not in desired_ids:
+            desired_ids.add(uid)
+            ordered_desired.append(uid)
+
+    if desired_ids:
+        found_users = list(await session.scalars(select(User.id).where(User.id.in_(desired_ids))))
+        if len(found_users) != len(desired_ids):
+            raise APIError(400, "unknown_user", "成员列表包含不存在的用户")
+
+    current_rows = list(
+        await session.scalars(
+            select(GroupMember.user_id).where(GroupMember.group_id == group.id)
+        )
+    )
+    current_ids = set(current_rows)
+
+    added = len(desired_ids - current_ids)
+    removed = len(current_ids - desired_ids)
+
+    await session.execute(delete(GroupMember).where(GroupMember.group_id == group.id))
+    for uid in ordered_desired:
+        session.add(GroupMember(group_id=group.id, user_id=uid))
+    await session.flush()
+    serialized = await _serialize_group(session, group)
+    await session.commit()
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="group_members_changed",
+        resource_type="group",
+        resource_id=str(group.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"added": added, "removed": removed},
+    )
+    return {**serialized, "group": serialized, "added": added, "removed": removed}

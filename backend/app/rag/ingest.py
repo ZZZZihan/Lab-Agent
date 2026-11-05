@@ -52,6 +52,55 @@ async def _resolve_storage(session: AsyncSession, storage: str | None) -> str:
     return candidate
 
 
+def _add_acl_grants(
+    session: AsyncSession,
+    document_id: uuid.UUID,
+    *,
+    grant_user_ids: Sequence[uuid.UUID] = (),
+    grant_group_ids: Sequence[uuid.UUID] = (),
+    grant_roles: Sequence[str] = (),
+) -> None:
+    seen_users: set[uuid.UUID] = set()
+    for grant_id in grant_user_ids:
+        if grant_id in seen_users:
+            continue
+        seen_users.add(grant_id)
+        session.add(
+            DocumentACL(
+                document_id=document_id,
+                principal_type="user",
+                principal_id=str(grant_id),
+                permission="read",
+            )
+        )
+    seen_groups: set[uuid.UUID] = set()
+    for group_id in grant_group_ids:
+        if group_id in seen_groups:
+            continue
+        seen_groups.add(group_id)
+        session.add(
+            DocumentACL(
+                document_id=document_id,
+                principal_type="group",
+                principal_id=str(group_id),
+                permission="read",
+            )
+        )
+    seen_roles: set[str] = set()
+    for role in grant_roles:
+        if role in seen_roles:
+            continue
+        seen_roles.add(role)
+        session.add(
+            DocumentACL(
+                document_id=document_id,
+                principal_type="role",
+                principal_id=role,
+                permission="read",
+            )
+        )
+
+
 async def create_document(
     session: AsyncSession,
     *,
@@ -64,6 +113,8 @@ async def create_document(
     source: str = "upload",
     doc_key: str | None = None,
     grant_user_ids: Sequence[uuid.UUID] = (),
+    grant_group_ids: Sequence[uuid.UUID] = (),
+    grant_roles: Sequence[str] = (),
     original_filename: str | None = None,
 ) -> Document:
     chunks = chunk_document(text, source_format)
@@ -86,15 +137,13 @@ async def create_document(
     )
     session.add(document)
     await session.flush()
-    for grant_id in grant_user_ids:
-        session.add(
-            DocumentACL(
-                document_id=document.id,
-                principal_type="user",
-                principal_id=str(grant_id),
-                permission="read",
-            )
-        )
+    _add_acl_grants(
+        session,
+        document.id,
+        grant_user_ids=grant_user_ids,
+        grant_group_ids=grant_group_ids,
+        grant_roles=grant_roles,
+    )
     await session.flush()
     return document
 
@@ -163,6 +212,8 @@ async def ingest_text(
     source_format: str = "markdown",
     doc_key: str | None = None,
     grant_user_ids: Sequence[uuid.UUID] | None = None,
+    grant_group_ids: Sequence[uuid.UUID] | None = None,
+    grant_roles: Sequence[str] | None = None,
     document_id: uuid.UUID | None = None,
     original_filename: str | None = None,
     storage: str | None = None,
@@ -180,6 +231,8 @@ async def ingest_text(
             source=source,
             doc_key=doc_key,
             grant_user_ids=grant_user_ids or (),
+            grant_group_ids=grant_group_ids or (),
+            grant_roles=grant_roles or (),
             original_filename=original_filename,
         )
     else:
@@ -197,15 +250,13 @@ async def ingest_text(
         document.status = "pending"
         document.error_code = None
         await session.execute(delete(DocumentACL).where(DocumentACL.document_id == document.id))
-        for grant_id in grant_user_ids or ():
-            session.add(
-                DocumentACL(
-                    document_id=document.id,
-                    principal_type="user",
-                    principal_id=str(grant_id),
-                    permission="read",
-                )
-            )
+        _add_acl_grants(
+            session,
+            document.id,
+            grant_user_ids=grant_user_ids or (),
+            grant_group_ids=grant_group_ids or (),
+            grant_roles=grant_roles or (),
+        )
         await session.flush()
 
     await index_document(session, embedder=embedder, document=document, storage=resolved_storage)
@@ -244,6 +295,8 @@ async def upsert_source(
     source: str,
     records: Sequence[tuple[dict[str, str], str]],
     grants: dict[str, list[uuid.UUID]] | None = None,
+    group_grants: dict[str, list[uuid.UUID]] | None = None,
+    role_grants: dict[str, list[str]] | None = None,
     storage: str | None = None,
 ) -> UpsertStats:
     resolved_storage = await _resolve_storage(session, storage)
@@ -269,6 +322,8 @@ async def upsert_source(
         collection = meta.get("collection") or "knowledge"
         visibility = meta.get("visibility") or "lab"
         grant_ids = (grants or {}).get(key or "", [])
+        grant_gids = (group_grants or {}).get(key or "", [])
+        grant_rnames = (role_grants or {}).get(key or "", [])
         sha = _sha256_hex(body)
 
         if key:
@@ -287,6 +342,8 @@ async def upsert_source(
                 source=source,
                 doc_key=key,
                 grant_user_ids=grant_ids,
+                grant_group_ids=grant_gids,
+                grant_roles=grant_rnames,
             )
             await index_document(
                 session, embedder=embedder, document=new_doc, storage=resolved_storage
@@ -301,15 +358,13 @@ async def upsert_source(
         existing.visibility = visibility
         existing.deleted_at = None
         await session.execute(delete(DocumentACL).where(DocumentACL.document_id == existing.id))
-        for grant_id in grant_ids:
-            session.add(
-                DocumentACL(
-                    document_id=existing.id,
-                    principal_type="user",
-                    principal_id=str(grant_id),
-                    permission="read",
-                )
-            )
+        _add_acl_grants(
+            session,
+            existing.id,
+            grant_user_ids=grant_ids,
+            grant_group_ids=grant_gids,
+            grant_roles=grant_rnames,
+        )
 
         chunk_count = int(
             (
