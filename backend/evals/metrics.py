@@ -224,6 +224,7 @@ def evaluate(
 
     latencies_sorted = sorted(latencies) or [0.0]
     p50 = latencies_sorted[len(latencies_sorted) // 2]
+    p95 = _percentile(latencies_sorted, 0.95)
 
     def _ci_or_point(vals: list[float]) -> MetricCI:
         if include_ci:
@@ -257,6 +258,7 @@ def evaluate(
         "false_answer_rate": _ci_or_point(false_answer_outcomes),
         "latency_ms_mean": _avg(latencies),
         "latency_ms_p50": p50,
+        "latency_ms_p95": p95,
         "by_type": by_type,
     }
 
