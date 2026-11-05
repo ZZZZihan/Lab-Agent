@@ -37,8 +37,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: http://127.0.0.1:43123,http://localhost:43123
       UPLOAD_DIR: /app/data/uploads
+      CALIBRATION_DIR: /app/data/calibrations
       LOAD_TUNED_CONFIG: "true"
-      TUNED_CONFIG_PATH: /opt/lab-agent/evals/data/v1/selected_config.json
       CORPUS_DIR: /opt/lab-agent/evals/data/v1/corpus
       SEED_ONLY_DIR: /opt/lab-agent/evals/data/v1/seed_only
     ports:
@@ -47,6 +47,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - uploads:/app/data/uploads
+      - calibrations:/app/data/calibrations
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,3 +86,4 @@ services:
 volumes:
   pgdata:
   uploads:
+  calibrations:

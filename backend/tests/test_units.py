@@ -314,3 +314,148 @@ async def test_bge_embedder_async_protocol(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls[-2:] == [(["查询"], True), (["文档一", "文档二"], True)]
     await embedder.aclose()
 
+
+def test_calibration_loading_mismatch_and_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    for var in (
+        "EVIDENCE_SCORE_MIN",
+        "RARE_COVERAGE_MIN",
+        "CITE_MARGIN",
+        "CITE_K",
+        "RRF_K",
+        "RETRIEVAL_MODE",
+        "LOAD_TUNED_CONFIG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    jwt = "test-only-jwt-secret-value-0123456789-abcdef"
+    db_url = "postgresql+asyncpg://labagent:labagent@localhost/labagent"
+
+    # 1. Repo calibration file is loaded when runtime dir has no file
+    s_repo = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url=db_url,
+        jwt_secret=jwt,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        load_tuned_config=True,
+        calibration_dir=str(tmp_path / "empty_runtime"),
+    )
+    assert s_repo.calibrated is True
+    assert s_repo.calibration_source is not None
+    assert Path(s_repo.calibration_source).name == f"{s_repo.embedding_slug}.json"
+    assert s_repo.evidence_score_min == pytest.approx(0.2475)
+    assert s_repo.retrieval_mode == "dense"
+    assert s_repo.cite_k == 1
+
+    # 2. Runtime calibration directory takes precedence over repo calibration directory
+    runtime_file = tmp_path / f"{s_repo.embedding_slug}.json"
+    runtime_file.write_text(
+        json.dumps(
+            {
+                "embedder_fingerprint": s_repo.embedding_fingerprint,
+                "dataset": "v1",
+                "split_used": "dev",
+                "tuned_at": "2026-11-05T00:00:00Z",
+                "git_sha": "abc1234",
+                "retrieval_mode": "hybrid_rrf",
+                "rrf_k": 40,
+                "evidence_score_min": 0.4125,
+                "rare_coverage_min": 0.1,
+                "cite_margin": 0.08,
+                "cite_k": 2,
+                "dense_pool": 80,
+                "lexical_pool": 80,
+            }
+        ),
+        encoding="utf-8",
+    )
+    s_runtime = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url=db_url,
+        jwt_secret=jwt,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        load_tuned_config=True,
+        calibration_dir=str(tmp_path),
+    )
+    assert s_runtime.calibrated is True
+    assert s_runtime.calibration_source == str(runtime_file)
+    assert s_runtime.evidence_score_min == pytest.approx(0.4125)
+    assert s_runtime.retrieval_mode == "hybrid_rrf"
+    assert s_runtime.rrf_k == 40
+    assert s_runtime.cite_k == 2
+
+    # 3. Mismatched embedder_fingerprint falls back to 0.99 and calibrated=False
+    runtime_file.write_text(
+        json.dumps(
+            {
+                "embedder_fingerprint": "hashing|hashing-cjk-v1|256|redact=0|qp=e3b0c442|dp=e3b0c442",
+                "retrieval_mode": "dense",
+                "evidence_score_min": 0.15,
+            }
+        ),
+        encoding="utf-8",
+    )
+    s_mismatch = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url=db_url,
+        jwt_secret=jwt,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        load_tuned_config=True,
+        calibration_dir=str(tmp_path),
+    )
+    assert s_mismatch.calibrated is False
+    assert s_mismatch.calibration_source is None
+    assert s_mismatch.evidence_score_min == pytest.approx(0.99)
+
+    # Also test uncalibrated fingerprint with no file anywhere
+    s_uncalibrated = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url=db_url,
+        jwt_secret=jwt,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        embedding_dim=256,
+        load_tuned_config=True,
+        calibration_dir=str(tmp_path / "empty_runtime"),
+    )
+    assert s_uncalibrated.calibrated is False
+    assert s_uncalibrated.calibration_source is None
+    assert s_uncalibrated.evidence_score_min == pytest.approx(0.99)
+
+    # 4. Explicit environment variable (EVIDENCE_SCORE_MIN) takes precedence and sets calibration_source="env"
+    monkeypatch.setenv("EVIDENCE_SCORE_MIN", "0.33")
+    s_env = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url=db_url,
+        jwt_secret=jwt,  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        embedding_dim=256,
+        load_tuned_config=True,
+        calibration_dir=str(tmp_path / "empty_runtime"),
+    )
+    assert s_env.calibrated is True
+    assert s_env.calibration_source == "env"
+    assert s_env.evidence_score_min == pytest.approx(0.33)
+
+
+async def test_run_eval_check_exits_3_for_uncalibrated_embedder(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from app.config import reset_settings_cache
+    from evals.run_eval import _run
+
+    monkeypatch.setenv("EMBEDDING_DIM", "256")
+    reset_settings_cache()
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            await _run(tune_dev=False, check=True)
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "该嵌入器没有已提交的基线" in captured.err
+    finally:
+        monkeypatch.delenv("EMBEDDING_DIM", raising=False)
+        reset_settings_cache()
+
+

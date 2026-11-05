@@ -1,0 +1,15 @@
+{
+  "embedder_fingerprint": "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442",
+  "dataset": "v1",
+  "split_used": "dev",
+  "tuned_at": "2026-11-05T00:00:00Z",
+  "git_sha": "52fc697",
+  "retrieval_mode": "dense",
+  "rrf_k": 60,
+  "evidence_score_min": 0.2475,
+  "rare_coverage_min": 0.0,
+  "cite_margin": 0.05,
+  "cite_k": 1,
+  "dense_pool": 80,
+  "lexical_pool": 80
+}

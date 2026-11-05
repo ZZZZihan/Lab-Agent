@@ -1,5 +1,6 @@
 {
-  "label": "hashing-embedder-ci-baseline",
+  "label": "hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442-v1",
+  "embedder_fingerprint": "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442",
   "embedder": "hashing",
   "embedding_model_when_bge": "BAAI/bge-small-zh-v1.5",
   "neural_weights_used": false,

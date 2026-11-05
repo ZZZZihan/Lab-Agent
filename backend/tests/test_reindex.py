@@ -260,16 +260,68 @@ async def test_startup_lifespan_fails_on_index_mismatch_and_health_reports_field
         reset_settings_cache()
 
     # Matching settings: lifespan starts and /api/v1/health exposes all new fields
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            resp = await http.get("/api/v1/health")
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["embedder"] == "hashing"
-            assert body["embedding_model"] == "hashing-cjk-v1"
-            assert body["embedding_dim"] == 512
-            assert body["embedding_storage"] == "vector"
-            assert body["embedding_fingerprint"] == s_512.embedding_fingerprint
-            assert body["embedding_index_ok"] is True
-            assert body["embedding_base_host"] is None
+    monkeypatch.delenv("EVIDENCE_SCORE_MIN", raising=False)
+    monkeypatch.setenv("LOAD_TUNED_CONFIG", "true")
+    reset_settings_cache()
+    try:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+                resp = await http.get("/api/v1/health")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["embedder"] == "hashing"
+                assert body["embedding_model"] == "hashing-cjk-v1"
+                assert body["embedding_dim"] == 512
+                assert body["embedding_storage"] == "vector"
+                assert body["embedding_fingerprint"] == s_512.embedding_fingerprint
+                assert body["embedding_index_ok"] is True
+                assert body["embedding_base_host"] is None
+                assert body["calibrated"] is True
+                assert body["calibration_source"] == f"{s_512.embedding_slug}.json"
+                assert "/" not in body["calibration_source"]
+
+        # Uncalibrated settings: /api/v1/health reports calibrated=False and calibration_source=None
+        monkeypatch.setenv("LOAD_TUNED_CONFIG", "false")
+        reset_settings_cache()
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+                resp = await http.get("/api/v1/health")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["calibrated"] is False
+                assert body["calibration_source"] is None
+    finally:
+        monkeypatch.setenv("EVIDENCE_SCORE_MIN", "0")
+        monkeypatch.setenv("LOAD_TUNED_CONFIG", "false")
+        reset_settings_cache()
+
+
+async def test_run_eval_tune_writes_runtime_calibration_and_results(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evals.run_eval import _run
+
+    monkeypatch.setenv("CALIBRATION_DIR", str(tmp_path))
+    reset_settings_cache()
+    try:
+        await _run(tune_dev=True, check=True, commit=False)
+        s = get_settings()
+        cal_file = tmp_path / f"{s.embedding_slug}.json"
+        res_file = tmp_path / f"results-{s.embedding_slug}.json"
+        assert cal_file.is_file()
+        assert res_file.is_file()
+        cal_data = json.loads(cal_file.read_text(encoding="utf-8"))
+        assert cal_data["embedder_fingerprint"] == s.embedding_fingerprint
+        assert cal_data["dataset"] == "v1"
+        assert cal_data["split_used"] == "dev"
+        assert "tuned_at" in cal_data
+        assert "git_sha" in cal_data
+        assert cal_data["evidence_score_min"] == pytest.approx(0.2475)
+        res_data = json.loads(res_file.read_text(encoding="utf-8"))
+        assert res_data["label"] == f"{s.embedding_slug}-v1"
+        assert res_data["embedder_fingerprint"] == s.embedding_fingerprint
+    finally:
+        monkeypatch.delenv("CALIBRATION_DIR", raising=False)
+        reset_settings_cache()
