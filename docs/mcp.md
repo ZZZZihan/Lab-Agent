@@ -70,7 +70,7 @@ For local host execution against the Compose database (when running from `backen
   ```json
   {
     "tool": "<tool_name>",
-    "status": "ok | refused | not_found | not_configured",
+    "status": "ok | refused | not_found | not_configured | error",
     "hit_count": 3,
     "channel": "mcp"
   }
@@ -221,6 +221,7 @@ Run the full LangGraph evidence-gated QA pipeline (`run_agent`) in-process as th
       "answer": "根据实验室文档中可核对的段落，回答如下。\n[1] ……",
       "citations": [
         {
+          "index": 1,
           "title": "文档标题",
           "heading": "章节标题",
           "document_id": "uuid",

@@ -351,7 +351,8 @@ async def test_mcp_answer_question_and_audit_logging(monkeypatch: pytest.MonkeyP
     assert "[1]" in ans["answer"]
     assert len(ans["citations"]) >= 1
     first_cite = ans["citations"][0]
-    assert set(first_cite.keys()) == {"title", "heading", "document_id", "excerpt"}
+    assert set(first_cite.keys()) == {"index", "title", "heading", "document_id", "excerpt"}
+    assert first_cite["index"] == 1
     assert first_cite["document_id"] == str(lab_doc_id)
     assert first_cite["title"] == "清衡集群使用指南"
 
@@ -400,6 +401,133 @@ async def test_mcp_answer_question_and_audit_logging(monkeypatch: pytest.MonkeyP
         ans_events = [r for r in rows if r.detail.get("tool") == "answer_question"]
         statuses = {str(r.detail.get("status")) for r in ans_events}
         assert statuses == {"ok", "refused"}
+
+    await close_mcp_singletons()
+    reset_settings_cache()
+
+
+async def test_mcp_citation_index_preserved_and_failed_tool_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_SCORE_MIN", "0.10")
+    monkeypatch.setenv("CITE_MARGIN", "0.95")
+    monkeypatch.setenv("CITE_K", "3")
+    reset_settings_cache()
+    reset_mcp_singletons()
+    maker = get_sessionmaker()
+
+    member_id = uuid.uuid4()
+    doc1_id = uuid.uuid4()
+    doc2_id = uuid.uuid4()
+
+    async with maker() as session:
+        session.add(
+            User(
+                id=member_id,
+                email="cite-test@lab.test",
+                display_name="测试成员",
+                role="member",
+                password_hash=hash_password("LabAgent-Demo-2026-Member"),
+                is_active=True,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                Document(
+                    id=doc1_id,
+                    owner_id=member_id,
+                    title="清衡集群分区说明A",
+                    collection="knowledge",
+                    source="upload",
+                    source_format="markdown",
+                    visibility="lab",
+                    status="pending",
+                    content_text="## 分区A\n\n清衡集群分区为 qh-gpu，配额说明第一部分。",
+                ),
+                Document(
+                    id=doc2_id,
+                    owner_id=member_id,
+                    title="清衡集群分区说明B",
+                    collection="knowledge",
+                    source="upload",
+                    source_format="markdown",
+                    visibility="lab",
+                    status="pending",
+                    content_text="## 分区B\n\n清衡集群分区为 qh-gpu，配额说明第二部分。",
+                ),
+            ]
+        )
+        await session.commit()
+
+    await _drain_worker()
+    monkeypatch.setenv("MCP_ACTOR_EMAIL", "cite-test@lab.test")
+
+    # 1. Stub LLM that cites only [2] so _generate_node filters citations to index 2
+    class _CiteTwoOnlyLLM:
+        model = "cite-two-stub"
+        provider = "fake"
+
+        async def generate(self, _question: str, _evidence: object, usage: object) -> object:
+            usage.prompt_tokens = 10  # type: ignore[attr-defined]
+            usage.completion_tokens = 5  # type: ignore[attr-defined]
+            yield "根据证据二回答 [2]。"
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.mcp_server.get_mcp_llm", lambda: _CiteTwoOnlyLLM())
+    ans = json.loads(await mcp_answer_question("清衡集群分区配额说明"))
+    assert ans["refused"] is False
+    assert "[2]" in ans["answer"]
+    assert len(ans["citations"]) == 1
+    assert ans["citations"][0]["index"] == 2
+
+    # 2. Failing embedder inside mcp_search_knowledge_base and mcp_query_lab_projects
+    # still records a channel="mcp", status="error" tool_call audit event
+    class _FailingEmbedder:
+        name = "failing"
+        kind = "hashing"
+        dim = 512
+
+        async def embed_documents(self, _texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("embedder timeout")
+
+        async def embed_query(self, _text: str) -> list[float]:
+            raise RuntimeError("embedder timeout")
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.mcp_server.get_mcp_embedder", lambda: _FailingEmbedder())
+    with pytest.raises(RuntimeError, match="embedder timeout"):
+        await mcp_search_knowledge_base("清衡集群")
+
+    with pytest.raises(RuntimeError, match="embedder timeout"):
+        await mcp_query_lab_projects("清衡集群")
+
+    async with maker() as session:
+        err_rows = list(
+            await session.scalars(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.action == "tool_call",
+                    AuditEvent.resource_type == "mcp_tool",
+                    AuditEvent.actor_id == member_id,
+                )
+                .order_by(AuditEvent.id.asc())
+            )
+        )
+        error_events = [r for r in err_rows if r.detail.get("status") == "error"]
+        assert len(error_events) == 2
+        assert [r.detail.get("tool") for r in error_events] == [
+            "search_knowledge_base",
+            "query_lab_projects",
+        ]
+        for ev in error_events:
+            assert ev.detail.get("channel") == "mcp"
+            assert ev.detail.get("hit_count") == 0
+            assert ev.request_id is not None and ev.request_id.startswith("mcp-")
 
     await close_mcp_singletons()
     reset_settings_cache()

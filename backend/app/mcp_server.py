@@ -140,19 +140,32 @@ async def mcp_search_knowledge_base(query: str, k: int = 8) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        hits = await search_knowledge_base(
-            session,
-            settings=settings,
-            embedder=embedder,
-            user=user,
-            query=query,
-            k=k,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            hits = await search_knowledge_base(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=user,
+                query=query,
+                k=k,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="search_knowledge_base",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="search_knowledge_base",
             status="ok",
             hit_count=len(hits),
@@ -183,38 +196,51 @@ async def mcp_list_collections() -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, _group_ids = await resolve_mcp_actor(session)
-        rows = await session.execute(
-            text(
-                f"""
-                SELECT d.collection AS collection, COUNT(*) AS doc_count
-                FROM documents d
-                WHERE d.deleted_at IS NULL
-                  AND d.status = 'ready'
-                  AND d.source <> 'eval'
-                  AND {acl_sql()}
-                GROUP BY d.collection
-                ORDER BY d.collection ASC
-                """
-            ),
-            {
-                "is_admin": user.role == "admin",
-                "uid": str(user.id),
-                "uid_text": str(user.id),
-                "role": user.role,
-            },
-        )
-        counts_by_name = {str(r["collection"]): int(r["doc_count"]) for r in rows.mappings()}
-        collections: list[dict[str, object]] = [
-            {"collection": name, "document_count": counts_by_name.get(name, 0)}
-            for name in ("knowledge", "project", "meeting", "paper_note")
-        ]
-        total_docs = sum(
-            counts_by_name.get(name, 0)
-            for name in ("knowledge", "project", "meeting", "paper_note")
-        )
+        actor_id = user.id
+        try:
+            rows = await session.execute(
+                text(
+                    f"""
+                    SELECT d.collection AS collection, COUNT(*) AS doc_count
+                    FROM documents d
+                    WHERE d.deleted_at IS NULL
+                      AND d.status = 'ready'
+                      AND d.source <> 'eval'
+                      AND {acl_sql()}
+                    GROUP BY d.collection
+                    ORDER BY d.collection ASC
+                    """
+                ),
+                {
+                    "is_admin": user.role == "admin",
+                    "uid": str(actor_id),
+                    "uid_text": str(actor_id),
+                    "role": user.role,
+                },
+            )
+            counts_by_name = {str(r["collection"]): int(r["doc_count"]) for r in rows.mappings()}
+            collections: list[dict[str, object]] = [
+                {"collection": name, "document_count": counts_by_name.get(name, 0)}
+                for name in ("knowledge", "project", "meeting", "paper_note")
+            ]
+            total_docs = sum(
+                counts_by_name.get(name, 0)
+                for name in ("knowledge", "project", "meeting", "paper_note")
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="list_collections",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="list_collections",
             status="ok",
             hit_count=total_docs,
@@ -238,19 +264,32 @@ async def mcp_get_document_excerpt(document_id: str, max_chars: int = 6000) -> s
     limit = max(1, min(int(max_chars), 6000))
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        document = await fetch_document(
-            session,
-            settings=settings,
-            user=user,
-            document_id=document_id,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            document = await fetch_document(
+                session,
+                settings=settings,
+                user=user,
+                document_id=document_id,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="get_document_excerpt",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         status = "ok" if document is not None else "not_found"
         hit_count = 1 if document is not None else 0
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="get_document_excerpt",
             status=status,
             hit_count=hit_count,
@@ -280,19 +319,32 @@ async def mcp_fetch_document(document_id: str) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        document = await fetch_document(
-            session,
-            settings=settings,
-            user=user,
-            document_id=document_id,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            document = await fetch_document(
+                session,
+                settings=settings,
+                user=user,
+                document_id=document_id,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="fetch_document",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         status = "ok" if document is not None else "not_found"
         hit_count = 1 if document is not None else 0
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="fetch_document",
             status=status,
             hit_count=hit_count,
@@ -308,18 +360,31 @@ async def mcp_search_papers(query: str) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, _group_ids = await resolve_mcp_actor(session)
-        result = await search_papers(
-            settings=settings,
-            user=user,
-            query=query,
-            request_id=request_id,
-        )
+        actor_id = user.id
+        try:
+            result = await search_papers(
+                settings=settings,
+                user=user,
+                query=query,
+                request_id=request_id,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="search_papers",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         raw_papers = result.get("papers")
         hit_count = len(raw_papers) if isinstance(raw_papers, list) else 0
         status = str(result.get("status") or "not_configured")
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="search_papers",
             status=status,
             hit_count=hit_count,
@@ -336,22 +401,35 @@ async def mcp_query_lab_projects(query: str, k: int = 8) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        result = await query_lab_projects(
-            session,
-            settings=settings,
-            embedder=embedder,
-            user=user,
-            query=query,
-            k=k,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            result = await query_lab_projects(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=user,
+                query=query,
+                k=k,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="query_lab_projects",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         raw_hits = result["hits"]
         hits = raw_hits if isinstance(raw_hits, list) else []
         status = str(result.get("status") or "ok")
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="query_lab_projects",
             status=status,
             hit_count=len(hits),
@@ -376,22 +454,35 @@ async def mcp_query_meetings(query: str, k: int = 8) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        result = await query_meetings(
-            session,
-            settings=settings,
-            embedder=embedder,
-            user=user,
-            query=query,
-            k=k,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            result = await query_meetings(
+                session,
+                settings=settings,
+                embedder=embedder,
+                user=user,
+                query=query,
+                k=k,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="query_meetings",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         raw_hits = result["hits"]
         hits = raw_hits if isinstance(raw_hits, list) else []
         status = str(result.get("status") or "ok")
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="query_meetings",
             status=status,
             hit_count=len(hits),
@@ -417,17 +508,30 @@ async def mcp_answer_question(question: str) -> str:
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
-        result = await run_agent(
-            session=session,
-            user=user,
-            settings=settings,
-            embedder=embedder,
-            llm=llm,
-            question=question,
-            emit=_noop_emit,
-            request_id=request_id,
-            group_ids=group_ids,
-        )
+        actor_id = user.id
+        try:
+            result = await run_agent(
+                session=session,
+                user=user,
+                settings=settings,
+                embedder=embedder,
+                llm=llm,
+                question=question,
+                emit=_noop_emit,
+                request_id=request_id,
+                group_ids=group_ids,
+            )
+        except Exception:
+            await session.rollback()
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="answer_question",
+                status="error",
+                hit_count=0,
+                request_id=request_id,
+            )
+            raise
         decision = result.get("decision")
         decision_dict = decision if isinstance(decision, dict) else {}
         refused = bool(result.get("refused"))
@@ -436,11 +540,14 @@ async def mcp_answer_question(question: str) -> str:
             if refused and decision_dict.get("reason") is not None
             else None
         )
+        has_error = False
         if result.get("embedding_error"):
             refused = True
+            has_error = True
             reason = str(result.get("embedding_error"))
         elif result.get("llm_error"):
             refused = True
+            has_error = True
             reason = str(result.get("llm_error"))
 
         answer = "" if refused else str(result.get("answer") or "")
@@ -451,19 +558,24 @@ async def mcp_answer_question(question: str) -> str:
             if refused
             else [
                 {
+                    "index": (
+                        int(raw_idx)
+                        if isinstance(raw_idx := item.get("index"), int)
+                        else idx
+                    ),
                     "title": str(item.get("title") or ""),
                     "heading": str(item.get("heading") or ""),
                     "document_id": str(item.get("document_id") or ""),
                     "excerpt": str(item.get("excerpt") or ""),
                 }
-                for item in citation_list
+                for idx, item in enumerate(citation_list, start=1)
                 if isinstance(item, dict)
             ]
         )
-        status = "refused" if refused else "ok"
+        status = "error" if has_error else ("refused" if refused else "ok")
         await _audit_mcp_tool_call(
             settings=settings,
-            actor_id=user.id,
+            actor_id=actor_id,
             tool_name="answer_question",
             status=status,
             hit_count=len(citations),
