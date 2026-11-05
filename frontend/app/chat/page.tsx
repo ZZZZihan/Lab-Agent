@@ -217,12 +217,19 @@ export default function ChatPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const activeSelectionRef = useRef<string | null>(null);
   const historyRequestIdRef = useRef(0);
+  const listRequestIdRef = useRef(0);
+  const deletedIdsRef = useRef<Set<string>>(new Set());
   const uiLocked = busy || loadingHistory || deletingId !== null;
 
   const loadConversations = useCallback(async () => {
+    const reqId = ++listRequestIdRef.current;
     try {
       const res = await api<{ conversations: ConversationSummary[] }>("conversations");
-      setConversations(res.conversations || []);
+      if (listRequestIdRef.current !== reqId) return;
+      const incoming = (res.conversations || []).filter(
+        (c) => !deletedIdsRef.current.has(c.id),
+      );
+      setConversations(incoming);
     } catch {
       // Ignore unauthenticated or transient list errors on initial load
     }
@@ -230,10 +237,13 @@ export default function ChatPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const reqId = ++listRequestIdRef.current;
     api<{ conversations: ConversationSummary[] }>("conversations")
       .then((res) => {
-        if (!cancelled) {
-          setConversations(res.conversations || []);
+        if (!cancelled && listRequestIdRef.current === reqId) {
+          setConversations(
+            (res.conversations || []).filter((c) => !deletedIdsRef.current.has(c.id)),
+          );
         }
       })
       .catch(() => {
@@ -277,13 +287,17 @@ export default function ChatPage() {
     setDeletingId(id);
     try {
       await api(`conversations/${id}`, { method: "DELETE" });
-      setConversations((current) => current.filter((c) => c.id !== id));
+      deletedIdsRef.current.add(id);
+      listRequestIdRef.current += 1;
+      setConversations((current) =>
+        current.filter((c) => c.id !== id && !deletedIdsRef.current.has(c.id)),
+      );
       if (activeSelectionRef.current === id) {
         historyRequestIdRef.current += 1;
         activeSelectionRef.current = null;
-        setConversationId(null);
         setTurns([]);
       }
+      setConversationId((current) => (current === id ? null : current));
     } catch {
       // Ignore delete error
     } finally {
@@ -381,7 +395,7 @@ export default function ChatPage() {
       }
       setTurns((current) => current.map((turn) => (turn.id === id ? { ...turn, pending: false } : turn)));
       if (resolvedConvId) {
-        void loadConversations();
+        await loadConversations();
       }
     } catch {
       setTurns((current) =>
