@@ -44,6 +44,13 @@ function mapErrorCode(code: string | undefined, t: Copy): string {
   return t.error;
 }
 
+function mapToolPhase(name: string | undefined, t: Copy): string {
+  if (name === "search_knowledge_base") return t.toolSearchKnowledgeBase;
+  if (name === "search_papers") return t.toolSearchPapers;
+  if (name === "fetch_document") return t.toolFetchDocument;
+  return t.asking;
+}
+
 function renderAnswerWithCitations(answer: string, turnId: string): ReactNode[] {
   const parts = answer.split(/(\[[0-9]{1,2}\])/g);
   return parts.map((part, idx) => {
@@ -167,7 +174,8 @@ export default function ChatPage() {
             if (event.type === "refusal") {
               return { ...turn, refused: true, refusal: event, paperStatus: event.paper_status };
             }
-            if (event.type === "tool") return { ...turn, phase: event.name };
+            if (event.type === "status") return { ...turn, phase: mapToolPhase(event.phase, t) };
+            if (event.type === "tool") return { ...turn, phase: mapToolPhase(event.name, t) };
             if (event.type === "error") {
               return { ...turn, error: mapErrorCode(event.code, t), pending: false };
             }

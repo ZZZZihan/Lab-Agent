@@ -661,5 +661,37 @@ async def test_embedding_unavailable_emits_error_without_refusal(
         assert detail["error"] == "conn_refused"
 
 
-
-
+async def test_project_question_retrieves_from_knowledge_collection(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    member = await _login(client, "member@lab.local")
+    doc_id = await _upload(
+        client,
+        member,
+        title="星火笔记",
+        body="## 项目代号\n星火项目的内部代号是 SF-42。",
+        visibility="lab",
+        collection="knowledge",
+    )
+    response = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "星火项目的内部代号是什么？"},
+        headers=member,
+    )
+    assert response.status_code == 200
+    events = _events(response.text)
+    tool_names = [str(event.get("name")) for event in events if event["type"] == "tool"]
+    assert tool_names == ["search_knowledge_base"]
+    done = next(event for event in events if event["type"] == "done")
+    assert done["refused"] is False
+    tokens = "".join(str(event.get("text") or "") for event in events if event["type"] == "token")
+    assert "SF-42" in tokens
+    citations = next(event for event in events if event["type"] == "citations")
+    items = citations["items"]
+    assert isinstance(items, list) and len(items) >= 1
+    assert any(
+        item.get("document_id") == doc_id and "SF-42" in str(item.get("excerpt"))
+        for item in items
+        if isinstance(item, dict)
+    )
