@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,13 +20,13 @@ from app.config import get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
 from app.models import User
 from app.rag.chunker import chunk_markdown, parse_front_matter
-from app.rag.embedder import build_embedder
+from app.rag.embedder import Embedder, build_embedder
 from app.rag.ingest import replace_source
 from app.rag.retrieve import search_knowledge
 from app.rag.tokenize import content_tokens
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from evals.metrics import evaluate, metric_value, tune
+from evals.metrics import _percentile, evaluate, metric_value, tune
 
 MODES = (
     "dense",
@@ -106,12 +108,54 @@ async def _prepare(settings: object) -> User:
         await embedder.aclose()
 
 
+class _TimingEmbedder:
+    """Wraps an Embedder to record the latency (in ms) of the most recent embed_query call."""
+
+    def __init__(self, inner: Embedder) -> None:
+        self._inner = inner
+        self.name: str = inner.name
+        self.kind: str = inner.kind
+        self.dim: int = inner.dim
+        self.last_query_ms: float = 0.0
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return await self._inner.embed_documents(texts)
+
+    async def embed_query(self, text: str) -> list[float]:
+        started = time.perf_counter()
+        vec = await self._inner.embed_query(text)
+        self.last_query_ms = (time.perf_counter() - started) * 1000.0
+        return vec
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+async def _chunks_table_bytes() -> int:
+    maker = get_sessionmaker()
+    async with maker() as session:
+        size = await session.scalar(text("SELECT pg_total_relation_size('chunks')"))
+        return int(size or 0)
+
+
+def _latency_summary(values: list[float]) -> dict[str, float]:
+    ordered = sorted(values) or [0.0]
+    mean = sum(values) / len(values) if values else 0.0
+    p50 = ordered[len(ordered) // 2]
+    p95 = _percentile(ordered, 0.95)
+    return {
+        "mean": round(mean, 4),
+        "p50": round(p50, 4),
+        "p95": round(p95, 4),
+    }
+
+
 async def _featurize(settings: object, user: User, questions: list[dict[str, object]]) -> list[dict[str, object]]:
     from app.acl import Principal, load_user_group_ids
     from app.config import Settings
 
     assert isinstance(settings, Settings)
-    embedder = build_embedder(settings)
+    embedder = _TimingEmbedder(build_embedder(settings))
     gold_map = _gold_map(Path(settings.corpus_dir))
     maker = get_sessionmaker()
     features: list[dict[str, object]] = []
@@ -149,6 +193,7 @@ async def _featurize(settings: object, user: User, questions: list[dict[str, obj
                         "gold": gold,
                         "query_tokens": content_tokens(str(question["question"])),
                         "elapsed_ms": bundle.elapsed_ms,
+                        "embed_ms": embedder.last_query_ms,
                         "df": bundle.df,
                         "n_docs": bundle.n_docs,
                         "hits": [
@@ -267,6 +312,11 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         raise SystemExit(f"eval set has {len(questions)} questions, need at least 60")
     user = await _prepare(settings)
     features = await _featurize(settings, user, questions)
+    chunks_table_bytes = await _chunks_table_bytes()
+    embed_latencies = [float(row.get("embed_ms") or 0.0) for row in features]  # type: ignore[arg-type]
+    search_latencies = [float(row.get("elapsed_ms") or 0.0) for row in features]  # type: ignore[arg-type]
+    query_embedding_latency_ms = _latency_summary(embed_latencies)
+    search_latency_ms = _latency_summary(search_latencies)
 
     existing: dict[str, object] | None = None
     for candidate in (runtime_cal_path, repo_cal_path):
@@ -369,7 +419,14 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         )
     generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_sha = _git_sha(root)
-    report = {
+    reindex_duration_raw = os.environ.get("EVAL_REINDEX_DURATION_S")
+    reindex_duration_s: float | None = None
+    if reindex_duration_raw:
+        try:
+            reindex_duration_s = round(float(reindex_duration_raw), 4)
+        except ValueError:
+            reindex_duration_s = None
+    report: dict[str, object] = {
         "label": f"{slug}-v1",
         "dataset": "v1",
         "generated_at": generated_at,
@@ -388,9 +445,14 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         "selected_mode": selected_mode,
         "selected_config": selected_params,
         "selection_rule": "highest dev Recall@5, tie-break MRR; thresholds maximize dev refusal correctness then citation F1",
+        "chunks_table_bytes": chunks_table_bytes,
+        "query_embedding_latency_ms": query_embedding_latency_ms,
+        "search_latency_ms": search_latency_ms,
         "modes": mode_reports,
         "questions": {"total": len(questions), "dev": sum(1 for q in questions if q["split"] == "dev"), "test": sum(1 for q in questions if q["split"] == "test")},
     }
+    if reindex_duration_s is not None:
+        report["reindex_duration_s"] = reindex_duration_s
     if tune_dev:
         target_results_path = repo_results_path if commit else runtime_results_path
         target_results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +460,19 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-    print(json.dumps({"selected_mode": selected_mode, "test": mode_reports[selected_mode]["test"]}, ensure_ascii=False, indent=2))  # type: ignore[index]
+    print(
+        json.dumps(
+            {
+                "selected_mode": selected_mode,
+                "chunks_table_bytes": chunks_table_bytes,
+                "query_embedding_latency_ms": query_embedding_latency_ms,
+                "search_latency_ms": search_latency_ms,
+                "test": mode_reports[selected_mode]["test"],  # type: ignore[index]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     if check:
         if not repo_results_path.is_file():
             print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)

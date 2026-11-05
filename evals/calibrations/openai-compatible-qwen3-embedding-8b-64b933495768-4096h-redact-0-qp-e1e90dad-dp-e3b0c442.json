@@ -1,0 +1,15 @@
+{
+  "embedder_fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|4096h|redact=0|qp=e1e90dad|dp=e3b0c442",
+  "dataset": "v1",
+  "split_used": "dev",
+  "tuned_at": "2026-11-05T12:56:27Z",
+  "git_sha": "8403acc",
+  "retrieval_mode": "hybrid_rrf",
+  "rrf_k": 20,
+  "evidence_score_min": 0.5403,
+  "rare_coverage_min": 0.0,
+  "cite_margin": 0.05,
+  "cite_k": 2,
+  "dense_pool": 80,
+  "lexical_pool": 80
+}
