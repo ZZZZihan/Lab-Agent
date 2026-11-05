@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 
+import { SECURITY_HEADERS } from "./lib/security";
+
 const nextConfig: NextConfig = {
   output: "standalone",
   turbopack: {
@@ -9,6 +11,14 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: SECURITY_HEADERS,
+      },
+    ];
   },
 };
 

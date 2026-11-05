@@ -1,20 +1,14 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-const COOKIE = "la_session";
+import {
+  sessionCookieName,
+  sessionCookieOptions,
+  verifyOrigin,
+} from "../../../lib/security";
 
 function apiBase() {
   return (process.env.API_INTERNAL_URL || "http://127.0.0.1:43124").replace(/\/$/, "");
-}
-
-function cookieOptions(maxAge?: number) {
-  return {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    secure: process.env.COOKIE_SECURE === "true",
-    path: "/",
-    ...(maxAge ? { maxAge } : {}),
-  };
 }
 
 function extractClientIp(request: Request): string | null {
@@ -43,7 +37,7 @@ function buildProxyHeaders(request: Request, init?: Record<string, string>): Hea
 
 export async function GET(request: Request) {
   const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
+  const token = jar.get(sessionCookieName())?.value;
   if (!token) return NextResponse.json({ error: { code: "unauthorized" } }, { status: 401 });
   const upstream = await fetch(`${apiBase()}/api/v1/auth/me`, {
     headers: buildProxyHeaders(request, { Authorization: `Bearer ${token}` }),
@@ -60,6 +54,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const originDenied = verifyOrigin(request);
+  if (originDenied) return originDenied;
   const payload = await request.text();
   const upstream = await fetch(`${apiBase()}/api/v1/auth/login`, {
     method: "POST",
@@ -79,19 +75,22 @@ export async function POST(request: Request) {
     user: { id: string; display_name: string; role: string };
   };
   const jar = await cookies();
-  jar.set(COOKIE, parsed.access_token, cookieOptions(parsed.expires_in));
+  jar.set(sessionCookieName(), parsed.access_token, sessionCookieOptions(parsed.expires_in));
   return NextResponse.json({ user: parsed.user });
 }
 
 export async function DELETE(request: Request) {
+  const originDenied = verifyOrigin(request);
+  if (originDenied) return originDenied;
   const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
+  const cookieName = sessionCookieName();
+  const token = jar.get(cookieName)?.value;
   if (token) {
     await fetch(`${apiBase()}/api/v1/auth/logout`, {
       method: "POST",
       headers: buildProxyHeaders(request, { Authorization: `Bearer ${token}` }),
     }).catch(() => undefined);
   }
-  jar.set(COOKIE, "", { ...cookieOptions(1), maxAge: 0 });
+  jar.set(cookieName, "", { ...sessionCookieOptions(1), maxAge: 0 });
   return NextResponse.json({ status: "ok" });
 }

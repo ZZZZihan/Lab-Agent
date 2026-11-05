@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-const COOKIE = "la_session";
+import { sessionCookieName, verifyOrigin } from "../../../../lib/security";
 
 function apiBase() {
   return (process.env.API_INTERNAL_URL || "http://127.0.0.1:43124").replace(/\/$/, "");
@@ -19,8 +19,10 @@ function extractClientIp(request: Request): string | null {
 }
 
 async function forward(request: Request, path: string[]) {
+  const originDenied = verifyOrigin(request);
+  if (originDenied) return originDenied;
   const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
+  const token = jar.get(sessionCookieName())?.value;
   if (!token) {
     return NextResponse.json(
       { error: { code: "unauthorized", message: "需要登录" } },

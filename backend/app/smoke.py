@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import string
 import sys
@@ -102,10 +103,19 @@ async def run_smoke(
     s5_question = f"设备间{nonce}的门禁多久轮换一次？"
     s6_question = "火星基地的氧气配额是多少？"
 
+    origin = (
+        os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:43123").split(",")[0].strip()
+        or "http://127.0.0.1:43123"
+    )
     timeout = httpx.Timeout(timeout=120.0, connect=10.0)
     api_client = httpx.AsyncClient(base_url=api_base, timeout=timeout, transport=transport)
     clients: dict[str, httpx.AsyncClient] = {
-        key: httpx.AsyncClient(base_url=web_base, timeout=timeout, transport=transport)
+        key: httpx.AsyncClient(
+            base_url=web_base,
+            headers={"Origin": origin},
+            timeout=timeout,
+            transport=transport,
+        )
         for key in DEMO_ACCOUNTS
     }
 
@@ -170,7 +180,12 @@ async def run_smoke(
             )
             if resp.status_code != 200:
                 raise AssertionError(f"login failed for {key} ({resp.status_code}): {resp.text}")
-            has_cookie = "la_session" in client.cookies or "la_session" in resp.cookies
+            has_cookie = (
+                "la_session" in client.cookies
+                or "la_session" in resp.cookies
+                or "__Host-la_session" in client.cookies
+                or "__Host-la_session" in resp.cookies
+            )
             if not has_cookie:
                 raise AssertionError(f"la_session cookie missing for {key}")
         return "4 accounts logged in"
