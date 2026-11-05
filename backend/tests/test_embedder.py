@@ -326,6 +326,7 @@ def test_settings_validation_and_fingerprint_change_rules() -> None:
         _make_settings(
             app_env="prod",
             internal_proxy_secret="ci-only-jwt-secret-value-0123456789-abcdef",
+            audit_hmac_key="ci-audit-hmac-secret-5742644509-xbekkg",
             embedding_model_version="",
         )
 

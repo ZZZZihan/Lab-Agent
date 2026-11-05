@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    CHAR,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -173,11 +174,15 @@ class EmbeddingIndexMeta(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     action: Mapped[str] = mapped_column(String(64))
     resource_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -185,6 +190,8 @@ class AuditEvent(Base):
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    prev_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    row_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
 
 
 class RevokedToken(Base):
