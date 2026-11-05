@@ -491,7 +491,7 @@ async def _generate_node(state: LoopState) -> dict[str, object]:
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
             "estimated": usage.estimated,
-            "model": llm.model,
+            "model": usage.returned_model or llm.model,
         },
         "citations": final_citations,
     }

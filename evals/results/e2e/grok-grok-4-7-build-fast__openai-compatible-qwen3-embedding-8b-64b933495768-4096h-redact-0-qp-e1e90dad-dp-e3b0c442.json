@@ -1,0 +1,1066 @@
+{
+  "label": "grok-grok-4-7-build-fast__openai-compatible-qwen3-embedding-8b-64b933495768-4096h-redact-0-qp-e1e90dad-dp-e3b0c442-v1-test",
+  "suite": "e2e",
+  "dataset": "v1",
+  "split": "test",
+  "n_questions": 27,
+  "n_answerable": 21,
+  "n_unanswerable": 6,
+  "llm_provider": "openai_compatible",
+  "llm_model": "grok/grok-4.7-build-fast",
+  "returned_model_ids": [
+    "grok-4.7-build-fast"
+  ],
+  "embedding_fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|4096h|redact=0|qp=e1e90dad|dp=e3b0c442",
+  "embedding_slug": "openai-compatible-qwen3-embedding-8b-64b933495768-4096h-redact-0-qp-e1e90dad-dp-e3b0c442",
+  "retrieval_mode": "hybrid_rrf",
+  "date": "2026-11-05",
+  "generated_at": "2026-11-05T14:27:21Z",
+  "git_sha": "4576097",
+  "metrics": {
+    "e2e_refusal_correctness": 0.8519,
+    "false_refusal_rate": 0.1905,
+    "false_answer_rate": 0.0,
+    "citation_precision": 0.7381,
+    "citation_recall": 0.7619,
+    "citation_f1": 0.746,
+    "invalid_citation_rate": 0.0,
+    "unannotated_rate": 0.0,
+    "answer_fact_recall": 0.7619,
+    "ttft_ms": {
+      "mean": 2272.58,
+      "p50": 2030.08,
+      "p95": 3215.48
+    },
+    "total_latency_ms": {
+      "mean": 2034.44,
+      "p50": 2005.03,
+      "p95": 3306.92
+    },
+    "usage": {
+      "prompt_tokens_total": 32418,
+      "completion_tokens_total": 4948,
+      "total_tokens": 37366,
+      "prompt_tokens_mean": 1200.67,
+      "completion_tokens_mean": 183.26,
+      "total_tokens_mean": 1383.93,
+      "returned_models": [
+        "grok-4.7-build-fast"
+      ]
+    }
+  },
+  "judge": null,
+  "questions": [
+    {
+      "id": "q009",
+      "split": "test",
+      "type": "direct",
+      "question": "本学期组会主持轮值的顺序是什么？",
+      "answerable": true,
+      "gold": [
+        "meeting-wednesday#2"
+      ],
+      "answer_facts": [
+        "陈予安",
+        "周宁",
+        "林可"
+      ],
+      "answer": "本学期主持轮值顺序是陈予安、周宁、林可。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "meeting-wednesday#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1870.0,
+      "total_latency_ms": 1896.44,
+      "prompt_tokens": 1389,
+      "completion_tokens": 137,
+      "total_tokens": 1526,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q010",
+      "split": "test",
+      "type": "direct",
+      "question": "组会提纲应该提交到哪个仓库路径？",
+      "answerable": true,
+      "gold": [
+        "meeting-wednesday#3"
+      ],
+      "answer_facts": [
+        "notes/group-meeting"
+      ],
+      "answer": "组会提纲应提交到仓库路径 notes/group-meeting。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "meeting-wednesday#3"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1980.79,
+      "total_latency_ms": 2005.03,
+      "prompt_tokens": 1391,
+      "completion_tokens": 160,
+      "total_tokens": 1551,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q011",
+      "split": "test",
+      "type": "direct",
+      "question": "周五论文研讨几点开始？",
+      "answerable": true,
+      "gold": [
+        "seminar-friday#1"
+      ],
+      "answer_facts": [
+        "10:00"
+      ],
+      "answer": "周五论文研讨 10:00 开始。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "seminar-friday#1"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2094.14,
+      "total_latency_ms": 2250.01,
+      "prompt_tokens": 1386,
+      "completion_tokens": 185,
+      "total_tokens": 1571,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q014",
+      "split": "test",
+      "type": "direct",
+      "question": "赫利俄斯十一月要完成多少条评测题？",
+      "answerable": true,
+      "gold": [
+        "project-helios#2"
+      ],
+      "answer_facts": [
+        "60 条"
+      ],
+      "answer": "十一月要完成 60 条评测题。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "project-helios#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1977.9,
+      "total_latency_ms": 2001.38,
+      "prompt_tokens": 1391,
+      "completion_tokens": 181,
+      "total_tokens": 1572,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q016",
+      "split": "test",
+      "type": "direct",
+      "question": "个人 NAS 配额是多少？",
+      "answerable": true,
+      "gold": [
+        "storage-nas#1"
+      ],
+      "answer_facts": [
+        "2 TB"
+      ],
+      "answer": "个人 NAS 配额为 2 TB。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "storage-nas#1"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1547.23,
+      "total_latency_ms": 1599.05,
+      "prompt_tokens": 1389,
+      "completion_tokens": 132,
+      "total_tokens": 1521,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q021",
+      "split": "test",
+      "type": "paraphrase",
+      "question": "本学期第一个主持组会的人是谁？",
+      "answerable": true,
+      "gold": [
+        "meeting-wednesday#2"
+      ],
+      "answer_facts": [
+        "陈予安"
+      ],
+      "answer": "本学期第一个主持组会的人是陈予安。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "meeting-wednesday#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2363.94,
+      "total_latency_ms": 2453.62,
+      "prompt_tokens": 1469,
+      "completion_tokens": 229,
+      "total_tokens": 1698,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q023",
+      "split": "test",
+      "type": "paraphrase",
+      "question": "赫利俄斯的数据最远可以留在哪个网段？",
+      "answerable": true,
+      "gold": [
+        "project-helios#3"
+      ],
+      "answer_facts": [
+        "10.8.0.0/16"
+      ],
+      "answer": "赫利俄斯的数据最远可以留在实验室网段 10.8.0.0/16。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "project-helios#3"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2487.77,
+      "total_latency_ms": 2652.04,
+      "prompt_tokens": 1396,
+      "completion_tokens": 276,
+      "total_tokens": 1672,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q025",
+      "split": "test",
+      "type": "paraphrase",
+      "question": "流明用的 CTW-synth 子集有多少条样本？",
+      "answerable": true,
+      "gold": [
+        "project-lumen#2"
+      ],
+      "answer_facts": [
+        "12000"
+      ],
+      "answer": "流明使用的 CTW-synth 子集有 12000 条样本。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "project-lumen#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1781.73,
+      "total_latency_ms": 1865.97,
+      "prompt_tokens": 1390,
+      "completion_tokens": 154,
+      "total_tokens": 1544,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q027",
+      "split": "test",
+      "type": "paraphrase",
+      "question": "新生第一周要先读哪些文档？",
+      "answerable": true,
+      "gold": [
+        "onboarding#2"
+      ],
+      "answer_facts": [
+        "计算安全",
+        "GPU 集群使用约定"
+      ],
+      "answer": "第一周应阅读计算安全文档和 GPU 集群使用约定。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "onboarding#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2219.84,
+      "total_latency_ms": 2249.62,
+      "prompt_tokens": 1389,
+      "completion_tokens": 207,
+      "total_tokens": 1596,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q029",
+      "split": "test",
+      "type": "paraphrase",
+      "question": "实验室不把哪一种自动指标当作发布门禁？",
+      "answerable": true,
+      "gold": [
+        "paper-eval#2"
+      ],
+      "answer_facts": [
+        "RAGAS",
+        "faithfulness"
+      ],
+      "answer": "实验室不使用 RAGAS 的 faithfulness 自动分数作为发布门禁。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "paper-eval#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1781.41,
+      "total_latency_ms": 1915.15,
+      "prompt_tokens": 1402,
+      "completion_tokens": 175,
+      "total_tokens": 1577,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q033",
+      "split": "test",
+      "type": "paraphrase_synonym",
+      "question": "引用对齐那个课题的内部编号是什么？",
+      "answerable": true,
+      "gold": [
+        "project-helios#1"
+      ],
+      "answer_facts": [
+        "HX-17"
+      ],
+      "answer": "",
+      "refused": true,
+      "decision_reason": "low_score",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 0.0,
+      "false_refusal": 1.0,
+      "false_answer": null,
+      "citation_precision": 0.0,
+      "citation_recall": 0.0,
+      "citation_f1": 0.0,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": 0.0,
+      "ttft_ms": null,
+      "total_latency_ms": 190.33,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "returned_model": ""
+    },
+    {
+      "id": "q035",
+      "split": "test",
+      "type": "paraphrase_synonym",
+      "question": "向量笔记是哪位同学写的？",
+      "answerable": true,
+      "gold": [
+        "paper-bge#2"
+      ],
+      "answer_facts": [
+        "林可"
+      ],
+      "answer": "",
+      "refused": true,
+      "decision_reason": "low_score",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 0.0,
+      "false_refusal": 1.0,
+      "false_answer": null,
+      "citation_precision": 0.0,
+      "citation_recall": 0.0,
+      "citation_f1": 0.0,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": 0.0,
+      "ttft_ms": null,
+      "total_latency_ms": 197.69,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "returned_model": ""
+    },
+    {
+      "id": "q041",
+      "split": "test",
+      "type": "distractor",
+      "question": "组会提纲是发到 gpu.qingheng.lab 吗？",
+      "answerable": true,
+      "gold": [
+        "meeting-wednesday#3"
+      ],
+      "answer_facts": [
+        "notes/group-meeting"
+      ],
+      "answer": "不是。报告提纲需提前一天发到仓库路径 notes/group-meeting，不要发到 gpu.qingheng.lab。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "meeting-wednesday#3"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1987.61,
+      "total_latency_ms": 2131.09,
+      "prompt_tokens": 1396,
+      "completion_tokens": 197,
+      "total_tokens": 1593,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q042",
+      "split": "test",
+      "type": "distractor",
+      "question": "bge 笔记的作者是周宁吗？",
+      "answerable": true,
+      "gold": [
+        "paper-bge#2"
+      ],
+      "answer_facts": [
+        "林可"
+      ],
+      "answer": "",
+      "refused": true,
+      "decision_reason": "low_score",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 0.0,
+      "false_refusal": 1.0,
+      "false_answer": null,
+      "citation_precision": 0.0,
+      "citation_recall": 0.0,
+      "citation_f1": 0.0,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": 0.0,
+      "ttft_ms": null,
+      "total_latency_ms": 179.71,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "returned_model": ""
+    },
+    {
+      "id": "q045",
+      "split": "test",
+      "type": "distractor",
+      "question": "备份是每天凌晨进行的吗？",
+      "answerable": true,
+      "gold": [
+        "storage-nas#2"
+      ],
+      "answer_facts": [
+        "每周日 02:00"
+      ],
+      "answer": "不是每天凌晨进行。[1] 备份时间是每周日 02:00，不是每天执行。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "storage-nas#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 1928.67,
+      "total_latency_ms": 1955.6,
+      "prompt_tokens": 1377,
+      "completion_tokens": 146,
+      "total_tokens": 1523,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q047",
+      "split": "test",
+      "type": "distractor",
+      "question": "受限数据是不是所有登录用户都能检索？",
+      "answerable": true,
+      "gold": [
+        "dataset-policy#1"
+      ],
+      "answer_facts": [
+        "项目成员"
+      ],
+      "answer": "不是。受限数据只有项目成员可以检索，不是所有登录用户都可以。[1] 检索权限跟着数据分级走，不跟着是否登录走。[2]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1,
+        2
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "dataset-policy#1",
+        "dataset-policy#0"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 0.5,
+      "citation_recall": 1.0,
+      "citation_f1": 0.6666666666666666,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2030.08,
+      "total_latency_ms": 2209.8,
+      "prompt_tokens": 1421,
+      "completion_tokens": 204,
+      "total_tokens": 1625,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q049",
+      "split": "test",
+      "type": "distractor",
+      "question": "赫利俄斯的代码仓库是 git.qingheng.lab/lumen 吗？",
+      "answerable": true,
+      "gold": [
+        "project-helios#1"
+      ],
+      "answer_facts": [
+        "git.qingheng.lab/helios"
+      ],
+      "answer": "不是。git.qingheng.lab/lumen 是流明的代码仓库，与赫利俄斯的仓库不同。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "project-lumen#3"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 0.0,
+      "citation_recall": 0.0,
+      "citation_f1": 0.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 0.0,
+      "ttft_ms": 3235.23,
+      "total_latency_ms": 3402.69,
+      "prompt_tokens": 1399,
+      "completion_tokens": 406,
+      "total_tokens": 1805,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q054",
+      "split": "test",
+      "type": "multi_chunk",
+      "question": "流明的负责人是谁，样本有多少条？",
+      "answerable": true,
+      "gold": [
+        "project-lumen#1",
+        "project-lumen#2"
+      ],
+      "answer_facts": [
+        "周宁",
+        "12000"
+      ],
+      "answer": "流明的负责人是周宁。[1]\n样本有12000条。[2]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        1,
+        2
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "project-lumen#1",
+        "project-lumen#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2751.44,
+      "total_latency_ms": 2778.13,
+      "prompt_tokens": 1441,
+      "completion_tokens": 279,
+      "total_tokens": 1720,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q056",
+      "split": "test",
+      "type": "multi_chunk",
+      "question": "密钥应存放在哪里，安全事故要发给哪个地址？",
+      "answerable": true,
+      "gold": [
+        "safety-compute#1",
+        "safety-compute#3"
+      ],
+      "answer_facts": [
+        "进程环境",
+        ".env",
+        "24 小时"
+      ],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 0.0,
+      "false_refusal": 1.0,
+      "false_answer": null,
+      "citation_precision": 0.0,
+      "citation_recall": 0.0,
+      "citation_f1": 0.0,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": 0.0,
+      "ttft_ms": 4266.92,
+      "total_latency_ms": 4308.79,
+      "prompt_tokens": 1398,
+      "completion_tokens": 552,
+      "total_tokens": 1950,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q058",
+      "split": "test",
+      "type": "multi_chunk",
+      "question": "实验室评测使用哪些指标，阈值只允许在哪个集合上调整？",
+      "answerable": true,
+      "gold": [
+        "paper-eval#1",
+        "paper-eval#3"
+      ],
+      "answer_facts": [
+        "Recall@5",
+        "MRR",
+        "开发集"
+      ],
+      "answer": "实验室采用的指标是 Recall@5、MRR、引用准确率和拒答正确率。[2] 相似度阈值和拒答阈值只在开发集上调整。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        2,
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "paper-eval#1",
+        "paper-eval#3"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2457.79,
+      "total_latency_ms": 2622.91,
+      "prompt_tokens": 1445,
+      "completion_tokens": 245,
+      "total_tokens": 1690,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q060",
+      "split": "test",
+      "type": "multi_chunk",
+      "question": "周五研讨的线上会议号是多少，它是否使用 B-214？",
+      "answerable": true,
+      "gold": [
+        "seminar-friday#1",
+        "seminar-friday#2"
+      ],
+      "answer_facts": [
+        "883-102-447",
+        "B-214"
+      ],
+      "answer": "周五研讨的线上会议室号是 883-102-447。[2] 它不使用 B-214，该实体会议室用于周三学术例会。[1]",
+      "refused": false,
+      "decision_reason": "grounded",
+      "used_indices": [
+        2,
+        1
+      ],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [
+        "seminar-friday#1",
+        "seminar-friday#2"
+      ],
+      "refusal_correct": 1.0,
+      "false_refusal": 0.0,
+      "false_answer": null,
+      "citation_precision": 1.0,
+      "citation_recall": 1.0,
+      "citation_f1": 1.0,
+      "has_invalid_citation": 0.0,
+      "is_unannotated": 0.0,
+      "fact_recall": 1.0,
+      "ttft_ms": 2199.26,
+      "total_latency_ms": 2368.99,
+      "prompt_tokens": 1477,
+      "completion_tokens": 186,
+      "total_tokens": 1663,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q069",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "沈昭老师的手机号是多少？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": 3037.73,
+      "total_latency_ms": 3083.45,
+      "prompt_tokens": 1427,
+      "completion_tokens": 166,
+      "total_tokens": 1593,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q070",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "登录节点的 root 口令是什么？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": 2919.41,
+      "total_latency_ms": 2958.83,
+      "prompt_tokens": 1394,
+      "completion_tokens": 273,
+      "total_tokens": 1667,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q071",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "组会主持轮值明年春季是否保持不变？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": 1868.46,
+      "total_latency_ms": 1908.32,
+      "prompt_tokens": 1469,
+      "completion_tokens": 136,
+      "total_tokens": 1605,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q074",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "周五论文研讨的录播保留多少天？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": 1805.05,
+      "total_latency_ms": 1847.29,
+      "prompt_tokens": 1390,
+      "completion_tokens": 181,
+      "total_tokens": 1571,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q076",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "新生第二周项目双选系统的链接是什么？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "无法根据现有文档回答。",
+      "refused": true,
+      "decision_reason": "model_declined",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": 1676.98,
+      "total_latency_ms": 1715.16,
+      "prompt_tokens": 1392,
+      "completion_tokens": 141,
+      "total_tokens": 1533,
+      "returned_model": "grok-4.7-build-fast"
+    },
+    {
+      "id": "q077",
+      "split": "test",
+      "type": "unanswerable",
+      "question": "学院备案的联系人分机号是多少？",
+      "answerable": false,
+      "gold": [],
+      "answer_facts": [],
+      "answer": "",
+      "refused": true,
+      "decision_reason": "low_score",
+      "used_indices": [],
+      "invalid_indices": [],
+      "uncited": false,
+      "used_citation_keys": [],
+      "refusal_correct": 1.0,
+      "false_refusal": null,
+      "false_answer": 0.0,
+      "citation_precision": null,
+      "citation_recall": null,
+      "citation_f1": null,
+      "has_invalid_citation": null,
+      "is_unannotated": null,
+      "fact_recall": null,
+      "ttft_ms": null,
+      "total_latency_ms": 182.71,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "returned_model": ""
+    }
+  ]
+}
