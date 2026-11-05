@@ -11,4 +11,5 @@ services:
         NEXT_PUBLIC_DEMO_HINTS: "false"
     environment:
       COOKIE_SECURE: "true"
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
       NEXT_PUBLIC_DEMO_HINTS: "false"

@@ -675,6 +675,8 @@ async def test_run_smoke_offline_and_real_modes() -> None:
                     },
                 )
             if path == "/api/session" and request.method == "POST":
+                if request.headers.get("origin") != "http://127.0.0.1:43123":
+                    return httpx.Response(403, json={"error": {"code": "forbidden"}})
                 body = json.loads(request.content.decode("utf-8"))
                 email = str(body["email"])
                 return httpx.Response(
@@ -683,6 +685,9 @@ async def test_run_smoke_offline_and_real_modes() -> None:
                     json={"user": {"id": "u1", "display_name": "测试", "role": "member"}},
                 )
             cookie = request.headers.get("cookie") or ""
+            if request.method not in ("GET", "HEAD") and path.startswith("/api/backend/"):
+                if request.headers.get("origin") != "http://127.0.0.1:43123":
+                    return httpx.Response(403, json={"error": {"code": "forbidden"}})
             if path == "/api/backend/documents" and request.method == "POST":
                 if "viewer@lab.local" in cookie:
                     return httpx.Response(403, json={"error": {"code": "forbidden"}})

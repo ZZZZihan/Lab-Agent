@@ -97,6 +97,7 @@ services:
       API_INTERNAL_URL: http://api:8000
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:43123,http://localhost:43123}
       NEXT_PUBLIC_DEMO_HINTS: ${NEXT_PUBLIC_DEMO_HINTS:-true}
     ports:
       - "127.0.0.1:43123:3000"
