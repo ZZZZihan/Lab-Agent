@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
 from app.config import Settings
-from app.llm import CAPTURED, LLM, best_sentence
+from app.llm import (
+    LLM,
+    Evidence,
+    LLMUnavailable,
+    Usage,
+    check_citations,
+)
 from app.models import User
 from app.rag.embedder import Embedder
 from app.rag.redact import redact_text
@@ -23,6 +29,18 @@ from app.tools import (
     search_knowledge_base,
     search_papers,
 )
+
+try:
+    from app.rag.embedder import EmbeddingError  # type: ignore[attr-defined]
+except ImportError:
+
+    class EmbeddingError(Exception):  # type: ignore[no-redef]
+        code: str
+
+        def __init__(self, code: str = "embedding_unavailable") -> None:
+            super().__init__(code)
+            self.code = code
+
 
 Emit = Callable[[dict[str, object]], Awaitable[None]]
 
@@ -43,6 +61,8 @@ class LoopState(TypedDict, total=False):
     citations: list[dict[str, object]]
     usage: dict[str, object]
     redactions: int
+    llm_error: str | None
+    embedding_error: str | None
 
 
 class Runtime(TypedDict):
@@ -118,77 +138,96 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
     paper_status = state.get("paper_status")
     fetched_id = state.get("fetched_id")
     status = "ok"
-    if name == "search_knowledge_base":
-        found = await search_knowledge_base(
-            runtime["session"],
-            settings=runtime["settings"],
-            embedder=runtime["embedder"],
-            user=runtime["user"],
-            query=str(args.get("query") or ""),
-            k=int(args.get("k") or 12),
-            request_id=runtime["request_id"],
-        )
-        hits = found
-        if found:
-            coverage = float(found[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
-            elapsed = float(found[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
-            mode = str(found[0].get("_mode") or mode)
-    elif name == "query_lab_projects":
-        result = await query_lab_projects(
-            runtime["session"],
-            settings=runtime["settings"],
-            embedder=runtime["embedder"],
-            user=runtime["user"],
-            query=str(args.get("query") or ""),
-            k=int(args.get("k") or 12),
-            request_id=runtime["request_id"],
-        )
-        raw_hits = result["hits"]
-        hits = list(raw_hits) if isinstance(raw_hits, list) else []
-        if hits:
-            coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
-            elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
-            mode = str(hits[0].get("_mode") or mode)
-    elif name == "query_meetings":
-        result = await query_meetings(
-            runtime["session"],
-            settings=runtime["settings"],
-            embedder=runtime["embedder"],
-            user=runtime["user"],
-            query=str(args.get("query") or ""),
-            k=int(args.get("k") or 12),
-            request_id=runtime["request_id"],
-        )
-        raw_hits = result["hits"]
-        hits = list(raw_hits) if isinstance(raw_hits, list) else []
-        if hits:
-            coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
-            elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
-            mode = str(hits[0].get("_mode") or mode)
-    elif name == "search_papers":
-        result = await search_papers(
-            settings=runtime["settings"],
-            user=runtime["user"],
-            query=str(args.get("query") or ""),
-            request_id=runtime["request_id"],
-        )
-        paper_status = str(result.get("status"))
-        status = paper_status or "not_configured"
-    elif name == "fetch_document":
-        fetched = await fetch_document(
-            runtime["session"],
-            settings=runtime["settings"],
-            user=runtime["user"],
-            document_id=str(args.get("document_id") or ""),
-            request_id=runtime["request_id"],
-        )
-        if fetched is None:
-            status = "not_found"
+    try:
+        if name == "search_knowledge_base":
+            found = await search_knowledge_base(
+                runtime["session"],
+                settings=runtime["settings"],
+                embedder=runtime["embedder"],
+                user=runtime["user"],
+                query=str(args.get("query") or ""),
+                k=int(args.get("k") or 12),
+                request_id=runtime["request_id"],
+            )
+            hits = found
+            if found:
+                coverage = float(found[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
+                elapsed = float(found[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
+                mode = str(found[0].get("_mode") or mode)
+        elif name == "query_lab_projects":
+            result = await query_lab_projects(
+                runtime["session"],
+                settings=runtime["settings"],
+                embedder=runtime["embedder"],
+                user=runtime["user"],
+                query=str(args.get("query") or ""),
+                k=int(args.get("k") or 12),
+                request_id=runtime["request_id"],
+            )
+            raw_hits = result["hits"]
+            hits = list(raw_hits) if isinstance(raw_hits, list) else []
+            if hits:
+                coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
+                elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
+                mode = str(hits[0].get("_mode") or mode)
+        elif name == "query_meetings":
+            result = await query_meetings(
+                runtime["session"],
+                settings=runtime["settings"],
+                embedder=runtime["embedder"],
+                user=runtime["user"],
+                query=str(args.get("query") or ""),
+                k=int(args.get("k") or 12),
+                request_id=runtime["request_id"],
+            )
+            raw_hits = result["hits"]
+            hits = list(raw_hits) if isinstance(raw_hits, list) else []
+            if hits:
+                coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
+                elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
+                mode = str(hits[0].get("_mode") or mode)
+        elif name == "search_papers":
+            result = await search_papers(
+                settings=runtime["settings"],
+                user=runtime["user"],
+                query=str(args.get("query") or ""),
+                request_id=runtime["request_id"],
+            )
+            paper_status = str(result.get("status"))
+            status = paper_status or "not_configured"
+        elif name == "fetch_document":
+            fetched = await fetch_document(
+                runtime["session"],
+                settings=runtime["settings"],
+                user=runtime["user"],
+                document_id=str(args.get("document_id") or ""),
+                request_id=runtime["request_id"],
+            )
+            if fetched is None:
+                status = "not_found"
+            else:
+                fetched_id = str(fetched["document_id"])
+                status = "ok"
         else:
-            fetched_id = str(fetched["document_id"])
-            status = "ok"
-    else:
-        status = "unknown_tool"
+            status = "unknown_tool"
+    except EmbeddingError as exc:
+        err_code = str(getattr(exc, "code", "embedding_unavailable"))
+        await runtime["emit"]({"type": "error", "code": "embedding_unavailable"})
+        await write_audit(
+            settings=runtime["settings"],
+            actor_id=runtime["user"].id,
+            action="retrieval",
+            resource_type="chunk",
+            request_id=runtime["request_id"],
+            detail={"status": "error", "error": err_code},
+        )
+        return {
+            "embedding_error": err_code,
+            "pending": None,
+            "answer": "",
+            "citations": [],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
     await write_audit(
         settings=runtime["settings"],
         actor_id=runtime["user"].id,
@@ -213,6 +252,12 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
     }
 
 
+def _route_after_tools(state: LoopState) -> str:
+    if state.get("embedding_error"):
+        return "end"
+    return "agent"
+
+
 def _route_after_agent(state: LoopState) -> str:
     if state.get("pending"):
         return "tools"
@@ -232,7 +277,9 @@ async def _grade_node(state: LoopState) -> dict[str, object]:
     decision = decide(
         list(state.get("hits") or []),
         mode=str(state.get("mode") or settings.retrieval_mode),
-        score_min=0.99 if settings.evidence_score_min is None else float(settings.evidence_score_min),
+        score_min=(
+            0.99 if settings.evidence_score_min is None else float(settings.evidence_score_min)
+        ),
         rare_coverage=float(state.get("coverage") or 0.0),
         rare_min=float(settings.rare_coverage_min or 0.0),
         margin=float(settings.cite_margin or 0.15),
@@ -270,7 +317,9 @@ async def _refuse_node(state: LoopState) -> dict[str, object]:
             "threshold": float(runtime["settings"].evidence_score_min or 0.0),
         },
     )
-    neighbors = [_public_citation(hit, index) for index, hit in enumerate(decision["neighbors"], start=1)]
+    neighbors = [
+        _public_citation(hit, index) for index, hit in enumerate(decision["neighbors"], start=1)
+    ]
     await runtime["emit"](
         {
             "type": "refusal",
@@ -288,65 +337,168 @@ async def _refuse_node(state: LoopState) -> dict[str, object]:
 
 async def _generate_node(state: LoopState) -> dict[str, object]:
     runtime = _runtime.get()
+    settings = runtime["settings"]
     decision: Decision = state["decision"]  # type: ignore[assignment]
     question = str(state.get("question") or "")
-    redacted_question, redaction_count = redact_text(question)
-    citations = []
-    blocks: list[str] = []
-    evidence_for_model: list[str] = []
+    if settings.llm_redact:
+        outbound_question, redaction_count = redact_text(question)
+    else:
+        outbound_question = question
+        redaction_count = 0
+
+    citations: list[dict[str, object]] = []
+    evidence_items: list[Evidence] = []
     for index, hit in enumerate(decision["citations"], start=1):
         citations.append(_public_citation(hit, index))
-        redacted_chunk, count = redact_text(str(hit["content"]))
-        redaction_count += count
-        sentence = best_sentence(redacted_question, redacted_chunk)
-        heading = str(hit.get("heading") or "")
-        title = str(hit.get("title") or "")
-        where = f"《{title}》" + (f"·{heading}" if heading else "")
-        blocks.append(f"[{index}] {sentence}（{where}）")
-        evidence_for_model.append(f"{where}\n{redacted_chunk}")
-    await runtime["emit"]({"type": "citations", "items": citations, "paper_status": state.get("paper_status")})
+        raw_chunk = str(hit["content"])
+        if settings.llm_redact:
+            outbound_chunk, count = redact_text(raw_chunk)
+            redaction_count += count
+        else:
+            outbound_chunk = raw_chunk
+        evidence_items.append(
+            Evidence(
+                index=index,
+                title=str(hit.get("title") or ""),
+                heading=str(hit.get("heading") or ""),
+                text=outbound_chunk,
+            )
+        )
+
+    await runtime["emit"](
+        {"type": "citations", "items": citations, "paper_status": state.get("paper_status")}
+    )
+
     llm = runtime["llm"]
-    # The capture log is the redacted evidence an external model would receive,
-    # even when the local fallback streams an extractive sentence instead.
-    if runtime["settings"].llm_capture:
-        CAPTURED.append(redacted_question + "\n" + "\n".join(evidence_for_model))
-    if llm.provider == "fake":
-        composed = "根据实验室文档中可核对的段落，回答如下。\n" + "\n".join(blocks)
-        composed += "\n以上内容只复述检索到的原文，没有使用这些段落之外的信息。"
-        stream_input = [composed]
-    else:
-        stream_input = evidence_for_model
+    usage = Usage()
     parts: list[str] = []
-    async for token in llm.generate(redacted_question, stream_input):
-        parts.append(token)
-        await runtime["emit"]({"type": "token", "text": token})
-    prompt_tokens, completion_tokens, estimated = llm.usage()
+    try:
+        async for token in llm.generate(outbound_question, evidence_items, usage):
+            parts.append(token)
+            await runtime["emit"]({"type": "token", "text": token})
+    except LLMUnavailable as exc:
+        await runtime["emit"]({"type": "error", "code": "llm_unavailable"})
+        await write_audit(
+            settings=settings,
+            actor_id=runtime["user"].id,
+            action="llm_call",
+            resource_type="chat",
+            request_id=runtime["request_id"],
+            detail={
+                "status": "error",
+                "error": exc.code,
+                "model": llm.model,
+                "provider": llm.provider,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "token_estimate": usage.estimated,
+                "redaction_count": redaction_count,
+                "redact": bool(settings.llm_redact),
+                "citation_count": 0,
+            },
+        )
+        return {
+            "answer": "",
+            "llm_error": exc.code,
+            "redactions": redaction_count,
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "estimated": usage.estimated,
+                "model": llm.model,
+            },
+            "citations": [],
+        }
+
+    answer = "".join(parts)
+    check = check_citations(answer, len(citations))
+    await runtime["emit"](
+        {
+            "type": "citation_check",
+            "used": check.used,
+            "invalid": check.invalid,
+            "uncited": check.uncited,
+        }
+    )
+
+    if check.used:
+        used_set = set(check.used)
+        final_citations = [
+            item
+            for item in citations
+            if isinstance(idx := item.get("index"), int) and idx in used_set
+        ]
+    else:
+        final_citations = list(citations)
+
+    updated_decision: Decision = decision
+    if check.declined:
+        updated_decision = {**decision, "refused": True, "reason": "model_declined"}
+        final_citations = []
+        await write_audit(
+            settings=settings,
+            actor_id=runtime["user"].id,
+            action="answer_refused",
+            resource_type="chat",
+            request_id=runtime["request_id"],
+            detail={
+                "reason": "model_declined",
+                "score": round(float(decision["score"]), 4),
+                "cosine": round(float(decision["cosine"]), 4),
+                "coverage": round(float(decision["coverage"]), 4),
+                "threshold": float(settings.evidence_score_min or 0.0),
+            },
+        )
+        neighbors = [
+            _public_citation(hit, index)
+            for index, hit in enumerate(decision["neighbors"], start=1)
+        ]
+        await runtime["emit"](
+            {
+                "type": "refusal",
+                "reason": "model_declined",
+                "score": decision["score"],
+                "cosine": decision["cosine"],
+                "coverage": decision["coverage"],
+                "threshold": settings.evidence_score_min,
+                "neighbors": neighbors,
+                "paper_status": state.get("paper_status"),
+            }
+        )
+
     await write_audit(
-        settings=runtime["settings"],
+        settings=settings,
         actor_id=runtime["user"].id,
         action="llm_call",
         resource_type="chat",
         request_id=runtime["request_id"],
         detail={
+            "status": "ok",
             "model": llm.model,
             "provider": llm.provider,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "token_estimate": estimated,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "token_estimate": usage.estimated,
             "redaction_count": redaction_count,
-            "citation_count": len(citations),
+            "redact": bool(settings.llm_redact),
+            "citation_count": len(final_citations),
+            "citations_used": check.used,
+            "citations_invalid": check.invalid,
+            "uncited": check.uncited,
+            "declined": check.declined,
         },
     )
     return {
-        "answer": "".join(parts),
+        "answer": answer,
+        "decision": updated_decision,
         "redactions": redaction_count,
         "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "estimated": estimated,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "estimated": usage.estimated,
             "model": llm.model,
         },
-        "citations": citations,
+        "citations": final_citations,
     }
 
 
@@ -384,7 +536,7 @@ def build_graph() -> object:
     graph.add_node("refuse", _refuse_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", _route_after_agent, {"tools": "tools", "grade": "grade"})
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("tools", _route_after_tools, {"agent": "agent", "end": END})
     graph.add_conditional_edges(
         "grade", _route_after_grade, {"generate": "generate", "refuse": "refuse"}
     )
@@ -434,4 +586,6 @@ async def run_agent(
         "redactions": int(result.get("redactions") or 0),
         "trace": result.get("trace") or [],
         "paper_status": result.get("paper_status"),
+        "llm_error": result.get("llm_error"),
+        "embedding_error": result.get("embedding_error"),
     }

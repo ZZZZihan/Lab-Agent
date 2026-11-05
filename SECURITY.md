@@ -8,8 +8,8 @@ Report a vulnerability privately to the repository owner. Do not open a public i
 
 ## Secrets
 
-- Configuration comes from the environment. `JWT_SECRET` shorter than 32 characters, a placeholder, or a low-diversity string aborts startup.
-- A non-local LLM provider other than Ollama refuses to start without `LLM_API_KEY`.
+- Configuration comes from the environment or a key file. `JWT_SECRET` shorter than 32 characters, a placeholder, or a low-diversity string aborts startup.
+- A non-local LLM provider other than Ollama (`openai_compatible`, `openai`, `deepseek`, `vllm`) refuses to start without a resolved key from `LLM_API_KEY` or `LLM_API_KEY_FILE`.
 - `LLM_CAPTURE` is rejected unless `APP_ENV=test`. It exists so tests can prove redaction. It must stay off in any shared environment.
 - Demo passwords in the seed script are labeled local fixtures (`LabAgent-Demo-2026-*`). `python -m app.seed` and the API entrypoint both refuse to load them when `APP_ENV=prod`. The login form prefills them only when `NEXT_PUBLIC_DEMO_HINTS=true`, which the Docker image leaves off unless a demo build opts in. Do not reuse these passwords.
 
@@ -23,7 +23,11 @@ Retrieval SQL and direct document reads use the same rule: admins see everything
 
 ## Data sent to a model
 
-Before any provider call, email addresses, mainland mobile numbers, and 18-digit resident identity numbers in the question and the cited chunks are replaced with tokens. The local extractive fallback still only quotes redacted evidence. Citations shown to an authorized user keep the original excerpt, because that user can already open the document.
+- LLM requests are sent to the local Magpie gateway (`LLM_PROVIDER=openai_compatible`), which forwards them to the upstream provider for the selected chat model.
+- Only the user's question and the cited evidence chunks are sent. The lab has confirmed that outbound transmission of lab data to model providers is permitted. By default (`LLM_REDACT=true`), email addresses, mainland mobile numbers, and 18-digit resident identity numbers in the question and cited chunks are replaced with redaction tokens as defense in depth; this can be turned off with `LLM_REDACT=false` (recorded in the `llm_call` audit event with `"redact": false` and `redaction_count: 0`).
+- Lab Agent uses a dedicated Magpie gateway key so its token usage and costs are tracked separately in Magpie.
+- The gateway key is read from `LLM_API_KEY` or `LLM_API_KEY_FILE` (such as `~/.config/lab-agent/magpie.key` or `/run/secrets/magpie_key`) and is never written to the repository, `.env`, logs, audit events, or `/health` responses.
+- Citations shown to an authorized user keep the original excerpt, because that user can already open the document.
 
 ## Grounding
 

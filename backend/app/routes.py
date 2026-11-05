@@ -120,6 +120,8 @@ async def health(request: Request) -> dict[str, object]:
         "redis": redis_ok,
         "embedder": settings.embedder,
         "llm_provider": settings.llm_provider,
+        "llm_model": settings.llm_model,
+        "llm_base_host": settings.llm_base_host,
         "retrieval_mode": settings.retrieval_mode,
     }
 
@@ -480,40 +482,61 @@ async def chat_stream(
                     )
                     decision = result["decision"]
                     refused = bool(result["refused"])
-                    if refused and isinstance(decision, dict):
-                        content = (
-                            "没有足够依据回答这个问题。"
-                            f"决策分数 {float(decision.get('score') or 0):.2f}，"
-                            f"阈值 {float(settings.evidence_score_min or 0):.2f}。"
-                            "系统没有在证据不足时生成答案。"
-                        )
+                    llm_error = result.get("llm_error")
+                    embedding_error = result.get("embedding_error")
+                    done_error: str | None = None
+                    if llm_error:
+                        content = "模型服务暂时不可用，没有生成回答。请稍后重试。"
+                        refused = False
+                        saved_citations: list[dict[str, object]] = []
+                        done_error = "llm_unavailable"
+                    elif embedding_error:
+                        content = "检索服务暂时不可用，没有生成回答。请稍后重试。"
+                        refused = False
+                        saved_citations = []
+                        done_error = "embedding_unavailable"
+                    elif refused and isinstance(decision, dict):
+                        if decision.get("reason") == "model_declined":
+                            content = "模型认为现有证据不足以回答这个问题。"
+                        else:
+                            content = (
+                                "没有足够依据回答这个问题。"
+                                f"决策分数 {float(decision.get('score') or 0):.2f}，"
+                                f"阈值 {float(settings.evidence_score_min or 0):.2f}。"
+                                "系统没有在证据不足时生成答案。"
+                            )
+                        saved_citations = []
                     else:
                         content = str(result["answer"])
+                        saved_citations = (
+                            list(result["citations"])
+                            if isinstance(result["citations"], list)
+                            else []
+                        )
                     message = Message(
                         conversation_id=conversation.id,
                         role="assistant",
                         content=content,
                         refused=refused,
-                        citations=list(result["citations"])
-                        if isinstance(result["citations"], list)
-                        else [],
+                        citations=saved_citations,
                     )
                     session.add(message)
                     await session.commit()
                     usage = result["usage"] if isinstance(result["usage"], dict) else {}
-                    await queue.put(
-                        {
-                            "type": "done",
-                            "conversation_id": str(conversation.id),
-                            "message_id": str(message.id),
-                            "refused": refused,
-                            "model": usage.get("model", settings.llm_model),
-                            "usage": {
-                                "prompt_tokens": usage.get("prompt_tokens", 0),
-                                "completion_tokens": usage.get("completion_tokens", 0),
-                            },
-                        }
-                    )
+                    done_event: dict[str, object] = {
+                        "type": "done",
+                        "conversation_id": str(conversation.id),
+                        "message_id": str(message.id),
+                        "refused": refused,
+                        "model": usage.get("model", settings.llm_model),
+                        "usage": {
+                            "prompt_tokens": usage.get("prompt_tokens", 0),
+                            "completion_tokens": usage.get("completion_tokens", 0),
+                        },
+                    }
+                    if done_error is not None:
+                        done_event["error"] = done_error
+                    await queue.put(done_event)
             except Exception:
                 await queue.put({"type": "error", "code": "agent_failed"})
             finally:
