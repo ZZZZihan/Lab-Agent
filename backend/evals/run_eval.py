@@ -9,6 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from alembic import command
 from alembic.config import Config
@@ -23,7 +24,7 @@ from app.rag.retrieve import search_knowledge
 from app.rag.tokenize import content_tokens
 from sqlalchemy import select
 
-from evals.metrics import evaluate, tune
+from evals.metrics import evaluate, metric_value, tune
 
 MODES = (
     "dense",
@@ -188,16 +189,45 @@ def _choose_rrf(rows: list[dict[str, object]], mode: str) -> int:
                 "cite_margin": 1.0,
                 "cite_k": 4,
             },
+            include_ci=False,
         )
-        key = (metrics["recall_at_5"], metrics["mrr"])
+        key = (metric_value(metrics["recall_at_5"]), metric_value(metrics["mrr"]))
         if key > best:
             best = key
             best_k = rrf_k
     return best_k
 
 
-def _round_metrics(metrics: dict[str, float]) -> dict[str, float]:
-    return {key: round(value, 4) for key, value in metrics.items()}
+def _round_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = round(float(value), 4)
+        elif isinstance(value, dict) and {"value", "ci_low", "ci_high", "n"} <= set(value.keys()):
+            out[key] = {
+                "value": round(float(value["value"]), 4),
+                "ci_low": round(float(value["ci_low"]), 4),
+                "ci_high": round(float(value["ci_high"]), 4),
+                "n": int(value["n"]),
+            }
+        elif key == "by_type" and isinstance(value, dict):
+            rounded_types: dict[str, Any] = {}
+            for qtype, tvals in value.items():
+                if isinstance(tvals, dict):
+                    rounded_types[qtype] = {
+                        "n": int(tvals.get("n", 0)),
+                        "n_answerable": int(tvals.get("n_answerable", 0)),
+                        "recall_at_5": (
+                            round(float(tvals["recall_at_5"]), 4)
+                            if tvals.get("recall_at_5") is not None
+                            else None
+                        ),
+                        "refusal_correctness": round(float(tvals.get("refusal_correctness", 0.0)), 4),
+                    }
+            out[key] = rounded_types
+        else:
+            out[key] = value
+    return out
 
 
 def _git_sha(root: Path) -> str:
@@ -294,8 +324,8 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
             "dev": _round_metrics(dev_metrics),
             "test": _round_metrics(test_metrics),
         }
-        recall = float(dev_metrics["recall_at_5"])
-        reciprocal = float(dev_metrics["mrr"])
+        recall = metric_value(dev_metrics["recall_at_5"])
+        reciprocal = metric_value(dev_metrics["mrr"])
         if (recall, reciprocal) > best_recall:
             best_recall = (recall, reciprocal)
             selected_mode = mode
@@ -337,8 +367,13 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
             json.dumps(calibration_payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+    generated_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    git_sha = _git_sha(root)
     report = {
         "label": f"{slug}-v1",
+        "dataset": "v1",
+        "generated_at": generated_at,
+        "git_sha": git_sha,
         "embedder_fingerprint": fingerprint,
         "embedder": settings.embedder,
         "embedding_model_when_bge": settings.embedding_model,
@@ -373,7 +408,7 @@ async def _run(tune_dev: bool, check: bool, commit: bool = False) -> None:
         current = mode_reports[selected_mode]["test"]  # type: ignore[index]
         reference = committed["modes"][selected_mode]["test"]
         for key in ("recall_at_5", "mrr", "refusal_correctness", "citation_f1"):
-            delta = abs(float(current[key]) - float(reference[key]))  # type: ignore[index]
+            delta = abs(metric_value(current[key]) - metric_value(reference[key]))  # type: ignore[index]
             if delta > 0.03:
                 await dispose_engine()
                 raise SystemExit(f"{key} drifted by {delta:.3f}")

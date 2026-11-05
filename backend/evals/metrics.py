@@ -2,10 +2,94 @@
 
 from __future__ import annotations
 
+import random
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from app.rag.bm25 import rare_coverage
 from app.rag.rrf import Hit, decide, order_for_mode
+
+PRIMARY_METRICS = (
+    "recall_at_5",
+    "mrr",
+    "citation_f1",
+    "refusal_correctness",
+    "false_refusal_rate",
+    "false_answer_rate",
+)
+
+
+class MetricCI(dict[str, Any]):
+    """Confidence-interval dict {value, ci_low, ci_high, n} with float/comparison support."""
+
+    def __float__(self) -> float:
+        return float(self["value"])
+
+    def __round__(self, ndigits: int | None = None) -> float:
+        val = float(self["value"])
+        return round(val, ndigits) if ndigits is not None else float(round(val))
+
+    def __neg__(self) -> float:
+        return -float(self["value"])
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, (int, float, MetricCI)):
+            return float(self) > float(other)
+        return NotImplemented
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, (int, float, MetricCI)):
+            return float(self) < float(other)
+        return NotImplemented
+
+
+def metric_value(val: Any) -> float:
+    if isinstance(val, dict):
+        return float(val.get("value", 0.0))
+    return float(val)
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = max(0.0, min(1.0, q)) * (len(sorted_vals) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = pos - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+
+
+def bootstrap_ci[T](
+    rows: Sequence[T],
+    metric_fn: Callable[[Sequence[T]], float],
+    n: int = 1000,
+    seed: int = 20261104,
+    alpha: float = 0.05,
+) -> MetricCI:
+    size = len(rows)
+    if size == 0:
+        return MetricCI({"value": 0.0, "ci_low": 0.0, "ci_high": 0.0, "n": 0})
+    value = float(metric_fn(rows))
+    if n <= 0:
+        return MetricCI({"value": value, "ci_low": value, "ci_high": value, "n": size})
+    rng = random.Random(seed)
+    samples = [
+        float(metric_fn([rows[rng.randrange(size)] for _ in range(size)]))
+        for _ in range(n)
+    ]
+    samples.sort()
+    ci_low = _percentile(samples, alpha / 2.0)
+    ci_high = _percentile(samples, 1.0 - alpha / 2.0)
+    return MetricCI(
+        {
+            "value": value,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+            "n": size,
+        }
+    )
 
 
 def _gold(row: dict[str, Any]) -> set[str]:
@@ -72,7 +156,17 @@ def f1(pred: set[str], gold: set[str]) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def evaluate(rows: list[dict[str, Any]], *, mode: str, params: dict[str, Any]) -> dict[str, float]:
+def _avg(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def evaluate(
+    rows: list[dict[str, Any]],
+    *,
+    mode: str,
+    params: dict[str, Any],
+    include_ci: bool = True,
+) -> dict[str, Any]:
     answerable = [row for row in rows if row["answerable"]]
     unanswerable = [row for row in rows if not row["answerable"]]
     recalls: list[float] = []
@@ -82,9 +176,12 @@ def evaluate(rows: list[dict[str, Any]], *, mode: str, params: dict[str, Any]) -
     citation_when_answered: list[float] = []
     multi_recalls: list[float] = []
     latencies: list[float] = []
-    refusal_hits = 0
-    false_refusals = 0
-    false_answers = 0
+    refusal_outcomes: list[float] = []
+    false_refusal_outcomes: list[float] = []
+    false_answer_outcomes: list[float] = []
+    by_type_recalls: dict[str, list[float]] = {}
+    by_type_refusals: dict[str, list[float]] = {}
+
     for row in rows:
         ranked = _ranked_keys(row, mode, int(params["rrf_k"]))
         keys = [str(hit["key"]) for hit in ranked]
@@ -104,41 +201,63 @@ def evaluate(rows: list[dict[str, Any]], *, mode: str, params: dict[str, Any]) -
         correct_refusal = (row["answerable"] and not decision["refused"]) or (
             not row["answerable"] and decision["refused"]
         )
-        refusal_hits += int(correct_refusal)
+        refusal_val = float(int(correct_refusal))
+        refusal_outcomes.append(refusal_val)
+        qtype = str(row.get("type") or "unknown")
+        by_type_refusals.setdefault(qtype, []).append(refusal_val)
         if row["answerable"]:
-            recalls.append(recall_at_k(keys, gold, 5))
+            r5 = recall_at_k(keys, gold, 5)
+            recalls.append(r5)
+            by_type_recalls.setdefault(qtype, []).append(r5)
             recalls_1.append(recall_at_k(keys, gold, 1))
             mrrs.append(mrr(keys, gold))
             citation_scores.append(f1(cited, gold))
             if not decision["refused"]:
                 citation_when_answered.append(f1(cited, gold))
+                false_refusal_outcomes.append(0.0)
             else:
-                false_refusals += 1
+                false_refusal_outcomes.append(1.0)
             if len(gold) > 1:
-                multi_recalls.append(recall_at_k(keys, gold, 5))
-        elif not decision["refused"]:
-            false_answers += 1
+                multi_recalls.append(r5)
+        else:
+            false_answer_outcomes.append(0.0 if decision["refused"] else 1.0)
+
     latencies_sorted = sorted(latencies) or [0.0]
     p50 = latencies_sorted[len(latencies_sorted) // 2]
 
-    def avg(values: list[float]) -> float:
-        return sum(values) / len(values) if values else 0.0
+    def _ci_or_point(vals: list[float]) -> MetricCI:
+        if include_ci:
+            return bootstrap_ci(vals, _avg)
+        v = _avg(vals)
+        return MetricCI({"value": v, "ci_low": v, "ci_high": v, "n": len(vals)})
+
+    by_type: dict[str, dict[str, Any]] = {}
+    for qtype in sorted(by_type_refusals.keys()):
+        t_recalls = by_type_recalls.get(qtype, [])
+        t_refusals = by_type_refusals[qtype]
+        by_type[qtype] = {
+            "n": len(t_refusals),
+            "n_answerable": len(t_recalls),
+            "recall_at_5": _avg(t_recalls) if t_recalls else None,
+            "refusal_correctness": _avg(t_refusals),
+        }
 
     return {
         "n": float(len(rows)),
         "n_answerable": float(len(answerable)),
         "n_unanswerable": float(len(unanswerable)),
-        "recall_at_5": avg(recalls),
-        "recall_at_1": avg(recalls_1),
-        "mrr": avg(mrrs),
-        "multi_chunk_recall_at_5": avg(multi_recalls),
-        "citation_f1": avg(citation_scores),
-        "citation_f1_when_answered": avg(citation_when_answered),
-        "refusal_correctness": refusal_hits / len(rows) if rows else 0.0,
-        "false_refusal_rate": false_refusals / len(answerable) if answerable else 0.0,
-        "false_answer_rate": false_answers / len(unanswerable) if unanswerable else 0.0,
-        "latency_ms_mean": avg(latencies),
+        "recall_at_5": _ci_or_point(recalls),
+        "recall_at_1": _avg(recalls_1),
+        "mrr": _ci_or_point(mrrs),
+        "multi_chunk_recall_at_5": _avg(multi_recalls),
+        "citation_f1": _ci_or_point(citation_scores),
+        "citation_f1_when_answered": _avg(citation_when_answered),
+        "refusal_correctness": _ci_or_point(refusal_outcomes),
+        "false_refusal_rate": _ci_or_point(false_refusal_outcomes),
+        "false_answer_rate": _ci_or_point(false_answer_outcomes),
+        "latency_ms_mean": _avg(latencies),
         "latency_ms_p50": p50,
+        "by_type": by_type,
     }
 
 
@@ -153,7 +272,7 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
         if ranked:
             scores.append(decision_score(ranked[0], mode))
     best_key: tuple[float, ...] | None = None
-    best: dict[str, Any] | None = None
+    best_params: dict[str, Any] | None = None
     for score_min in _thresholds(scores):
         for rare_min in (0.0, 0.35, 0.55, 0.75):
             for margin in (0.05, 0.12, 0.25, 1.0):
@@ -168,19 +287,22 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
                         "lexical_pool": 80,
                         "retrieval_mode": mode,
                     }
-                    metrics = evaluate(rows, mode=mode, params=params)
+                    metrics = evaluate(rows, mode=mode, params=params, include_ci=False)
                     key = (
-                        round(metrics["refusal_correctness"], 6),
-                        round(metrics["citation_f1"], 6),
-                        round(-metrics["false_refusal_rate"], 6),
-                        round(metrics["recall_at_5"], 6),
+                        round(metric_value(metrics["refusal_correctness"]), 6),
+                        round(metric_value(metrics["citation_f1"]), 6),
+                        round(-metric_value(metrics["false_refusal_rate"]), 6),
+                        round(metric_value(metrics["recall_at_5"]), 6),
                     )
                     if best_key is None or key > best_key:
                         best_key = key
-                        best = {"params": params, "dev": metrics}
-    if best is None:
+                        best_params = params
+    if best_params is None:
         raise RuntimeError("tuner received no rows")
-    return best
+    return {
+        "params": best_params,
+        "dev": evaluate(rows, mode=mode, params=best_params, include_ci=True),
+    }
 
 
 def _thresholds(scores: list[float]) -> list[float]:

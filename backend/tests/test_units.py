@@ -888,5 +888,246 @@ def test_validate_password_policy_table(candidate: str, email: str, valid: bool)
             validate_password(candidate, email)
 
 
+def test_bootstrap_ci_and_evaluate_by_type() -> None:
+    from evals.metrics import PRIMARY_METRICS, bootstrap_ci, evaluate
+
+    empty_ci = bootstrap_ci([], lambda xs: sum(xs) / len(xs))
+    assert dict(empty_ci) == {"value": 0.0, "ci_low": 0.0, "ci_high": 0.0, "n": 0}
+
+    sample = [1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    ci_a = bootstrap_ci(sample, lambda xs: sum(xs) / len(xs), n=1000, seed=20261104, alpha=0.05)
+    ci_b = bootstrap_ci(sample, lambda xs: sum(xs) / len(xs), n=1000, seed=20261104, alpha=0.05)
+    assert dict(ci_a) == dict(ci_b)
+    assert set(ci_a.keys()) == {"value", "ci_low", "ci_high", "n"}
+    assert ci_a["n"] == 10
+    assert ci_a["value"] == pytest.approx(0.7)
+    assert 0.0 <= ci_a["ci_low"] <= ci_a["value"] <= ci_a["ci_high"] <= 1.0
+
+    ci_narrow = bootstrap_ci(
+        sample, lambda xs: sum(xs) / len(xs), n=1000, seed=20261104, alpha=0.20
+    )
+    assert ci_narrow["ci_low"] >= ci_a["ci_low"]
+    assert ci_narrow["ci_high"] <= ci_a["ci_high"]
+
+    rows = [
+        {
+            "id": "q1",
+            "split": "test",
+            "type": "direct",
+            "answerable": True,
+            "gold": ["doc1#0"],
+            "query_tokens": ["门禁"],
+            "elapsed_ms": 1.5,
+            "df": {"门禁": 1},
+            "n_docs": 5,
+            "hits": [
+                {"key": "doc1#0", "cosine": 0.85, "bm25": 2.0, "tokens": ["门禁"]},
+            ],
+        },
+        {
+            "id": "q2",
+            "split": "test",
+            "type": "paraphrase",
+            "answerable": True,
+            "gold": ["doc2#0"],
+            "query_tokens": ["报销"],
+            "elapsed_ms": 2.0,
+            "df": {"报销": 1},
+            "n_docs": 5,
+            "hits": [
+                {"key": "doc3#0", "cosine": 0.40, "bm25": 1.0, "tokens": ["其他"]},
+            ],
+        },
+        {
+            "id": "q3",
+            "split": "test",
+            "type": "unanswerable",
+            "answerable": False,
+            "gold": [],
+            "query_tokens": ["火星"],
+            "elapsed_ms": 1.0,
+            "df": {"火星": 0},
+            "n_docs": 5,
+            "hits": [
+                {"key": "doc1#0", "cosine": 0.15, "bm25": 0.0, "tokens": ["门禁"]},
+            ],
+        },
+    ]
+    params = {
+        "rrf_k": 60,
+        "evidence_score_min": 0.5,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.15,
+        "cite_k": 2,
+    }
+    res = evaluate(rows, mode="dense", params=params)
+    for key in PRIMARY_METRICS:
+        metric_obj = res[key]
+        assert isinstance(metric_obj, dict)
+        assert set(metric_obj.keys()) == {"value", "ci_low", "ci_high", "n"}
+        assert metric_obj["ci_low"] <= metric_obj["value"] <= metric_obj["ci_high"]
+
+    assert res["recall_at_5"]["n"] == 2
+    assert res["refusal_correctness"]["n"] == 3
+    assert res["false_refusal_rate"]["n"] == 2
+    assert res["false_answer_rate"]["n"] == 1
+
+    by_type = res["by_type"]
+    assert set(by_type.keys()) == {"direct", "paraphrase", "unanswerable"}
+    assert by_type["direct"]["n"] == 1
+    assert by_type["direct"]["recall_at_5"] == pytest.approx(1.0)
+    assert by_type["direct"]["refusal_correctness"] == pytest.approx(1.0)
+    assert by_type["paraphrase"]["recall_at_5"] == pytest.approx(0.0)
+    assert by_type["paraphrase"]["refusal_correctness"] == pytest.approx(0.0)
+    assert by_type["unanswerable"]["recall_at_5"] is None
+    assert by_type["unanswerable"]["refusal_correctness"] == pytest.approx(1.0)
+
+
+def test_evals_report_generation_and_check_mode(tmp_path: Path) -> None:
+    import json
+
+    from evals.report import BEGIN_MARKER, END_MARKER, run_report
+
+    results_v1 = tmp_path / "evals" / "results" / "v1"
+    calibrations = tmp_path / "evals" / "calibrations"
+    results_v1.mkdir(parents=True)
+    calibrations.mkdir(parents=True)
+
+    fp = "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442"
+    slug = "hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442"
+    sample_doc = {
+        "label": f"{slug}-v1",
+        "dataset": "v1",
+        "generated_at": "2026-11-05T00:00:00Z",
+        "git_sha": "abc1234",
+        "embedder_fingerprint": fp,
+        "selected_mode": "dense",
+        "questions": {"total": 78, "dev": 51, "test": 27},
+        "modes": {
+            "dense": {
+                "dev": {
+                    "n": 51.0,
+                    "recall_at_5": {"value": 0.9487, "ci_low": 0.8718, "ci_high": 1.0, "n": 39},
+                    "mrr": {"value": 0.9261, "ci_low": 0.8483, "ci_high": 0.9872, "n": 39},
+                    "citation_f1": {"value": 0.7949, "ci_low": 0.6667, "ci_high": 0.906, "n": 39},
+                    "refusal_correctness": {
+                        "value": 0.8039,
+                        "ci_low": 0.6863,
+                        "ci_high": 0.902,
+                        "n": 51,
+                    },
+                    "false_refusal_rate": {
+                        "value": 0.1026,
+                        "ci_low": 0.0256,
+                        "ci_high": 0.2051,
+                        "n": 39,
+                    },
+                    "false_answer_rate": {
+                        "value": 0.5,
+                        "ci_low": 0.25,
+                        "ci_high": 0.75,
+                        "n": 12,
+                    },
+                    "by_type": {
+                        "direct": {
+                            "n": 10,
+                            "n_answerable": 10,
+                            "recall_at_5": 1.0,
+                            "refusal_correctness": 0.9,
+                        },
+                        "unanswerable": {
+                            "n": 12,
+                            "n_answerable": 0,
+                            "recall_at_5": None,
+                            "refusal_correctness": 0.5,
+                        },
+                    },
+                },
+                "test": {
+                    "n": 27.0,
+                    "recall_at_5": {"value": 0.9524, "ci_low": 0.8571, "ci_high": 1.0, "n": 21},
+                    "mrr": {"value": 0.8878, "ci_low": 0.7823, "ci_high": 0.9762, "n": 21},
+                    "citation_f1": {
+                        "value": 0.6667,
+                        "ci_low": 0.4762,
+                        "ci_high": 0.8571,
+                        "n": 21,
+                    },
+                    "refusal_correctness": {
+                        "value": 0.7037,
+                        "ci_low": 0.5185,
+                        "ci_high": 0.8519,
+                        "n": 27,
+                    },
+                    "false_refusal_rate": {
+                        "value": 0.1905,
+                        "ci_low": 0.0476,
+                        "ci_high": 0.381,
+                        "n": 21,
+                    },
+                    "false_answer_rate": {
+                        "value": 0.6667,
+                        "ci_low": 0.3333,
+                        "ci_high": 1.0,
+                        "n": 6,
+                    },
+                    "by_type": {
+                        "direct": {
+                            "n": 5,
+                            "n_answerable": 5,
+                            "recall_at_5": 1.0,
+                            "refusal_correctness": 1.0,
+                        },
+                        "unanswerable": {
+                            "n": 6,
+                            "n_answerable": 0,
+                            "recall_at_5": None,
+                            "refusal_correctness": 0.3333,
+                        },
+                    },
+                },
+            }
+        },
+    }
+    (results_v1 / f"{slug}.json").write_text(json.dumps(sample_doc), encoding="utf-8")
+    root_readme = tmp_path / "README.md"
+    root_readme.write_text(
+        f"# Title\n\n{BEGIN_MARKER}\nstale\n{END_MARKER}\n\nFooter\n",
+        encoding="utf-8",
+    )
+
+    # Before generation, --check must fail (exit 1)
+    assert run_report(root=tmp_path, check=True) == 1
+
+    # Generate reports
+    assert run_report(root=tmp_path, check=False) == 0
+
+    results_readme = tmp_path / "evals" / "results" / "README.md"
+    assert results_readme.is_file()
+    rendered_results = results_readme.read_text(encoding="utf-8")
+    rendered_root = root_readme.read_text(encoding="utf-8")
+
+    for content in (rendered_results, rendered_root):
+        assert fp in content
+        assert "`v1`" in content
+        assert "2026-11-05" in content
+        assert "`abc1234`" in content
+        assert "0.952 [0.857, 1.000]" in content
+        assert "Breakdown by Question Type" in content
+        assert "`direct`" in content
+        assert "`unanswerable`" in content
+
+    # Now --check must pass (exit 0)
+    assert run_report(root=tmp_path, check=True) == 0
+
+    # Tampering with README.md between markers causes --check to exit 1
+    root_readme.write_text(
+        rendered_root.replace("0.952 [0.857, 1.000]", "0.999 [0.999, 0.999]"),
+        encoding="utf-8",
+    )
+    assert run_report(root=tmp_path, check=True) == 1
+
+
+
 
 
