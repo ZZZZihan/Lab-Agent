@@ -1,0 +1,1088 @@
+{
+  "label": "hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442-acl-v1",
+  "dataset": "v1",
+  "suite": "acl",
+  "generated_at": "2026-11-05T14:00:32Z",
+  "git_sha": "d7a2d3d",
+  "embedder_fingerprint": "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442",
+  "embedder": "hashing",
+  "llm_provider": "fake",
+  "llm_model": "fake-grounded-v1",
+  "total_cases": 32,
+  "leaked_cases": 0,
+  "retrieval_leaks": 0,
+  "citation_leaks": 0,
+  "by_category": {
+    "private_non_owner": {
+      "total_cases": 6,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "restricted_no_grant": {
+      "total_cases": 6,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "restricted_group_unmatched": {
+      "total_cases": 6,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "restricted_group_mixed": {
+      "total_cases": 5,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "restricted_role_mismatch": {
+      "total_cases": 5,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "restricted_other_user": {
+      "total_cases": 4,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    }
+  },
+  "by_role": {
+    "member": {
+      "total_cases": 17,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    },
+    "viewer": {
+      "total_cases": 15,
+      "leaked_cases": 0,
+      "retrieval_leaks": 0,
+      "citation_leaks": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "acl-01",
+      "category": "private_non_owner",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "visitor",
+        "onboarding",
+        "cluster-gpu",
+        "paper-eval",
+        "dataset-policy",
+        "safety-compute",
+        "paper-bge",
+        "meeting-wednesday",
+        "seminar-friday",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-02",
+      "category": "private_non_owner",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "storage-nas",
+        "visitor",
+        "dataset-policy",
+        "meeting-wednesday",
+        "paper-eval",
+        "project-lumen",
+        "cluster-gpu",
+        "seminar-friday",
+        "paper-bge",
+        "safety-compute"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-03",
+      "category": "private_non_owner",
+      "user_role": "member",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "project-helios",
+        "project-lumen",
+        "dataset-policy",
+        "visitor",
+        "safety-compute",
+        "cluster-gpu",
+        "paper-eval",
+        "storage-nas",
+        "paper-bge",
+        "meeting-wednesday",
+        "seminar-friday"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-04",
+      "category": "private_non_owner",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "safety-compute"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "cluster-gpu",
+        "meeting-wednesday",
+        "visitor",
+        "project-lumen",
+        "storage-nas",
+        "dataset-policy",
+        "paper-bge",
+        "seminar-friday",
+        "paper-eval"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-05",
+      "category": "private_non_owner",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "procurement",
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "visitor",
+        "storage-nas",
+        "meeting-wednesday",
+        "project-lumen",
+        "paper-eval",
+        "dataset-policy",
+        "cluster-gpu",
+        "seminar-friday",
+        "paper-bge",
+        "safety-compute"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-06",
+      "category": "private_non_owner",
+      "user_role": "member",
+      "user_groups": [
+        "lumen"
+      ],
+      "forbidden_doc_keys": [
+        "storage-nas"
+      ],
+      "retrieved_doc_keys": [
+        "meeting-wednesday",
+        "seminar-friday",
+        "onboarding",
+        "cluster-gpu",
+        "project-lumen",
+        "paper-bge",
+        "visitor",
+        "safety-compute",
+        "dataset-policy",
+        "paper-eval"
+      ],
+      "cited_doc_keys": [
+        "meeting-wednesday"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-07",
+      "category": "restricted_no_grant",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "dataset-policy",
+        "paper-bge",
+        "onboarding",
+        "paper-eval",
+        "meeting-wednesday",
+        "seminar-friday",
+        "storage-nas",
+        "cluster-gpu",
+        "visitor",
+        "safety-compute"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-08",
+      "category": "restricted_no_grant",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "meeting-wednesday",
+        "paper-eval",
+        "project-lumen",
+        "safety-compute",
+        "dataset-policy",
+        "cluster-gpu",
+        "visitor",
+        "paper-bge",
+        "storage-nas",
+        "seminar-friday",
+        "onboarding"
+      ],
+      "cited_doc_keys": [
+        "meeting-wednesday"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-09",
+      "category": "restricted_no_grant",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "cluster-gpu",
+        "dataset-policy",
+        "seminar-friday",
+        "paper-bge",
+        "visitor",
+        "paper-eval",
+        "meeting-wednesday",
+        "project-lumen",
+        "safety-compute",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-10",
+      "category": "restricted_no_grant",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "cluster-gpu",
+        "project-lumen",
+        "paper-bge",
+        "onboarding",
+        "meeting-wednesday",
+        "seminar-friday",
+        "paper-eval",
+        "dataset-policy",
+        "storage-nas",
+        "safety-compute",
+        "visitor"
+      ],
+      "cited_doc_keys": [
+        "cluster-gpu"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-11",
+      "category": "restricted_no_grant",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios",
+        "procurement",
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "storage-nas",
+        "meeting-wednesday",
+        "dataset-policy",
+        "project-lumen",
+        "paper-eval",
+        "paper-bge",
+        "visitor",
+        "seminar-friday",
+        "cluster-gpu",
+        "safety-compute"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-12",
+      "category": "restricted_no_grant",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "cluster-gpu"
+      ],
+      "retrieved_doc_keys": [
+        "meeting-wednesday",
+        "project-lumen",
+        "storage-nas",
+        "onboarding",
+        "visitor",
+        "dataset-policy",
+        "seminar-friday",
+        "safety-compute",
+        "paper-bge",
+        "paper-eval"
+      ],
+      "cited_doc_keys": [
+        "meeting-wednesday"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-13",
+      "category": "restricted_group_unmatched",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "visitor",
+        "dataset-policy",
+        "cluster-gpu",
+        "paper-eval",
+        "onboarding",
+        "storage-nas",
+        "meeting-wednesday",
+        "paper-bge",
+        "safety-compute",
+        "seminar-friday"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-14",
+      "category": "restricted_group_unmatched",
+      "user_role": "viewer",
+      "user_groups": [
+        "lumen"
+      ],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "storage-nas",
+        "meeting-wednesday",
+        "onboarding",
+        "safety-compute",
+        "cluster-gpu",
+        "dataset-policy",
+        "paper-eval",
+        "visitor",
+        "paper-bge",
+        "seminar-friday"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-15",
+      "category": "restricted_group_unmatched",
+      "user_role": "member",
+      "user_groups": [
+        "infra"
+      ],
+      "forbidden_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieved_doc_keys": [
+        "dataset-policy",
+        "onboarding",
+        "paper-eval",
+        "safety-compute",
+        "cluster-gpu",
+        "storage-nas",
+        "meeting-wednesday",
+        "paper-bge",
+        "visitor",
+        "seminar-friday"
+      ],
+      "cited_doc_keys": [
+        "dataset-policy"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-16",
+      "category": "restricted_group_unmatched",
+      "user_role": "viewer",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "meeting-wednesday",
+        "project-lumen",
+        "safety-compute",
+        "dataset-policy",
+        "cluster-gpu",
+        "seminar-friday",
+        "onboarding",
+        "paper-bge",
+        "storage-nas",
+        "paper-eval",
+        "visitor"
+      ],
+      "cited_doc_keys": [
+        "meeting-wednesday"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-17",
+      "category": "restricted_group_unmatched",
+      "user_role": "member",
+      "user_groups": [
+        "lumen"
+      ],
+      "forbidden_doc_keys": [
+        "cluster-gpu"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "safety-compute",
+        "meeting-wednesday",
+        "visitor",
+        "storage-nas",
+        "project-lumen",
+        "seminar-friday",
+        "paper-eval",
+        "paper-bge",
+        "dataset-policy"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-18",
+      "category": "restricted_group_unmatched",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "paper-bge"
+      ],
+      "retrieved_doc_keys": [
+        "paper-eval",
+        "seminar-friday",
+        "onboarding",
+        "project-lumen",
+        "meeting-wednesday",
+        "dataset-policy",
+        "cluster-gpu",
+        "safety-compute",
+        "storage-nas",
+        "visitor"
+      ],
+      "cited_doc_keys": [
+        "paper-eval"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-19",
+      "category": "restricted_group_mixed",
+      "user_role": "member",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieved_doc_keys": [
+        "project-helios",
+        "visitor",
+        "meeting-wednesday",
+        "storage-nas",
+        "onboarding",
+        "seminar-friday",
+        "paper-eval",
+        "safety-compute",
+        "dataset-policy",
+        "cluster-gpu",
+        "paper-bge"
+      ],
+      "cited_doc_keys": [
+        "project-helios"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-20",
+      "category": "restricted_group_mixed",
+      "user_role": "member",
+      "user_groups": [
+        "lumen"
+      ],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "onboarding",
+        "storage-nas",
+        "dataset-policy",
+        "paper-bge",
+        "meeting-wednesday",
+        "visitor",
+        "cluster-gpu",
+        "paper-eval",
+        "safety-compute",
+        "seminar-friday"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-21",
+      "category": "restricted_group_mixed",
+      "user_role": "viewer",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "procurement",
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "project-lumen",
+        "project-helios",
+        "dataset-policy",
+        "meeting-wednesday",
+        "seminar-friday",
+        "paper-bge",
+        "storage-nas",
+        "cluster-gpu",
+        "visitor",
+        "paper-eval",
+        "safety-compute"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-22",
+      "category": "restricted_group_mixed",
+      "user_role": "member",
+      "user_groups": [
+        "infra"
+      ],
+      "forbidden_doc_keys": [
+        "storage-nas"
+      ],
+      "retrieved_doc_keys": [
+        "cluster-gpu",
+        "meeting-wednesday",
+        "project-lumen",
+        "seminar-friday",
+        "visitor",
+        "safety-compute",
+        "dataset-policy",
+        "paper-eval",
+        "onboarding",
+        "paper-bge"
+      ],
+      "cited_doc_keys": [
+        "cluster-gpu"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-23",
+      "category": "restricted_group_mixed",
+      "user_role": "member",
+      "user_groups": [
+        "helios",
+        "infra"
+      ],
+      "forbidden_doc_keys": [
+        "project-lumen",
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "project-helios",
+        "cluster-gpu",
+        "visitor",
+        "meeting-wednesday",
+        "seminar-friday",
+        "onboarding",
+        "safety-compute",
+        "paper-eval",
+        "dataset-policy",
+        "paper-bge",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "project-helios"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-24",
+      "category": "restricted_role_mismatch",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "onboarding",
+        "dataset-policy",
+        "cluster-gpu",
+        "visitor",
+        "safety-compute",
+        "paper-bge",
+        "seminar-friday",
+        "paper-eval",
+        "meeting-wednesday",
+        "project-lumen",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "onboarding"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-25",
+      "category": "restricted_role_mismatch",
+      "user_role": "viewer",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "meeting-wednesday",
+        "storage-nas",
+        "dataset-policy",
+        "onboarding",
+        "safety-compute",
+        "seminar-friday",
+        "cluster-gpu",
+        "visitor",
+        "paper-eval",
+        "paper-bge"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-26",
+      "category": "restricted_role_mismatch",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "safety-compute"
+      ],
+      "retrieved_doc_keys": [
+        "dataset-policy",
+        "storage-nas",
+        "paper-bge",
+        "cluster-gpu",
+        "paper-eval",
+        "onboarding",
+        "visitor",
+        "project-lumen",
+        "seminar-friday",
+        "meeting-wednesday"
+      ],
+      "cited_doc_keys": [
+        "dataset-policy"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-27",
+      "category": "restricted_role_mismatch",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "meeting-wednesday"
+      ],
+      "retrieved_doc_keys": [
+        "seminar-friday",
+        "project-lumen",
+        "storage-nas",
+        "visitor",
+        "onboarding",
+        "paper-eval",
+        "cluster-gpu",
+        "paper-bge",
+        "safety-compute",
+        "dataset-policy"
+      ],
+      "cited_doc_keys": [
+        "seminar-friday"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-28",
+      "category": "restricted_role_mismatch",
+      "user_role": "viewer",
+      "user_groups": [
+        "lumen"
+      ],
+      "forbidden_doc_keys": [
+        "paper-eval"
+      ],
+      "retrieved_doc_keys": [
+        "safety-compute",
+        "meeting-wednesday",
+        "cluster-gpu",
+        "seminar-friday",
+        "onboarding",
+        "paper-bge",
+        "dataset-policy",
+        "project-lumen",
+        "visitor",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "safety-compute"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-29",
+      "category": "restricted_other_user",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "procurement"
+      ],
+      "retrieved_doc_keys": [
+        "cluster-gpu",
+        "meeting-wednesday",
+        "project-lumen",
+        "safety-compute",
+        "dataset-policy",
+        "paper-eval",
+        "visitor",
+        "seminar-friday",
+        "onboarding",
+        "paper-bge",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "cluster-gpu"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-30",
+      "category": "restricted_other_user",
+      "user_role": "viewer",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "meeting-wednesday",
+        "dataset-policy",
+        "safety-compute",
+        "seminar-friday",
+        "cluster-gpu",
+        "visitor",
+        "paper-bge",
+        "storage-nas",
+        "paper-eval",
+        "onboarding"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-31",
+      "category": "restricted_other_user",
+      "user_role": "member",
+      "user_groups": [
+        "helios"
+      ],
+      "forbidden_doc_keys": [
+        "onboarding"
+      ],
+      "retrieved_doc_keys": [
+        "paper-eval",
+        "visitor",
+        "dataset-policy",
+        "paper-bge",
+        "storage-nas",
+        "project-lumen",
+        "seminar-friday",
+        "cluster-gpu",
+        "safety-compute",
+        "meeting-wednesday"
+      ],
+      "cited_doc_keys": [
+        "paper-eval"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    },
+    {
+      "id": "acl-32",
+      "category": "restricted_other_user",
+      "user_role": "member",
+      "user_groups": [],
+      "forbidden_doc_keys": [
+        "project-helios",
+        "private-review"
+      ],
+      "retrieved_doc_keys": [
+        "project-lumen",
+        "procurement",
+        "onboarding",
+        "dataset-policy",
+        "visitor",
+        "meeting-wednesday",
+        "seminar-friday",
+        "paper-eval",
+        "safety-compute",
+        "cluster-gpu",
+        "paper-bge",
+        "storage-nas"
+      ],
+      "cited_doc_keys": [
+        "project-lumen"
+      ],
+      "retrieval_leaks": 0,
+      "citation_leaks": 0,
+      "leaked_retrieval_keys": [],
+      "leaked_citation_keys": [],
+      "leaked": false,
+      "refused": false
+    }
+  ]
+}
