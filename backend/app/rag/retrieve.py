@@ -27,6 +27,9 @@ class SearchBundle:
     mode: str
 
 
+ALLOWED_STORAGES = frozenset({"vector", "halfvec"})
+
+
 def _vec_literal(values: list[float]) -> str:
     return "[" + ",".join(f"{value:.7f}" for value in values) + "]"
 
@@ -44,6 +47,9 @@ async def search_knowledge(
     limit: int | None = None,
 ) -> SearchBundle:
     started = time.perf_counter()
+    storage = settings.embedding_storage
+    if storage not in ALLOWED_STORAGES:
+        raise ValueError(f"Unsupported embedding storage: {storage!r}")
     active_mode = mode or settings.retrieval_mode or "dense"
     query_tokens = content_tokens(query)
     params = {
@@ -84,11 +90,11 @@ async def search_knowledge(
                    d.collection AS collection,
                    c.content AS content,
                    c.tokens AS tokens,
-                   1 - (c.embedding <=> CAST(:qvec AS vector)) AS cosine
+                   1 - (c.embedding <=> CAST(:qvec AS {storage})) AS cosine
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE {where}
-            ORDER BY c.embedding <=> CAST(:qvec AS vector)
+            ORDER BY c.embedding <=> CAST(:qvec AS {storage})
             LIMIT :lim
             """
         ),

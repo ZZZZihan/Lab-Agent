@@ -17,6 +17,7 @@ from app.llm import build_llm
 from app.logging_conf import configure_logging, get_logger
 from app.otel import setup_telemetry
 from app.rag.embedder import build_embedder
+from app.rag.index_meta import check_index, read_meta
 from app.ratelimit import RateLimiter
 from app.routes import install_exception_handler, router
 
@@ -75,17 +76,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging()
     app.state.settings = settings
-    app.state.embedder = build_embedder(
-        settings.embedder, settings.embedding_model, settings.embedding_dim
-    )
+    app.state.embedder = build_embedder(settings)
     app.state.llm = build_llm(settings)
     app.state.limiter = RateLimiter(settings)
     try:
         async with get_sessionmaker()() as session:
             await session.execute(text("SELECT 1"))
+            idx_state = await check_index(session, settings)
+            meta = await read_meta(session)
     except Exception:
         log.error("database_unreachable")
         raise
+    if idx_state == "mismatch":
+        await app.state.embedder.aclose()
+        await app.state.limiter.close()
+        raise RuntimeError(
+            f"数据库中的向量索引 ({meta.fingerprint if meta else 'unknown'}) 与当前配置 "
+            f"({settings.embedding_fingerprint}) 不一致，请先执行 python -m app.reindex --apply"
+        )
+    if idx_state == "missing_meta":
+        log.warning(
+            "embedding_index_meta_missing",
+            fingerprint=settings.embedding_fingerprint,
+        )
     log.info(
         "startup",
         env=settings.app_env,

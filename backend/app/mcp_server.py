@@ -56,7 +56,7 @@ def build_server() -> MCPServer:
     )
     async def search_knowledge_base_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
-        embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+        embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
                 user = await _user(session)
@@ -107,7 +107,7 @@ def build_server() -> MCPServer:
     @server.tool(name="query_lab_projects", description="Search lab project notes the actor can read.")
     async def query_lab_projects_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
-        embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+        embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
                 user = await _user(session)
@@ -133,7 +133,7 @@ def build_server() -> MCPServer:
     @server.tool(name="query_meetings", description="Search lab meeting notes the actor can read.")
     async def query_meetings_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
-        embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+        embedder = build_embedder(settings)
         try:
             async with get_sessionmaker()() as session:
                 user = await _user(session)

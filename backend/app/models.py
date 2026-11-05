@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -101,8 +102,26 @@ class Chunk(Base):
     heading: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text)
     tokens: Mapped[list[str]] = mapped_column(ARRAY(Text))
-    embedding: Mapped[list[float]] = mapped_column(Vector(512))
+    embedding: Mapped[list[float]] = mapped_column(Vector())
     content_tsv: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
+
+
+class EmbeddingIndexMeta(Base):
+    __tablename__ = "embedding_index_meta"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="embedding_index_meta_id"),
+        CheckConstraint("storage IN ('vector', 'halfvec')", name="embedding_index_meta_storage"),
+        CheckConstraint("index_kind IN ('hnsw', 'none')", name="embedding_index_meta_index_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    fingerprint: Mapped[str] = mapped_column(Text)
+    embedder: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text)
+    dim: Mapped[int] = mapped_column(Integer)
+    storage: Mapped[str] = mapped_column(Text)
+    index_kind: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditEvent(Base):

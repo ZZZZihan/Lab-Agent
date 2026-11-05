@@ -30,6 +30,7 @@ from app.db import get_session, get_sessionmaker
 from app.llm import LLM
 from app.models import Conversation, Document, DocumentACL, Message, User
 from app.rag.embedder import Embedder
+from app.rag.index_meta import check_index
 from app.rag.ingest import ingest_text
 from app.tools import search_knowledge_base
 
@@ -107,18 +108,29 @@ def _client_ip(request: Request) -> str | None:
 async def health(request: Request) -> dict[str, object]:
     settings = _settings(request)
     db_ok = False
+    index_ok = False
     try:
         async with get_sessionmaker()() as session:
             await session.execute(text("SELECT 1"))
             db_ok = True
+            idx_state = await check_index(session, settings)
+            index_ok = idx_state != "mismatch"
     except Exception:
         db_ok = False
+        index_ok = False
     redis_ok = await request.app.state.limiter.ping()
+    model_name = "hashing-cjk-v1" if settings.embedder == "hashing" else settings.embedding_model
     return {
-        "status": "ok" if db_ok and redis_ok else "degraded",
+        "status": "ok" if db_ok and redis_ok and index_ok else "degraded",
         "database": db_ok,
         "redis": redis_ok,
         "embedder": settings.embedder,
+        "embedding_model": model_name,
+        "embedding_dim": settings.embedding_dim,
+        "embedding_storage": settings.embedding_storage,
+        "embedding_fingerprint": settings.embedding_fingerprint,
+        "embedding_index_ok": index_ok,
+        "embedding_base_host": settings.embedding_base_host,
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "llm_base_host": settings.llm_base_host,
