@@ -54,12 +54,39 @@ For local host execution against the Compose database (when running from `backen
 }
 ```
 
+### Streamable HTTP Transport (`--transport http`) with Personal Access Tokens (`la_pat_...`)
+
+For multi-user or remote MCP clients, launch `app.mcp_server` in Streamable HTTP mode and authenticate each request with a Personal Access Token (`la_pat_<43-char-base62>`) created on the `/settings` page (or via `POST /api/v1/tokens`):
+
+```bash
+uv --directory /path/to/lab-agent/backend run python -m app.mcp_server --transport http --host 127.0.0.1 --port 8001
+```
+
+Configure your MCP client with the `/mcp` endpoint and `Authorization: Bearer la_pat_...`:
+
+```json
+{
+  "mcpServers": {
+    "lab-agent-http": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8001/mcp",
+      "headers": {
+        "Authorization": "Bearer la_pat_..."
+      }
+    }
+  }
+}
+```
+
 ---
 
 ## 2. Identity, ACL, and Audit Model
 
 ### Identity & Document ACL
-- **Actor resolution**: On every tool invocation, `app.mcp_server` reads `MCP_ACTOR_EMAIL`, looks up the corresponding `User` row in PostgreSQL, verifies `user.is_active == True`, and loads the user's group memberships (`group_members`). If `MCP_ACTOR_EMAIL` is unset, unknown, or deactivated, the call fails closed with `RuntimeError`.
+- **Actor resolution**:
+  - **Streamable HTTP mode (`--transport http`)**: `_MCPPatAuthMiddleware` extracts `Authorization: Bearer la_pat_...`, hashes the token with SHA-256, verifies the `api_tokens` row is not expired or revoked, updates `last_used_at`, and binds the authenticated `user.id` into a request-scoped `ContextVar`.
+  - **`stdio` mode (`--transport stdio`)**: On every tool invocation, `app.mcp_server` reads `MCP_ACTOR_EMAIL`, looks up the corresponding `User` row in PostgreSQL, verifies `user.is_active == True`, and loads the user's group memberships (`group_members`). If `MCP_ACTOR_EMAIL` is unset, unknown, or deactivated, the call fails closed with `RuntimeError`.
+- **REST API PAT Scope**: Personal Access Tokens (`la_pat_...`) can also authenticate directly against the REST API, where they are restricted to read/query endpoints (`POST /api/v1/search`, `GET /api/v1/documents`, `GET /api/v1/documents/{id}`, `POST /api/v1/chat`, `POST /api/v1/chat/stream`, `GET /api/v1/conversations`). Admin, audit, token management, and document write/delete/ACL endpoints reject PATs with HTTP `403`.
 - **Shared ACL boundary**: All retrieval and document read operations (`search_knowledge_base`, `list_collections`, `get_document_excerpt`, `fetch_document`, `query_lab_projects`, `query_meetings`, and `answer_question`) pass the resolved `Principal(id=user.id, role=user.role, group_ids=group_ids)` into the same SQL (`acl_sql()`) and Python (`can_read()`) authorization checks used by the HTTP API:
   - `lab` documents are readable by all active users.
   - `restricted` documents require an explicit `read` grant in `document_acl` matching the user's `id`, `role`, or one of their `group_ids` (or ownership / `admin` role).

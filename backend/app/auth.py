@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -16,10 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import load_user_group_ids
 from app.config import Settings
-from app.models import RevokedToken, User
+from app.models import ApiToken, RevokedToken, User
 
 _hasher = PasswordHasher()
 _jwks_clients: dict[str, PyJWKClient] = {}
+PAT_PREFIX = "la_pat_"
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,8 @@ class Actor:
     role: str
     display_name: str
     group_ids: frozenset[str] = frozenset()
+    auth_via_pat: bool = False
+    token_id: uuid.UUID | None = None
 
 
 UNUSABLE_PASSWORD_HASH = "!unusable"
@@ -186,3 +192,51 @@ def decode_unverified_for_logout(token: str) -> tuple[str, int] | None:
     if not jti or not exp:
         return None
     return str(jti), int(exp)
+
+
+def hash_pat(raw_token: str) -> str:
+    """Return the lowercase SHA-256 hex digest of a Personal Access Token."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def generate_pat() -> tuple[str, str, str]:
+    """Generate a Personal Access Token `la_pat_<base62(32-bytes)>`.
+
+    Returns `(raw_token, token_hash, prefix)`.
+    """
+    num = int.from_bytes(secrets.token_bytes(32), "big")
+    chars: list[str] = []
+    while num > 0:
+        num, rem = divmod(num, 62)
+        chars.append(_BASE62[rem])
+    encoded = "".join(reversed(chars)).rjust(43, "0")
+    raw_token = f"{PAT_PREFIX}{encoded}"
+    return raw_token, hash_pat(raw_token), raw_token[:15]
+
+
+async def authenticate_pat(session: AsyncSession, raw_token: str) -> Actor:
+    """Authenticate a `la_pat_...` Personal Access Token and update `last_used_at`."""
+    if not raw_token.startswith(PAT_PREFIX):
+        raise PermissionError("invalid_token")
+    digest = hash_pat(raw_token)
+    api_token = await session.scalar(select(ApiToken).where(ApiToken.token_hash == digest))
+    if api_token is None or api_token.revoked_at is not None:
+        raise PermissionError("invalid_token")
+    now = datetime.now(UTC)
+    if api_token.expires_at is not None and api_token.expires_at <= now:
+        raise PermissionError("invalid_token")
+    user = await session.get(User, api_token.user_id)
+    if user is None or not user.is_active:
+        raise PermissionError("invalid_token")
+    api_token.last_used_at = now
+    await session.commit()
+    group_ids = await load_user_group_ids(session, user.id)
+    return Actor(
+        id=user.id,
+        role=user.role,
+        display_name=user.display_name,
+        group_ids=group_ids,
+        auth_via_pat=True,
+        token_id=api_token.id,
+    )
+

@@ -40,6 +40,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const links = [
     { href: "/chat", label: t.chat },
     { href: "/documents", label: t.documents },
+    { href: "/settings", label: t.settings },
     ...(user?.role === "admin"
       ? [
           { href: "/admin/users", label: t.users },
