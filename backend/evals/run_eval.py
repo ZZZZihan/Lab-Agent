@@ -452,6 +452,9 @@ async def _run(
     root = repo_root()
     slug = settings.embedding_slug
     fingerprint = settings.embedding_fingerprint
+    base_slug = settings.base_embedding_slug
+    base_fingerprint = settings.base_embedding_fingerprint
+    is_prefix_index = settings.resolved_embedding_index == "hnsw_prefix"
     runtime_dir = Path(settings.calibration_dir)
     corpus_dir = _resolve_corpus_dir(settings, dataset)
     questions_path = _resolve_questions_path(settings, dataset)
@@ -460,6 +463,9 @@ async def _run(
         repo_results_path = root / "evals" / "results" / "v1" / f"{slug}.json"
         runtime_cal_path = runtime_dir / f"{slug}.json"
         runtime_results_path = runtime_dir / f"results-{slug}.json"
+        base_repo_cal_path = root / "evals" / "calibrations" / f"{base_slug}.json"
+        base_repo_results_path = root / "evals" / "results" / "v1" / f"{base_slug}.json"
+        base_runtime_cal_path = runtime_dir / f"{base_slug}.json"
     else:
         dataset_dir = root / "evals" / "data" / dataset
         verify_dataset_manifest(dataset_dir)
@@ -467,8 +473,14 @@ async def _run(
         repo_results_path = root / "evals" / "results" / dataset / f"{slug}.json"
         runtime_cal_path = runtime_dir / dataset / f"{slug}.json"
         runtime_results_path = runtime_dir / dataset / f"results-{slug}.json"
+        base_repo_cal_path = root / "evals" / "calibrations" / dataset / f"{base_slug}.json"
+        base_repo_results_path = root / "evals" / "results" / dataset / f"{base_slug}.json"
+        base_runtime_cal_path = runtime_dir / dataset / f"{base_slug}.json"
 
-    if check and not (tune_dev and commit) and not repo_results_path.is_file():
+    has_baseline = repo_results_path.is_file() or (
+        is_prefix_index and base_repo_results_path.is_file()
+    )
+    if check and not (tune_dev and commit) and not has_baseline:
         print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)
         raise SystemExit(3)
 
@@ -484,21 +496,32 @@ async def _run(
     search_latency_ms = _latency_summary(search_latencies)
 
     existing: dict[str, object] | None = None
-    for candidate in (runtime_cal_path, repo_cal_path):
+    cal_candidates = [runtime_cal_path, repo_cal_path]
+    allowed_fps = {fingerprint}
+    if is_prefix_index:
+        cal_candidates.extend([base_runtime_cal_path, base_repo_cal_path])
+        allowed_fps.add(base_fingerprint)
+    for candidate in cal_candidates:
         if candidate.is_file():
             try:
                 loaded = json.loads(candidate.read_text(encoding="utf-8"))
             except Exception:
                 loaded = None
-            if isinstance(loaded, dict) and loaded.get("embedder_fingerprint") == fingerprint:
+            if isinstance(loaded, dict) and loaded.get("embedder_fingerprint") in allowed_fps:
                 existing = loaded
-            break
-    if existing is None and repo_results_path.is_file():
-        committed_doc = json.loads(repo_results_path.read_text(encoding="utf-8"))
-        if isinstance(committed_doc, dict) and isinstance(
-            committed_doc.get("selected_config"), dict
-        ):
-            existing = dict(committed_doc["selected_config"])
+                break
+    if existing is None:
+        res_candidates = [repo_results_path]
+        if is_prefix_index:
+            res_candidates.append(base_repo_results_path)
+        for res_cand in res_candidates:
+            if res_cand.is_file():
+                committed_doc = json.loads(res_cand.read_text(encoding="utf-8"))
+                if isinstance(committed_doc, dict) and isinstance(
+                    committed_doc.get("selected_config"), dict
+                ):
+                    existing = dict(committed_doc["selected_config"])
+                    break
 
     mode_reports: dict[str, object] = {}
     selected_mode = "dense"
@@ -640,18 +663,38 @@ async def _run(
         )
     )
     if check:
-        if not repo_results_path.is_file():
+        ref_path = (
+            repo_results_path
+            if repo_results_path.is_file()
+            else (base_repo_results_path if is_prefix_index else repo_results_path)
+        )
+        if not ref_path.is_file():
             print(f"该嵌入器没有已提交的基线: {repo_results_path}", file=sys.stderr)
             await dispose_engine()
             raise SystemExit(3)
-        committed = json.loads(repo_results_path.read_text(encoding="utf-8"))
+        committed = json.loads(ref_path.read_text(encoding="utf-8"))
         current = mode_reports[selected_mode]["test"]  # type: ignore[index]
         reference = committed["modes"][selected_mode]["test"]
+        max_drift = 0.01 if is_prefix_index else 0.03
         for key in ("recall_at_5", "mrr", "refusal_correctness", "citation_f1"):
             delta = abs(metric_value(current[key]) - metric_value(reference[key]))  # type: ignore[index]
-            if delta > 0.03:
+            if delta > max_drift:
                 await dispose_engine()
                 raise SystemExit(f"{key} drifted by {delta:.3f}")
+        if is_prefix_index and base_repo_results_path.is_file() and ref_path != base_repo_results_path:
+            base_committed = json.loads(base_repo_results_path.read_text(encoding="utf-8"))
+            base_reference = base_committed["modes"][selected_mode]["test"]
+            for key in ("recall_at_5", "mrr", "refusal_correctness", "citation_f1"):
+                delta = abs(metric_value(current[key]) - metric_value(base_reference[key]))  # type: ignore[index]
+                if delta > 0.01:
+                    await dispose_engine()
+                    raise SystemExit(f"{key} drifted from base by {delta:.3f}")
+    if commit and not tune_dev:
+        repo_results_path.parent.mkdir(parents=True, exist_ok=True)
+        repo_results_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     await dispose_engine()
 
 

@@ -30,6 +30,42 @@ class SearchBundle:
 
 ALLOWED_STORAGES = frozenset({"vector", "halfvec"})
 
+_PGVECTOR_VERSION: tuple[int, ...] | None = None
+
+
+def _parse_pgvector_version(raw: str | None) -> tuple[int, ...]:
+    if not raw:
+        return (0, 0)
+    parts: list[int] = []
+    for part in raw.strip().split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if digits:
+            parts.append(int(digits))
+        else:
+            break
+    return tuple(parts) if parts else (0, 0)
+
+
+async def get_pgvector_version(session: AsyncSession) -> tuple[int, ...]:
+    """Detect and cache the installed pgvector extension version."""
+    global _PGVECTOR_VERSION
+    if _PGVECTOR_VERSION is not None:
+        return _PGVECTOR_VERSION
+    row = await session.execute(
+        text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+    )
+    extversion = row.scalar_one_or_none()
+    _PGVECTOR_VERSION = _parse_pgvector_version(
+        str(extversion) if extversion is not None else None
+    )
+    return _PGVECTOR_VERSION
+
+
+def reset_pgvector_version_cache() -> None:
+    """Clear the cached pgvector version (used in tests)."""
+    global _PGVECTOR_VERSION
+    _PGVECTOR_VERSION = None
+
 
 def _vec_literal(values: list[float]) -> str:
     return "[" + ",".join(f"{value:.7f}" for value in values) + "]"
@@ -71,36 +107,100 @@ async def search_knowledge(
       )
       AND {acl_sql()}
     """
-    count_row = await session.execute(
-        text(f"SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id WHERE {where}"),
-        params,
-    )
-    visible = int(count_row.scalar_one())
     pool = int(settings.dense_pool or 80)
-    fetch_limit = visible if visible <= max(pool, 500) else pool
-    vector = await embedder.embed_query(query)
-    rows = await session.execute(
+    count_cap = max(pool, 500) + 1
+    count_row = await session.execute(
         text(
             f"""
-            SELECT c.id::text AS chunk_id,
-                   c.document_id::text AS document_id,
-                   d.doc_key AS doc_key,
-                   c.chunk_index AS chunk_index,
-                   c.heading AS heading,
-                   d.title AS title,
-                   d.collection AS collection,
-                   c.content AS content,
-                   c.tokens AS tokens,
-                   1 - (c.embedding <=> CAST(:qvec AS {storage})) AS cosine
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE {where}
-            ORDER BY c.embedding <=> CAST(:qvec AS {storage})
-            LIMIT :lim
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE {where}
+                LIMIT :count_cap
+            ) visible_sub
             """
         ),
-        {**params, "qvec": _vec_literal(vector), "lim": fetch_limit},
+        {**params, "count_cap": count_cap},
     )
+    visible = int(count_row.scalar_one())
+    if settings.resolved_embedding_index == "hnsw_prefix":
+        fetch_limit = pool
+    else:
+        fetch_limit = visible if visible <= max(pool, 500) else pool
+    vector = await embedder.embed_query(query)
+    if settings.resolved_embedding_index in {"hnsw", "hnsw_prefix"}:
+        ef_search = max(int(pool) * 2, 100)
+        await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
+        await session.execute(text("SET LOCAL random_page_cost = 1.0"))
+        await session.execute(text("SET LOCAL plan_cache_mode = force_custom_plan"))
+        if await get_pgvector_version(session) >= (0, 8):
+            await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+    if settings.resolved_embedding_index == "hnsw_prefix":
+        prefix_dim = int(settings.embedding_prefix_dim)
+        rows = await session.execute(
+            text(
+                f"""
+                SELECT chunk_id,
+                       document_id,
+                       doc_key,
+                       chunk_index,
+                       heading,
+                       title,
+                       collection,
+                       content,
+                       tokens,
+                       1 - (embedding <=> CAST(:qvec AS {storage})) AS cosine
+                FROM (
+                    SELECT c.id::text AS chunk_id,
+                           c.document_id::text AS document_id,
+                           d.doc_key AS doc_key,
+                           c.chunk_index AS chunk_index,
+                           c.heading AS heading,
+                           d.title AS title,
+                           d.collection AS collection,
+                           c.content AS content,
+                           c.tokens AS tokens,
+                           c.embedding AS embedding
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE {where}
+                    ORDER BY subvector(c.embedding, 1, {prefix_dim})::halfvec({prefix_dim}) <=> CAST(:qvec_prefix AS halfvec({prefix_dim}))
+                    LIMIT :lim
+                ) sub
+                ORDER BY embedding <=> CAST(:qvec AS {storage})
+                """
+            ),
+            {
+                **params,
+                "qvec": _vec_literal(vector),
+                "qvec_prefix": _vec_literal(vector[:prefix_dim]),
+                "lim": fetch_limit,
+            },
+        )
+    else:
+        rows = await session.execute(
+            text(
+                f"""
+                SELECT c.id::text AS chunk_id,
+                       c.document_id::text AS document_id,
+                       d.doc_key AS doc_key,
+                       c.chunk_index AS chunk_index,
+                       c.heading AS heading,
+                       d.title AS title,
+                       d.collection AS collection,
+                       c.content AS content,
+                       c.tokens AS tokens,
+                       1 - (c.embedding <=> CAST(:qvec AS {storage})) AS cosine
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE {where}
+                ORDER BY c.embedding <=> CAST(:qvec AS {storage})
+                LIMIT :lim
+                """
+            ),
+            {**params, "qvec": _vec_literal(vector), "lim": fetch_limit},
+        )
     raw = list(rows.mappings())
     if visible > fetch_limit:
         lexical_query = tsquery(query_tokens)
@@ -206,4 +306,11 @@ def principal_from_user(
 
 
 # tokenize is used by callers that need the same analyzer as retrieval.
-__all__ = ["SearchBundle", "principal_from_user", "search_knowledge", "tokenize"]
+__all__ = [
+    "SearchBundle",
+    "get_pgvector_version",
+    "principal_from_user",
+    "reset_pgvector_version_cache",
+    "search_knowledge",
+    "tokenize",
+]

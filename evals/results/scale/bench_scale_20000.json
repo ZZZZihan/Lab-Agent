@@ -1,0 +1,181 @@
+{
+  "suite": "scale",
+  "dataset": "v1",
+  "generated_at": "2026-11-05T17:44:33Z",
+  "git_sha": "0c51133",
+  "target_chunks": 20000,
+  "corpus_chunks": 48,
+  "distractor_chunks": 19952,
+  "embedder": "openai_compatible",
+  "embedding_model": "qwen3-embedding:8b",
+  "query_embedding_latency_ms": {
+    "mean": 104.6699,
+    "p50": 105.5848,
+    "p95": 118.4033
+  },
+  "exact_scan_sweep": [
+    {
+      "chunks": 1000,
+      "db_search_p50_ms": 114.3566,
+      "db_search_p95_ms": 115.9663,
+      "total_search_p50_ms": 219.9414,
+      "total_search_p95_ms": 234.3696,
+      "recall_at_5_all": 0.9917,
+      "recall_at_5_test": 1.0
+    },
+    {
+      "chunks": 5000,
+      "db_search_p50_ms": 403.3567,
+      "db_search_p95_ms": 398.7531,
+      "total_search_p50_ms": 508.9415,
+      "total_search_p95_ms": 517.1564,
+      "recall_at_5_all": 0.9917,
+      "recall_at_5_test": 1.0
+    },
+    {
+      "chunks": 10000,
+      "db_search_p50_ms": 798.9794,
+      "db_search_p95_ms": 787.3676,
+      "total_search_p50_ms": 904.5642,
+      "total_search_p95_ms": 905.7709,
+      "recall_at_5_all": 0.9917,
+      "recall_at_5_test": 1.0
+    },
+    {
+      "chunks": 20000,
+      "db_search_p50_ms": 1663.4699,
+      "db_search_p95_ms": 1667.0566,
+      "total_search_p50_ms": 1769.0547,
+      "total_search_p95_ms": 1785.4599,
+      "recall_at_5_all": 0.9917,
+      "recall_at_5_test": 1.0
+    }
+  ],
+  "exact_scan_p95_le_300ms_max_chunks": {
+    "db_search_only": 1000,
+    "total_with_query_embedding": 1000
+  },
+  "two_stage_vs_exact": {
+    "recall_at_5_ratio_all": 1.0,
+    "recall_at_5_ratio_test": 1.0,
+    "meets_098_target": true
+  },
+  "known_limitations": [
+    "BM25 document frequencies (df) and average document length (avgdl) are computed over the candidate pool (dense_pool + lexical_pool) rather than the full chunks table; at 20k+ chunks this shifts relative BM25 IDF weights within the candidate set."
+  ],
+  "paths": {
+    "exact_4096h": {
+      "fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|4096h|redact=0|qp=e1e90dad|dp=e3b0c442",
+      "storage": "halfvec(4096)",
+      "index_kind": "none",
+      "selected_mode": "hybrid_rrf",
+      "chunks_table_bytes": 181403648,
+      "db_search_latency_ms": {
+        "mean": 1678.7694,
+        "p50": 1663.4699,
+        "p95": 1667.0566
+      },
+      "total_search_latency_ms": {
+        "mean": 1783.4393,
+        "p50": 1769.0547,
+        "p95": 1785.4599
+      },
+      "all": {
+        "recall_at_5": 0.9917,
+        "mrr": 0.9583,
+        "citation_f1": 0.8611,
+        "refusal_correctness": 0.8205
+      },
+      "dev": {
+        "recall_at_5": 0.9872,
+        "mrr": 0.9615,
+        "citation_f1": 0.9145,
+        "refusal_correctness": 0.8824
+      },
+      "test": {
+        "recall_at_5": 1.0,
+        "mrr": 0.9524,
+        "citation_f1": 0.7619,
+        "refusal_correctness": 0.7037,
+        "latency_ms_p50": 1667.8876,
+        "latency_ms_p95": 1895.7662
+      }
+    },
+    "two_stage_prefix1024": {
+      "fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|4096h|redact=0|qp=e1e90dad|dp=e3b0c442|ix=prefix1024",
+      "storage": "halfvec(4096)",
+      "index_kind": "hnsw_prefix",
+      "selected_mode": "hybrid_rrf",
+      "chunks_table_bytes": 236027904,
+      "db_search_latency_ms": {
+        "mean": 64.6074,
+        "p50": 50.7771,
+        "p95": 54.1174
+      },
+      "total_search_latency_ms": {
+        "mean": 169.2773,
+        "p50": 156.3619,
+        "p95": 172.5207
+      },
+      "all": {
+        "recall_at_5": 0.9917,
+        "mrr": 0.9583,
+        "citation_f1": 0.8611,
+        "refusal_correctness": 0.8205
+      },
+      "dev": {
+        "recall_at_5": 0.9872,
+        "mrr": 0.9615,
+        "citation_f1": 0.9145,
+        "refusal_correctness": 0.8824
+      },
+      "test": {
+        "recall_at_5": 1.0,
+        "mrr": 0.9524,
+        "citation_f1": 0.7619,
+        "refusal_correctness": 0.7037,
+        "latency_ms_p50": 66.0752,
+        "latency_ms_p95": 75.5723
+      },
+      "index_build_seconds": 286.51
+    },
+    "truncated_1024_hnsw": {
+      "fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|1024|redact=0|qp=e1e90dad|dp=e3b0c442",
+      "storage": "vector(1024)",
+      "index_kind": "hnsw",
+      "selected_mode": "hybrid_rrf",
+      "chunks_table_bytes": 284246016,
+      "db_search_latency_ms": {
+        "mean": 52.2164,
+        "p50": 47.7622,
+        "p95": 52.2593
+      },
+      "total_search_latency_ms": {
+        "mean": 156.8863,
+        "p50": 153.347,
+        "p95": 170.6626
+      },
+      "all": {
+        "recall_at_5": 0.9917,
+        "mrr": 0.9556,
+        "citation_f1": 0.7167,
+        "refusal_correctness": 0.7692
+      },
+      "dev": {
+        "recall_at_5": 0.9872,
+        "mrr": 0.9615,
+        "citation_f1": 0.7949,
+        "refusal_correctness": 0.8431
+      },
+      "test": {
+        "recall_at_5": 1.0,
+        "mrr": 0.9444,
+        "citation_f1": 0.5714,
+        "refusal_correctness": 0.6296,
+        "latency_ms_p50": 51.9042,
+        "latency_ms_p95": 60.9921
+      },
+      "index_build_seconds": 33.7685
+    }
+  }
+}

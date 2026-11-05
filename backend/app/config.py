@@ -116,7 +116,8 @@ class Settings(BaseSettings):
     embedding_native_dim: int | None = None
     embedding_truncate: bool = False
     embedding_storage: Literal["vector", "halfvec"] = "vector"
-    embedding_index: Literal["auto", "hnsw", "none"] = "auto"
+    embedding_index: Literal["auto", "hnsw", "hnsw_prefix", "none"] = "auto"
+    embedding_prefix_dim: int = 1024
     embedding_send_dimensions: bool = False
     embedding_batch_size: int = 16
     embedding_timeout_seconds: int = 120
@@ -224,6 +225,13 @@ class Settings(BaseSettings):
                 f"EMBEDDING_INDEX=hnsw is not supported for {self.embedding_storage}({self.embedding_dim}) "
                 f"(max {max_hnsw_dim})"
             )
+        if not 1 <= self.embedding_prefix_dim <= 2000:
+            raise RuntimeError("EMBEDDING_PREFIX_DIM must be between 1 and 2000")
+        if (
+            self.embedding_index == "hnsw_prefix"
+            and self.embedding_prefix_dim > self.embedding_dim
+        ):
+            raise RuntimeError("EMBEDDING_PREFIX_DIM cannot exceed EMBEDDING_DIM")
         self.embedding_query_template = self.embedding_query_template.replace("\\n", "\n")
         if "{query}" not in self.embedding_query_template:
             raise RuntimeError("EMBEDDING_QUERY_TEMPLATE must contain {query}")
@@ -330,6 +338,16 @@ class Settings(BaseSettings):
                 Path(self.calibration_dir) / f"{slug}.json",
                 root / "evals" / "calibrations" / f"{slug}.json",
             ]
+            allowed_fps = {self.embedding_fingerprint}
+            if self.resolved_embedding_index == "hnsw_prefix":
+                base_slug = self.base_embedding_slug
+                candidates.extend(
+                    [
+                        Path(self.calibration_dir) / f"{base_slug}.json",
+                        root / "evals" / "calibrations" / f"{base_slug}.json",
+                    ]
+                )
+                allowed_fps.add(self.base_embedding_fingerprint)
             found_path: Path | None = None
             for candidate in candidates:
                 if candidate.is_file():
@@ -342,7 +360,7 @@ class Settings(BaseSettings):
                     loaded = None
                 if (
                     isinstance(loaded, dict)
-                    and loaded.get("embedder_fingerprint") == self.embedding_fingerprint
+                    and loaded.get("embedder_fingerprint") in allowed_fps
                 ):
                     tuned = loaded
                     self.calibration_source = str(found_path)
@@ -390,16 +408,18 @@ class Settings(BaseSettings):
         )
 
     @property
-    def resolved_embedding_index(self) -> Literal["hnsw", "none"]:
+    def resolved_embedding_index(self) -> Literal["hnsw", "hnsw_prefix", "none"]:
         if self.embedding_index == "none":
             return "none"
         if self.embedding_index == "hnsw":
             return "hnsw"
+        if self.embedding_index == "hnsw_prefix":
+            return "hnsw_prefix"
         max_hnsw_dim = 2000 if self.embedding_storage == "vector" else 4000
         return "hnsw" if self.embedding_dim <= max_hnsw_dim else "none"
 
     @property
-    def embedding_fingerprint(self) -> str:
+    def base_embedding_fingerprint(self) -> str:
         if self.embedder == "hashing":
             model_id = "hashing-cjk-v1"
         else:
@@ -421,6 +441,17 @@ class Settings(BaseSettings):
             f"{self.embedder}|{model_id}|{self.embedding_dim}{storage_suffix}"
             f"|redact={redact_flag}|qp={qp_hash}|dp={dp_hash}"
         )
+
+    @property
+    def embedding_fingerprint(self) -> str:
+        base = self.base_embedding_fingerprint
+        if self.resolved_embedding_index == "hnsw_prefix":
+            return f"{base}|ix=prefix{self.embedding_prefix_dim}"
+        return base
+
+    @property
+    def base_embedding_slug(self) -> str:
+        return re.sub(r"[^a-z0-9]", "-", self.base_embedding_fingerprint.lower())
 
     @property
     def embedding_slug(self) -> str:
