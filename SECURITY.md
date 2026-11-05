@@ -89,9 +89,9 @@ Retrieval SQL and direct document reads use the same rule: admins see everything
 
 ## 保留期与擦除 (Retention and erasure)
 
-- **删除即擦除（`DELETE /api/v1/documents/{id}?purge=true`）**：文档所有者或管理员可执行硬删除（`purge=true`）。数据库级联删除该文档的所有分块（`chunks`）与授权记录（`document_acl`），同时扫描历史对话消息（`WHERE citations @> '[{"document_id": "<id>"}]'::jsonb`），将命中引用项的 `excerpt` 替换为 `"[已删除]"`、`title` 替换为 `"[已删除文档]"`，并记录审计事件 `document_purged`（`detail={"messages_scrubbed": n}`）。擦除后，文档原文与分块摘录不再残留在 `documents`、`chunks` 或 `messages.citations` 中。
+- **删除即擦除（`DELETE /api/v1/documents/{id}?purge=true`）**：文档所有者或管理员可执行硬删除（`purge=true`）。数据库级联删除该文档的所有分块（`chunks`）与授权记录（`document_acl`），同时通过行锁与数据库端 JSONB 原子更新扫描历史对话消息（`WHERE citations @> '[{"document_id": "<id>"}]'::jsonb`），将命中引用项的 `excerpt` 与 `heading` 替换为 `"[已删除]"`、`title` 替换为 `"[已删除文档]"`，并记录审计事件 `document_purged`（`detail={"messages_scrubbed": n}`）。对话消息落库前亦会复核所引用的 `document_id` 是否仍存在且未删除，防止并发问答把已擦除文档的标题、小节或摘录写回 `messages.citations`。
 - **用户自主删除对话（`DELETE /api/v1/conversations/{id}`）**：登录用户可随时删除自己的会话，数据库级联硬删除该会话下的全部 `messages` 记录。
-- **每日定时维护任务（`app/maintenance.py`）**：默认每 `MAINTENANCE_INTERVAL_SECONDS=86400` 秒运行一次，通过 Redis 分布式锁（`SET maintenance:lock NX EX 3600`）保证多实例部署下同一周期仅执行一次，完成后写入 `maintenance_run` 审计事件（记录各项清理计数）：
+- **每日定时维护任务（`app/maintenance.py`）**：后台维护任务在启动时立即尝试一次并在之后每 `MAINTENANCE_INTERVAL_SECONDS=86400` 秒运行一次，通过 Redis 分布式锁（`SET maintenance:lock NX EX 3600`）保证多实例部署或频繁重启下同一锁周期仅执行一次，完成后写入 `maintenance_run` 审计事件（记录各项清理计数）：
   1. **审计日志保留期清理**：清理早于 `AUDIT_RETENTION_DAYS`（默认 `180` 天）的 `audit_events` 记录（事务内临时开启 `labagent.audit_retention = 'on'`）。
   2. **软删除文档到期硬擦除**：对 `deleted_at` 早于 `DELETED_DOCUMENT_RETENTION_DAYS`（默认 `30` 天）的软删除文档执行完整 `purge_document`（硬删除文档、级联删除分块与 ACL，并擦除 `messages.citations` 中的引用摘录和标题）。
   3. **历史消息保留期清理**：硬删除 `created_at` 早于 `MESSAGE_RETENTION_DAYS`（默认 `180` 天）的 `messages` 记录。

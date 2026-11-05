@@ -11,7 +11,6 @@ from typing import Any
 import redis.asyncio as redis
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.attributes import flag_modified
 
 from app.audit import run_retention, write_audit
 from app.config import Settings
@@ -24,38 +23,115 @@ log = get_logger("maintenance")
 LOCK_KEY = "maintenance:lock"
 LOCK_TTL_SECONDS = 3600
 
+DELETED_EXCERPT = "[已删除]"
+DELETED_TITLE = "[已删除文档]"
+DELETED_HEADING = "[已删除]"
+
+
+def scrub_citation_item(item: dict[str, object]) -> dict[str, object]:
+    """Replace document-derived text fields on a citation dict with deletion placeholders."""
+    scrubbed = dict(item)
+    scrubbed["excerpt"] = DELETED_EXCERPT
+    scrubbed["title"] = DELETED_TITLE
+    scrubbed["heading"] = DELETED_HEADING
+    return scrubbed
+
+
+async def scrub_missing_document_citations(
+    session: AsyncSession,
+    citations: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Revalidate cited document_ids before persisting a chat message; scrub missing/deleted docs."""
+    if not citations:
+        return []
+    doc_uuids: set[uuid.UUID] = set()
+    for item in citations:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("document_id")
+        if raw_id is None:
+            continue
+        try:
+            doc_uuids.add(uuid.UUID(str(raw_id)))
+        except ValueError:
+            continue
+
+    existing_ids: set[str] = set()
+    if doc_uuids:
+        rows = await session.scalars(
+            select(Document.id).where(
+                Document.id.in_(doc_uuids),
+                Document.deleted_at.is_(None),
+            )
+        )
+        existing_ids = {str(doc_id) for doc_id in rows}
+
+    cleaned: list[dict[str, object]] = []
+    for item in citations:
+        if not isinstance(item, dict):
+            continue
+        doc_id_str = str(item.get("document_id") or "")
+        if doc_id_str not in existing_ids:
+            cleaned.append(scrub_citation_item(item))
+        else:
+            cleaned.append(dict(item))
+    return cleaned
+
 
 async def purge_document(session: AsyncSession, document_id: uuid.UUID) -> int:
-    """Hard-delete a document (cascading chunks & ACL) and scrub message citations."""
+    """Hard-delete a document (cascading chunks & ACL) and atomically scrub message citations."""
     doc_id_str = str(document_id)
     needle = json.dumps([{"document_id": doc_id_str}])
-    rows = list(
-        await session.scalars(
-            select(Message)
-            .where(text("citations @> CAST(:needle AS jsonb)"))
-            .params(needle=needle)
-        )
+    scrub_result = await session.execute(
+        text(
+            """
+            WITH locked AS (
+                SELECT id
+                  FROM messages
+                 WHERE citations @> CAST(:needle AS jsonb)
+                 ORDER BY id
+                 FOR UPDATE
+            )
+            UPDATE messages AS m
+               SET citations = (
+                   SELECT COALESCE(
+                       jsonb_agg(
+                           CASE
+                               WHEN jsonb_typeof(elem) = 'object'
+                                AND elem->>'document_id' = CAST(:doc_id AS text) THEN
+                                   elem || jsonb_build_object(
+                                       'excerpt', CAST(:deleted_excerpt AS text),
+                                       'title', CAST(:deleted_title AS text),
+                                       'heading', CAST(:deleted_heading AS text)
+                                   )
+                               ELSE elem
+                           END
+                       ),
+                       '[]'::jsonb
+                   )
+                   FROM jsonb_array_elements(m.citations) AS elem
+               )
+              FROM locked
+             WHERE m.id = locked.id
+            RETURNING m.id
+            """
+        ),
+        {
+            "needle": needle,
+            "doc_id": doc_id_str,
+            "deleted_excerpt": DELETED_EXCERPT,
+            "deleted_title": DELETED_TITLE,
+            "deleted_heading": DELETED_HEADING,
+        },
     )
-    messages_scrubbed = 0
-    for msg in rows:
-        changed = False
-        updated_citations: list[dict[str, object]] = []
-        for item in msg.citations or []:
-            if isinstance(item, dict) and str(item.get("document_id")) == doc_id_str:
-                scrubbed_item = dict(item)
-                scrubbed_item["excerpt"] = "[已删除]"
-                scrubbed_item["title"] = "[已删除文档]"
-                updated_citations.append(scrubbed_item)
-                changed = True
-            else:
-                updated_citations.append(item)
-        if changed:
-            msg.citations = updated_citations
-            flag_modified(msg, "citations")
-            messages_scrubbed += 1
+    scrubbed_ids = {row[0] for row in scrub_result.fetchall()}
+    if scrubbed_ids:
+        for obj in list(session.identity_map.values()):
+            if isinstance(obj, Message) and obj.id in scrubbed_ids:
+                session.expire(obj, ["citations"])
 
     await session.execute(delete(Document).where(Document.id == document_id))
-    return messages_scrubbed
+    return len(scrubbed_ids)
 
 
 async def purge_expired_deleted_documents(
@@ -153,17 +229,17 @@ async def run_maintenance_once(
 
 
 async def run_maintenance_worker(settings: Settings, stop: asyncio.Event) -> None:
-    """Periodically run maintenance every MAINTENANCE_INTERVAL_SECONDS until stopped."""
+    """Run one lock-protected pass on startup, then every MAINTENANCE_INTERVAL_SECONDS."""
     interval = max(float(settings.maintenance_interval_seconds), 1.0)
     while not stop.is_set():
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval)
-            break
-        except TimeoutError:
-            pass
         try:
             await run_maintenance_once(settings)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.warning("maintenance_worker_error", error=type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            break
+        except TimeoutError:
+            pass

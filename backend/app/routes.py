@@ -34,7 +34,7 @@ from app.auth import (
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.llm import LLM
-from app.maintenance import purge_document
+from app.maintenance import purge_document, scrub_missing_document_citations
 from app.models import Conversation, Document, DocumentACL, Group, Message, User
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
@@ -824,10 +824,13 @@ async def chat_stream(
                         saved_citations = []
                     else:
                         content = str(result["answer"])
-                        saved_citations = (
+                        raw_citations = (
                             list(result["citations"])
                             if isinstance(result["citations"], list)
                             else []
+                        )
+                        saved_citations = await scrub_missing_document_citations(
+                            session, raw_citations
                         )
                     message = Message(
                         conversation_id=conversation.id,
