@@ -81,6 +81,7 @@ jobs:
           test -f ../evals/calibrations/hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442.json
           test -f ../evals/results/v1/hashing-hashing-cjk-v1-512-redact-0-qp-e3b0c442-dp-e3b0c442.json
           uv run python -m evals.run_eval --check
+          uv run python -m evals.report --check
       - name: Dependency audit
         working-directory: backend
         run: uv run pip-audit
