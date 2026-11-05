@@ -61,6 +61,12 @@ export async function GET(request: Request, ctx: Ctx) {
 export async function POST(request: Request, ctx: Ctx) {
   return forward(request, (await ctx.params).path);
 }
+export async function PATCH(request: Request, ctx: Ctx) {
+  return forward(request, (await ctx.params).path);
+}
+export async function PUT(request: Request, ctx: Ctx) {
+  return forward(request, (await ctx.params).path);
+}
 export async function DELETE(request: Request, ctx: Ctx) {
   return forward(request, (await ctx.params).path);
 }

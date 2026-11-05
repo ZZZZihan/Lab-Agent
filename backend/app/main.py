@@ -22,6 +22,7 @@ from app.rag.embedder import build_embedder
 from app.rag.index_meta import check_index, read_meta
 from app.ratelimit import RateLimiter
 from app.routes import install_exception_handler, router
+from app.routes_admin import router as admin_router
 
 log = get_logger("api")
 
@@ -134,12 +135,13 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
     )
     app.add_middleware(RequestContextMiddleware)
     setup_telemetry(app, settings)
     app.include_router(router)
+    app.include_router(admin_router)
     install_exception_handler(app)
     return app
 
