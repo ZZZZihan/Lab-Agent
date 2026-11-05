@@ -148,6 +148,12 @@ const copy = {
     savePermissions: "保存权限",
     permissionsSaved: "权限已更新",
     action_acl_changed: "修改文档权限",
+    conversationsTitle: "历史会话",
+    newConversation: "新对话",
+    noConversations: "暂无历史会话",
+    deleteConversation: "删除",
+    independentTurnNote:
+      "每条提问均独立检索并核对依据，历史对话不会拼入检索或模型提示词。",
   },
   en: {
     brand: "Lab Agent",
@@ -295,6 +301,12 @@ const copy = {
     savePermissions: "Save permissions",
     permissionsSaved: "Permissions updated",
     action_acl_changed: "Document ACL changed",
+    conversationsTitle: "Conversations",
+    newConversation: "New chat",
+    noConversations: "No conversations yet",
+    deleteConversation: "Delete",
+    independentTurnNote:
+      "Each question is retrieved and grounded independently; conversation history is not stitched into retrieval or model prompts.",
   },
 } as const;
 
