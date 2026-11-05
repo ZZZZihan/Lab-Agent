@@ -817,6 +817,8 @@ def _make_path_settings(base: Settings, **overrides: Any) -> Settings:
         "calibration_dir": base.calibration_dir,
         "load_tuned_config": True,
     }
+    for field_name in getattr(base, "_explicit_tuning_fields", frozenset()):
+        params.setdefault(field_name, getattr(base, field_name))
     params.update(overrides)
     return Settings(**params)
 

@@ -130,7 +130,7 @@ async def search_knowledge(
         fetch_limit = visible if visible <= max(pool, 500) else pool
     vector = await embedder.embed_query(query)
     if settings.resolved_embedding_index in {"hnsw", "hnsw_prefix"}:
-        ef_search = max(int(pool) * 2, 100)
+        ef_search = min(max(int(pool) * 2, 100), 1000)
         await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
         await session.execute(text("SET LOCAL random_page_cost = 1.0"))
         await session.execute(text("SET LOCAL plan_cache_mode = force_custom_plan"))

@@ -159,6 +159,26 @@ async def test_hnsw_session_parameters_ef_search_and_iterative_scan(
         assert int(ef_val2) == 100
         assert str(iter_val2) == "off"
 
+    # When dense_pool > 500 (e.g. 600), hnsw.ef_search must clamp at pgvector's max 1000
+    s_large_pool = _settings(
+        embedder="hashing",
+        embedding_dim=512,
+        embedding_storage="halfvec",
+        embedding_index="hnsw_prefix",
+        embedding_prefix_dim=128,
+        dense_pool=600,
+    )
+    async with maker() as session:
+        await search_knowledge(
+            session,
+            settings=s_large_pool,
+            embedder=HashingEmbedder(512),
+            user=Principal(id=user_id, role="admin"),
+            query="清衡集群",
+        )
+        ef_val3 = (await session.execute(text("SHOW hnsw.ef_search"))).scalar_one()
+        assert int(ef_val3) == 1000
+
 
 def test_hnsw_prefix_config_fingerprint_and_calibration_fallback() -> None:
     s_exact = _settings(
@@ -605,6 +625,60 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
         )
         # With score_min=0.0, cosine=0.25 is accepted -> refusal_correctness == 1.0 (not refused)
         assert zero_res["test"]["refusal_correctness"] == pytest.approx(1.0)
+
+        # 7. Verify _make_path_settings preserves explicit DENSE_POOL / LEXICAL_POOL from dotenv
+        # while omitting them when not set in dotenv so per-path calibration defaults apply
+        for env_key in (
+            "DENSE_POOL",
+            "LEXICAL_POOL",
+            "RETRIEVAL_MODE",
+            "EVIDENCE_SCORE_MIN",
+            "CITE_MARGIN",
+            "CITE_K",
+            "RRF_K",
+            "RARE_COVERAGE_MIN",
+        ):
+            mp.delenv(env_key, raising=False)
+        env_with_pools = tmp_path / "with_pools.env"
+        env_with_pools.write_text(
+            "APP_ENV=test\n"
+            f"DATABASE_URL={get_settings().database_url}\n"
+            "REDIS_URL=redis://127.0.0.1:56379/1\n"
+            f"JWT_SECRET={JWT_SECRET}\n"
+            "EMBEDDER=hashing\n"
+            "EMBEDDING_DIM=512\n"
+            "DENSE_POOL=120\n"
+            "LEXICAL_POOL=95\n",
+            encoding="utf-8",
+        )
+        base_from_dotenv = Settings(_env_file=str(env_with_pools))  # type: ignore[call-arg]
+        derived_with_pools = _make_path_settings(
+            base_from_dotenv,
+            embedding_index="hnsw_prefix",
+            embedding_storage="halfvec",
+            embedding_prefix_dim=128,
+        )
+        assert derived_with_pools.dense_pool == 120
+        assert derived_with_pools.lexical_pool == 95
+
+        env_no_pools = tmp_path / "no_pools.env"
+        env_no_pools.write_text(
+            "APP_ENV=test\n"
+            f"DATABASE_URL={get_settings().database_url}\n"
+            "REDIS_URL=redis://127.0.0.1:56379/1\n"
+            f"JWT_SECRET={JWT_SECRET}\n"
+            "EMBEDDER=hashing\n"
+            "EMBEDDING_DIM=512\n",
+            encoding="utf-8",
+        )
+        base_no_pools = Settings(_env_file=str(env_no_pools))  # type: ignore[call-arg]
+        derived_no_pools = _make_path_settings(
+            base_no_pools,
+            embedding_index="hnsw",
+            embedding_storage="vector",
+        )
+        assert derived_no_pools.dense_pool == 80
+        assert derived_no_pools.lexical_pool == 80
     finally:
         mp.undo()
 

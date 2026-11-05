@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self, cast
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.secrets import read_secret
@@ -174,9 +174,23 @@ class Settings(BaseSettings):
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
     service_name: str = "lab-agent-api"
+    _explicit_tuning_fields: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     @model_validator(mode="after")
     def _enforce(self) -> Self:
+        self._explicit_tuning_fields = frozenset(
+            self.model_fields_set
+            & {
+                "retrieval_mode",
+                "dense_pool",
+                "lexical_pool",
+                "rrf_k",
+                "evidence_score_min",
+                "cite_margin",
+                "cite_k",
+                "rare_coverage_min",
+            }
+        )
         assert_strong_secret(self.jwt_secret.get_secret_value(), "JWT_SECRET")
         if (
             self.internal_proxy_secret is not None
