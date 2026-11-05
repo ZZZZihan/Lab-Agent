@@ -14,6 +14,8 @@ services:
       EMBEDDING_QUERY_INSTRUCTION: ""
       EMBEDDING_DOCUMENT_PREFIX: ""
       EMBEDDING_REDACT: "false"
+      EVIDENCE_SCORE_MIN: "0.30"
+      RARE_COVERAGE_MIN: "0.35"
 
 secrets:
   magpie_key:
