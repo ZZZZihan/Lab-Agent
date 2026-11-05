@@ -2452,6 +2452,71 @@ async def test_audit_csv_formula_escape_and_signed_zero_hash_chain(
     assert rows[0]["resource_id"] == "'+SUM(A1:A2)"
 
 
+async def test_conversation_history_continuation_and_other_user_returns_404(
+    client: AsyncClient,
+    people: dict[str, dict[str, str]],
+) -> None:
+    del people
+    linke = await _login(client, "member@lab.local")
+    zhou = await _login(client, "zhou@lab.local")
+
+    # First question starts a new conversation
+    first_resp = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "清衡-A100 一共有多少台节点？"},
+        headers=linke,
+    )
+    assert first_resp.status_code == 200
+    first_events = _events(first_resp.text)
+    first_done = next(ev for ev in first_events if ev["type"] == "done")
+    conv_id = str(first_done["conversation_id"])
+
+    # Continuing the conversation with conversation_id appends to the same conversation
+    second_resp = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "周三学术例会在哪间实体会议室？", "conversation_id": conv_id},
+        headers=linke,
+    )
+    assert second_resp.status_code == 200
+    second_events = _events(second_resp.text)
+    second_done = next(ev for ev in second_events if ev["type"] == "done")
+    assert str(second_done["conversation_id"]) == conv_id
+
+    # Owner sees the conversation in GET /conversations and all 4 messages in GET /conversations/{id}
+    list_resp = await client.get("/api/v1/conversations", headers=linke)
+    assert list_resp.status_code == 200
+    assert any(c["id"] == conv_id for c in list_resp.json()["conversations"])
+
+    detail_resp = await client.get(f"/api/v1/conversations/{conv_id}", headers=linke)
+    assert detail_resp.status_code == 200
+    messages = detail_resp.json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
+    assert messages[0]["content"] == "清衡-A100 一共有多少台节点？"
+    assert messages[2]["content"] == "周三学术例会在哪间实体会议室？"
+
+    # Another user gets 404 on GET /conversations/{id} and DELETE /conversations/{id},
+    # does not see it in GET /conversations, and cannot append via POST /chat/stream
+    other_list = await client.get("/api/v1/conversations", headers=zhou)
+    assert other_list.status_code == 200
+    assert all(c["id"] != conv_id for c in other_list.json()["conversations"])
+
+    other_get = await client.get(f"/api/v1/conversations/{conv_id}", headers=zhou)
+    assert other_get.status_code == 404
+
+    other_stream = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "尝试写入他人会话", "conversation_id": conv_id},
+        headers=zhou,
+    )
+    assert other_stream.status_code == 200
+    other_events = _events(other_stream.text)
+    assert any(ev.get("type") == "error" and ev.get("code") == "not_found" for ev in other_events)
+
+    other_del = await client.delete(f"/api/v1/conversations/{conv_id}", headers=zhou)
+    assert other_del.status_code == 404
+
+
+
 
 
 
