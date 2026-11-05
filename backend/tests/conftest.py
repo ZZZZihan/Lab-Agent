@@ -86,7 +86,7 @@ async def clean_db() -> AsyncIterator[None]:
         await session.execute(
             text(
                 "TRUNCATE audit_events, messages, conversations, revoked_tokens, "
-                "embedding_index_meta, chunks, document_acl, documents, users RESTART IDENTITY CASCADE"
+                "embedding_index_meta, chunks, document_acl, documents, group_members, groups, users RESTART IDENTITY CASCADE"
             )
         )
         await session.commit()

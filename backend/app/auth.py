@@ -14,6 +14,7 @@ from jwt import PyJWKClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.acl import load_user_group_ids
 from app.config import Settings
 from app.models import RevokedToken, User
 
@@ -26,6 +27,7 @@ class Actor:
     id: uuid.UUID
     role: str
     display_name: str
+    group_ids: frozenset[str] = frozenset()
 
 
 UNUSABLE_PASSWORD_HASH = "!unusable"
@@ -105,7 +107,13 @@ async def authenticate_local(session: AsyncSession, token: str, settings: Settin
     user = await session.get(User, uuid.UUID(str(payload["sub"])))
     if user is None or not user.is_active:
         raise PermissionError("invalid_token")
-    return Actor(id=user.id, role=user.role, display_name=user.display_name)
+    group_ids = await load_user_group_ids(session, user.id)
+    return Actor(
+        id=user.id,
+        role=user.role,
+        display_name=user.display_name,
+        group_ids=group_ids,
+    )
 
 
 async def authenticate_oidc(session: AsyncSession, token: str, settings: Settings) -> Actor:
@@ -159,7 +167,13 @@ async def authenticate_oidc(session: AsyncSession, token: str, settings: Setting
         raise PermissionError("oidc_user_not_provisioned")
     if not user.is_active:
         raise PermissionError("invalid_token")
-    return Actor(id=user.id, role=user.role, display_name=user.display_name)
+    group_ids = await load_user_group_ids(session, user.id)
+    return Actor(
+        id=user.id,
+        role=user.role,
+        display_name=user.display_name,
+        group_ids=group_ids,
+    )
 
 
 def decode_unverified_for_logout(token: str) -> tuple[str, int] | None:

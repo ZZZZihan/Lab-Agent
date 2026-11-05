@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.auth import hash_password
 from app.config import get_settings
 from app.db import dispose_engine, get_sessionmaker
-from app.models import User
+from app.models import Group, GroupMember, User
 from app.rag.chunker import parse_front_matter
 from app.rag.embedder import build_embedder
 from app.rag.ingest import upsert_source
@@ -64,9 +64,27 @@ async def seed() -> None:
                     await session.flush()
                 users[email] = user
             admin = users["admin@lab.local"]
+            helios_group = await session.scalar(select(Group).where(Group.slug == "helios"))
+            if helios_group is None:
+                helios_group = Group(slug="helios", name="项目赫利俄斯组")
+                session.add(helios_group)
+                await session.flush()
+            await session.execute(
+                delete(GroupMember).where(GroupMember.group_id == helios_group.id)
+            )
+            session.add(
+                GroupMember(
+                    group_id=helios_group.id,
+                    user_id=users["member@lab.local"].id,
+                )
+            )
+            await session.flush()
+
             grants = {
-                "project-helios": [users["member@lab.local"].id],
                 "procurement": [users["zhou@lab.local"].id],
+            }
+            group_grants = {
+                "project-helios": [helios_group.id],
             }
             corpus = _read_dir(Path(settings.corpus_dir))
             private = _read_dir(Path(settings.seed_only_dir))
@@ -77,6 +95,7 @@ async def seed() -> None:
                 source="seed",
                 records=corpus + private,
                 grants=grants,
+                group_grants=group_grants,
             )
             await session.commit()
     finally:

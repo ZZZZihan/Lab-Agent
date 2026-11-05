@@ -1316,3 +1316,167 @@ async def test_admin_users_api_crud_and_deactivated_token_revocation(
     assert initial_secret not in blob
     assert updated_secret not in blob
 
+
+async def test_project_groups_api_upload_grants_and_seed_acl(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from app.ingest_worker import process_next_pending
+    from app.main import app
+    from app.models import Document, DocumentACL, Group, GroupMember
+    from app.seed import seed
+    from sqlalchemy import select
+
+    del people
+    admin = await _login(client, "admin@lab.local")
+    linke = await _login(client, "member@lab.local")
+    zhou = await _login(client, "zhou@lab.local")
+    viewer = await _login(client, "viewer@lab.local")
+
+    # 1. Non-admin gets 403 on admin group endpoints
+    assert (await client.get("/api/v1/admin/groups", headers=linke)).status_code == 403
+    assert (
+        await client.post(
+            "/api/v1/admin/groups",
+            json={"slug": "unauthorized", "name": "越权组"},
+            headers=linke,
+        )
+    ).status_code == 403
+
+    # 2. Admin creates a group via POST /api/v1/admin/groups
+    create_grp = await client.post(
+        "/api/v1/admin/groups",
+        json={"slug": "apollo", "name": "阿波罗项目组"},
+        headers=admin,
+    )
+    assert create_grp.status_code == 200, create_grp.text
+    grp_data = create_grp.json()
+    apollo_id = grp_data["id"]
+    assert grp_data["slug"] == "apollo"
+    assert grp_data["name"] == "阿波罗项目组"
+    assert grp_data["member_ids"] == []
+
+    # 3. Public GET /api/v1/groups accessible to any logged-in user and returns only slug + name
+    pub_groups = await client.get("/api/v1/groups", headers=viewer)
+    assert pub_groups.status_code == 200
+    pub_items = pub_groups.json()["groups"]
+    assert any(item == {"slug": "apollo", "name": "阿波罗项目组"} for item in pub_items)
+    for item in pub_items:
+        assert set(item.keys()) == {"slug", "name"}
+
+    # 4. PUT /api/v1/admin/groups/{id}/members updates members and records added/removed audit
+    linke_id = (await client.get("/api/v1/auth/me", headers=linke)).json()["id"]
+    zhou_id = (await client.get("/api/v1/auth/me", headers=zhou)).json()["id"]
+
+    put1 = await client.put(
+        f"/api/v1/admin/groups/{apollo_id}/members",
+        json={"user_ids": [linke_id, zhou_id]},
+        headers=admin,
+    )
+    assert put1.status_code == 200
+    assert put1.json()["added"] == 2
+    assert put1.json()["removed"] == 0
+    assert set(put1.json()["member_ids"]) == {linke_id, zhou_id}
+
+    put2 = await client.put(
+        f"/api/v1/admin/groups/{apollo_id}/members",
+        json={"user_ids": [linke_id]},
+        headers=admin,
+    )
+    assert put2.status_code == 200
+    assert put2.json()["added"] == 0
+    assert put2.json()["removed"] == 1
+    assert put2.json()["member_ids"] == [linke_id]
+
+    # 5. Upload restricted document with grant_groups and grant_roles
+    up_resp = await client.post(
+        "/api/v1/documents",
+        data={
+            "title": "阿波罗机密设计",
+            "text": "## 激光冷却\n阿波罗激光器的锁定频率是 418 THz。",
+            "collection": "project",
+            "visibility": "restricted",
+            "grant_groups": "apollo",
+            "grant_roles": "viewer",
+        },
+        headers=admin,
+    )
+    assert up_resp.status_code == 202, up_resp.text
+    apollo_doc_id = up_resp.json()["id"]
+    while await process_next_pending(app.state.embedder, app.state.settings) is not None:
+        pass
+
+    # Linke (in group apollo) and viewer (role viewer) can read; Zhou (removed from apollo, role member) cannot
+    assert (await client.get(f"/api/v1/documents/{apollo_doc_id}", headers=linke)).status_code == 200
+    assert (await client.get(f"/api/v1/documents/{apollo_doc_id}", headers=viewer)).status_code == 200
+    assert (await client.get(f"/api/v1/documents/{apollo_doc_id}", headers=zhou)).status_code == 404
+
+    zhou_search = await client.post(
+        "/api/v1/search",
+        json={"query": "418 THz 阿波罗激光器", "k": 5},
+        headers=zhou,
+    )
+    assert zhou_search.status_code == 200
+    assert all(h["document_id"] != apollo_doc_id for h in zhou_search.json()["hits"])
+
+    linke_search = await client.post(
+        "/api/v1/search",
+        json={"query": "418 THz 阿波罗激光器", "k": 5},
+        headers=linke,
+    )
+    assert linke_search.status_code == 200
+    assert any(h["document_id"] == apollo_doc_id for h in linke_search.json()["hits"])
+
+    # 6. Verify group_created and group_members_changed audit events
+    maker = get_sessionmaker()
+    async with maker() as session:
+        grp_audits = list(
+            await session.execute(
+                text(
+                    "SELECT action, detail FROM audit_events "
+                    "WHERE action IN ('group_created', 'group_members_changed') "
+                    "ORDER BY id ASC"
+                )
+            )
+        )
+    assert [r[0] for r in grp_audits] == [
+        "group_created",
+        "group_members_changed",
+        "group_members_changed",
+    ]
+    assert grp_audits[0][1] == {"slug": "apollo"}
+    assert grp_audits[1][1] == {"added": 2, "removed": 0}
+    assert grp_audits[2][1] == {"added": 0, "removed": 1}
+
+    # 7. Verify seed() provisions group 'helios' with member 林可 and grants project-helios to group 'helios'
+    await seed()
+    async with maker() as session:
+        helios_grp = await session.scalar(select(Group).where(Group.slug == "helios"))
+        assert helios_grp is not None
+        helios_members = list(
+            await session.scalars(
+                select(GroupMember.user_id).where(GroupMember.group_id == helios_grp.id)
+            )
+        )
+        assert [str(uid) for uid in helios_members] == [linke_id]
+
+        helios_doc = await session.scalar(
+            select(Document).where(
+                Document.source == "seed",
+                Document.doc_key == "project-helios",
+            )
+        )
+        assert helios_doc is not None
+        helios_acls = list(
+            await session.scalars(
+                select(DocumentACL).where(DocumentACL.document_id == helios_doc.id)
+            )
+        )
+        assert len(helios_acls) == 1
+        assert helios_acls[0].principal_type == "group"
+        assert helios_acls[0].principal_id == str(helios_grp.id)
+        helios_doc_id = str(helios_doc.id)
+
+    assert (await client.get(f"/api/v1/documents/{helios_doc_id}", headers=linke)).status_code == 200
+    assert (await client.get(f"/api/v1/documents/{helios_doc_id}", headers=zhou)).status_code == 404
+
+

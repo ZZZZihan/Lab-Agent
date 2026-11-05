@@ -278,6 +278,24 @@ async def run_smoke(
         return f"reason={refusal_ev.get('reason')}"
 
     async def s7_isolation() -> str:
+        groups_resp = await clients["linke"].get("/api/backend/groups")
+        if groups_resp.status_code != 200:
+            raise AssertionError(f"groups returned {groups_resp.status_code}")
+        groups = groups_resp.json().get("groups") or []
+        if not any(isinstance(g, dict) and g.get("slug") == "helios" for g in groups):
+            raise AssertionError("expected group 'helios' in /groups response")
+
+        zn_docs_resp = await clients["zhouning"].get("/api/backend/documents")
+        if zn_docs_resp.status_code != 200:
+            raise AssertionError(f"zhouning documents list returned {zn_docs_resp.status_code}")
+        zn_docs = zn_docs_resp.json().get("documents") or []
+        if any(
+            isinstance(d, dict)
+            and (d.get("title") == "项目赫利俄斯" or d.get("doc_key") == "project-helios")
+            for d in zn_docs
+        ):
+            raise AssertionError("non-helios member zhouning saw '项目赫利俄斯' in document list")
+
         search_resp = await clients["zhouning"].post(
             "/api/backend/search",
             json={"query": "赫利俄斯 内部代号", "k": 8},
@@ -286,7 +304,7 @@ async def run_smoke(
             raise AssertionError(f"search returned {search_resp.status_code}")
         hits = search_resp.json().get("hits") or []
         if any(isinstance(h, dict) and h.get("title") == "项目赫利俄斯" for h in hits):
-            raise AssertionError("zhouning search leaked restricted document '项目赫利俄斯'")
+            raise AssertionError("non-helios member zhouning search leaked restricted document '项目赫利俄斯'")
 
         admin_docs_resp = await clients["admin"].get("/api/backend/documents")
         if admin_docs_resp.status_code != 200:
@@ -307,12 +325,16 @@ async def run_smoke(
 
         zn_get = await clients["zhouning"].get(f"/api/backend/documents/{helios_id}")
         if zn_get.status_code != 404:
-            raise AssertionError(f"expected 404 for zhouning GET helios, got {zn_get.status_code}")
+            raise AssertionError(
+                f"expected 404 for non-helios member zhouning GET helios, got {zn_get.status_code}"
+            )
 
         lk_get = await clients["linke"].get(f"/api/backend/documents/{helios_id}")
         if lk_get.status_code != 200:
-            raise AssertionError(f"expected 200 for linke GET helios, got {lk_get.status_code}")
-        return f"helios_id={helios_id} zn=404 lk=200"
+            raise AssertionError(
+                f"expected 200 for helios group member linke GET helios, got {lk_get.status_code}"
+            )
+        return f"group=helios helios_id={helios_id} zn=404 lk=200"
 
     async def s8_audit() -> str:
         audit_resp = await clients["admin"].get("/api/backend/audit?limit=200")

@@ -68,6 +68,7 @@ class LoopState(TypedDict, total=False):
 class Runtime(TypedDict):
     session: AsyncSession
     user: User
+    group_ids: frozenset[str] | None
     settings: Settings
     embedder: Embedder
     llm: LLM
@@ -138,6 +139,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 query=str(args.get("query") or ""),
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
+                group_ids=runtime["group_ids"],
             )
             hits = found
             if found:
@@ -153,6 +155,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 query=str(args.get("query") or ""),
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
+                group_ids=runtime["group_ids"],
             )
             raw_hits = result["hits"]
             hits = list(raw_hits) if isinstance(raw_hits, list) else []
@@ -169,6 +172,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 query=str(args.get("query") or ""),
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
+                group_ids=runtime["group_ids"],
             )
             raw_hits = result["hits"]
             hits = list(raw_hits) if isinstance(raw_hits, list) else []
@@ -192,6 +196,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 user=runtime["user"],
                 document_id=str(args.get("document_id") or ""),
                 request_id=runtime["request_id"],
+                group_ids=runtime["group_ids"],
             )
             if fetched is None:
                 status = "not_found"
@@ -548,11 +553,13 @@ async def run_agent(
     question: str,
     emit: Emit,
     request_id: str | None,
+    group_ids: frozenset[str] | None = None,
 ) -> dict[str, object]:
     token = _runtime.set(
         {
             "session": session,
             "user": user,
+            "group_ids": group_ids,
             "settings": settings,
             "embedder": embedder,
             "llm": llm,

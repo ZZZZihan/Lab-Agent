@@ -8,12 +8,12 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.acl import Principal, can_read
+from app.acl import Principal, can_read, load_user_group_ids
 from app.audit import write_audit
 from app.config import Settings
 from app.models import Document, DocumentACL, User
 from app.rag.embedder import Embedder
-from app.rag.retrieve import search_knowledge
+from app.rag.retrieve import principal_from_user, search_knowledge
 from app.rag.rrf import Hit
 
 
@@ -48,12 +48,16 @@ async def search_knowledge_base(
     collection: str | None = None,
     source: str | None = None,
     request_id: str | None = None,
+    group_ids: frozenset[str] | None = None,
 ) -> list[Hit]:
+    resolved_groups = (
+        group_ids if group_ids is not None else await load_user_group_ids(session, user.id)
+    )
     bundle = await search_knowledge(
         session,
         settings=settings,
         embedder=embedder,
-        user=Principal(id=user.id, role=user.role),
+        user=principal_from_user(user.id, user.role, resolved_groups),
         query=query,
         collection=collection,
         source=source,
@@ -90,6 +94,7 @@ async def fetch_document(
     user: User,
     document_id: str,
     request_id: str | None = None,
+    group_ids: frozenset[str] | None = None,
 ) -> dict[str, object] | None:
     try:
         parsed = uuid.UUID(document_id)
@@ -101,7 +106,14 @@ async def fetch_document(
     grants = list(
         await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
     )
-    allowed = can_read(Principal(id=user.id, role=user.role), document, grants)
+    resolved_groups = (
+        group_ids if group_ids is not None else await load_user_group_ids(session, user.id)
+    )
+    allowed = can_read(
+        Principal(id=user.id, role=user.role, group_ids=resolved_groups),
+        document,
+        grants,
+    )
     if not allowed:
         await write_audit(
             settings=settings,
@@ -131,6 +143,7 @@ async def query_lab_projects(
     query: str,
     k: int = 8,
     request_id: str | None = None,
+    group_ids: frozenset[str] | None = None,
 ) -> dict[str, object]:
     hits = await search_knowledge_base(
         session,
@@ -141,6 +154,7 @@ async def query_lab_projects(
         k=k,
         collection="project",
         request_id=request_id,
+        group_ids=group_ids,
     )
     return {"status": "ok", "source": "knowledge_base", "hits": hits}
 
@@ -154,6 +168,7 @@ async def query_meetings(
     query: str,
     k: int = 8,
     request_id: str | None = None,
+    group_ids: frozenset[str] | None = None,
 ) -> dict[str, object]:
     hits = await search_knowledge_base(
         session,
@@ -164,6 +179,7 @@ async def query_meetings(
         k=k,
         collection="meeting",
         request_id=request_id,
+        group_ids=group_ids,
     )
     return {"status": "ok", "source": "knowledge_base", "hits": hits}
 

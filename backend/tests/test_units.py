@@ -665,6 +665,11 @@ async def test_run_smoke_offline_and_real_modes() -> None:
                 doc_id = "doc-uploaded-1"
                 uploaded_docs[doc_id] = {"id": doc_id, "title": title, "status": "ready"}
                 return httpx.Response(202, json={"id": doc_id, "status": "pending"})
+            if path == "/api/backend/groups" and request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={"groups": [{"slug": "helios", "name": "项目赫利俄斯组"}]},
+                )
             if path == "/api/backend/documents" and request.method == "GET":
                 docs = list(uploaded_docs.values())
                 if "admin@lab.local" in cookie or "member@lab.local" in cookie:

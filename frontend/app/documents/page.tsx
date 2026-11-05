@@ -67,16 +67,22 @@ export default function DocumentsPage() {
   const [collection, setCollection] = useState("knowledge");
   const [visibility, setVisibility] = useState("lab");
   const [grants, setGrants] = useState("");
+  const [availableGroups, setAvailableGroups] = useState<{ slug: string; name: string }[]>([]);
+  const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setError("");
     try {
-      const [me, listed] = await Promise.all([
+      const [me, listed, groupList] = await Promise.all([
         currentUser(),
         api<{ documents: Doc[] }>("documents"),
+        api<{ groups: { slug: string; name: string }[] }>("groups").catch(() => ({
+          groups: [],
+        })),
       ]);
       setUser(me);
       setDocs(listed.documents);
+      setAvailableGroups(groupList.groups || []);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t.error);
       setDocs([]);
@@ -85,11 +91,18 @@ export default function DocumentsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([currentUser(), api<{ documents: Doc[] }>("documents")])
-      .then(([me, listed]) => {
+    Promise.all([
+      currentUser(),
+      api<{ documents: Doc[] }>("documents"),
+      api<{ groups: { slug: string; name: string }[] }>("groups").catch(() => ({
+        groups: [],
+      })),
+    ])
+      .then(([me, listed, groupList]) => {
         if (cancelled) return;
         setUser(me);
         setDocs(listed.documents);
+        setAvailableGroups(groupList.groups || []);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -254,6 +267,9 @@ export default function DocumentsPage() {
               form.set("collection", collection);
               form.set("visibility", visibility);
               if (grants.trim()) form.set("grant_emails", grants);
+              if (visibility === "restricted" && selectedGroups.length > 0) {
+                form.set("grant_groups", selectedGroups.join(","));
+              }
 
               if (mode === "file") {
                 if (!selectedFile) {
@@ -275,6 +291,7 @@ export default function DocumentsPage() {
                 setOpen(false);
                 setTitle("");
                 setSelectedFile(null);
+                setSelectedGroups([]);
                 await load();
               } catch (err) {
                 const msg = err instanceof ApiError ? err.message : t.error;
@@ -353,6 +370,45 @@ export default function DocumentsPage() {
                 </option>
               ))}
             </select>
+            {visibility === "restricted" ? (
+              <div className="space-y-1.5">
+                <Label>{t.grantGroups}</Label>
+                {availableGroups.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">{t.noGroups}</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2 rounded-lg border border-input p-2">
+                    {availableGroups.map((group) => {
+                      const checked = selectedGroups.includes(group.slug);
+                      return (
+                        <label
+                          key={group.slug}
+                          className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => {
+                              if (event.target.checked) {
+                                setSelectedGroups((prev) =>
+                                  prev.includes(group.slug) ? prev : [...prev, group.slug],
+                                );
+                              } else {
+                                setSelectedGroups((prev) =>
+                                  prev.filter((item) => item !== group.slug),
+                                );
+                              }
+                            }}
+                          />
+                          <span>{group.name}</span>
+                          <span className="font-mono text-muted-foreground">({group.slug})</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">{t.grantGroupsHint}</p>
+              </div>
+            ) : null}
             <Label htmlFor="grants">{t.grants}</Label>
             <Input
               id="grants"

@@ -131,6 +131,17 @@ const copy = {
     roleMember: "成员 (member)",
     roleViewer: "查看者 (viewer)",
     adminOnly: "只有管理员可以访问用户管理。",
+    groups: "项目组",
+    groupsTitle: "项目组管理",
+    groupsHint: "按项目组控制受限文档的读取权限。可创建项目组并维护组成员。",
+    createGroup: "创建项目组",
+    groupSlug: "标识 (slug)",
+    groupName: "组名称",
+    groupMembers: "组成员",
+    editMembers: "管理成员",
+    grantGroups: "授权项目组",
+    grantGroupsHint: "仅在“按名单授权”时生效。勾选的组成员均可阅读此文档。",
+    noGroups: "暂无可选项目组",
   },
   en: {
     brand: "Lab Agent",
@@ -258,6 +269,19 @@ const copy = {
     roleMember: "Member",
     roleViewer: "Viewer",
     adminOnly: "Only administrators can access user management.",
+    groups: "Groups",
+    groupsTitle: "Project Groups",
+    groupsHint:
+      "Control read access to restricted documents by project group. Create groups and manage members.",
+    createGroup: "Create group",
+    groupSlug: "Slug",
+    groupName: "Group name",
+    groupMembers: "Members",
+    editMembers: "Edit members",
+    grantGroups: "Allowed project groups",
+    grantGroupsHint:
+      "Used only for restricted notes. Members of selected groups can read this document.",
+    noGroups: "No project groups available",
   },
 } as const;
 

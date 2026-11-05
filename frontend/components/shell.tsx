@@ -43,6 +43,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     ...(user?.role === "admin"
       ? [
           { href: "/admin/users", label: t.users },
+          { href: "/admin/groups", label: t.groups },
           { href: "/audit", label: t.audit },
         ]
       : []),
