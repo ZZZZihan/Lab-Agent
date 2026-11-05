@@ -77,18 +77,12 @@ class Runtime(TypedDict):
 
 _runtime: ContextVar[Runtime] = ContextVar("lab_agent_runtime")
 
-MEETING_WORDS = ("组会", "研讨", "会议室", "轮值", "提纲", "例会")
-PROJECT_WORDS = ("项目", "代号", "里程碑", "赫利俄斯", "流明", "hx-17")
 PAPER_WORDS = ("论文", "arxiv", "预印", "笔记")
 DETAIL_WORDS = ("全文", "详细说明", "完整内容")
 
 
 def detect_intent(question: str) -> str:
     folded = question.lower()
-    if any(word in folded for word in MEETING_WORDS):
-        return "meeting"
-    if any(word in folded for word in PROJECT_WORDS):
-        return "project"
     if any(word in folded for word in PAPER_WORDS):
         return "paper"
     return "knowledge"
@@ -102,10 +96,6 @@ def heuristic_action(state: LoopState, max_steps: int) -> dict[str, object] | No
     intent = detect_intent(question)
     searched = {"search_knowledge_base", "query_lab_projects", "query_meetings"} & set(trace)
     if not searched:
-        if intent == "project":
-            return {"name": "query_lab_projects", "args": {"query": question, "k": 12}}
-        if intent == "meeting":
-            return {"name": "query_meetings", "args": {"query": question, "k": 12}}
         return {"name": "search_knowledge_base", "args": {"query": question, "k": 12}}
     if intent == "paper" and "search_papers" not in trace:
         return {"name": "search_papers", "args": {"query": question}}
