@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import argparse
+import contextvars
 import json
 import os
 import uuid
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.acl import acl_sql, load_user_group_ids
 from app.agent import run_agent
 from app.audit import write_audit
+from app.auth import PAT_PREFIX, authenticate_pat
 from app.config import Settings, get_settings
 from app.db import get_sessionmaker
 from app.llm import LLM, build_llm
@@ -40,6 +48,10 @@ TOOL_NAMES = [
 _SETTINGS: Settings | None = None
 _EMBEDDER: Embedder | None = None
 _LLM: LLM | None = None
+_MCP_HTTP_ACTOR_ID: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
+    "_MCP_HTTP_ACTOR_ID",
+    default=None,
+)
 
 
 def get_mcp_settings() -> Settings:
@@ -97,7 +109,19 @@ async def _noop_emit(_event: dict[str, object]) -> None:
 
 
 async def resolve_mcp_actor(session: AsyncSession) -> tuple[User, frozenset[str]]:
-    """Resolve the active MCP actor User and their group_ids from MCP_ACTOR_EMAIL."""
+    """Resolve the active MCP actor User and their group_ids.
+
+    In Streamable HTTP mode, uses the per-request ContextVar set by `_MCPPatAuthMiddleware`.
+    In stdio mode, falls back to `MCP_ACTOR_EMAIL`.
+    """
+    http_actor_id = _MCP_HTTP_ACTOR_ID.get()
+    if http_actor_id is not None:
+        user = await session.get(User, http_actor_id)
+        if user is None or not user.is_active:
+            raise RuntimeError("MCP actor is not provisioned")
+        group_ids = await load_user_group_ids(session, user.id)
+        return user, group_ids
+
     email = os.environ.get("MCP_ACTOR_EMAIL", "").strip().lower()
     if not email:
         raise RuntimeError("MCP_ACTOR_EMAIL is required")
@@ -661,10 +685,135 @@ def build_server() -> MCPServer:
     return server
 
 
-def main() -> None:
-    if not os.environ.get("MCP_ACTOR_EMAIL"):
-        raise SystemExit("MCP_ACTOR_EMAIL is required")
-    build_server().run(transport="stdio")
+def _extract_bearer_pat(scope: Scope) -> str | None:
+    raw_headers = scope.get("headers")
+    header_pairs = raw_headers if isinstance(raw_headers, list) else []
+    for key, value in header_pairs:
+        if key.lower() == b"authorization":
+            text_val = value.decode("latin-1").strip()
+            if text_val.lower().startswith("bearer "):
+                token = text_val[7:].strip()
+                if token.startswith(PAT_PREFIX):
+                    return token
+            return None
+    return None
+
+
+def _ensure_mcp_accept_header(scope: Scope) -> Scope:
+    raw_headers = scope.get("headers")
+    header_pairs = list(raw_headers) if isinstance(raw_headers, list) else []
+    new_headers: list[tuple[bytes, bytes]] = []
+    found_accept = False
+    for key, value in header_pairs:
+        if key.lower() == b"accept":
+            found_accept = True
+            current = value.decode("latin-1").lower()
+            if "application/json" not in current or "text/event-stream" not in current:
+                new_headers.append((b"accept", b"application/json, text/event-stream"))
+            else:
+                new_headers.append((key, value))
+        else:
+            new_headers.append((key, value))
+    if not found_accept:
+        new_headers.append((b"accept", b"application/json, text/event-stream"))
+    return {**scope, "headers": new_headers}
+
+
+class _MCPPatAuthMiddleware:
+    """ASGI middleware that authenticates `Authorization: Bearer la_pat_...` for HTTP MCP."""
+
+    def __init__(self, app: ASGIApp, *, session_manager: Any = None) -> None:
+        self.app = app
+        self.session_manager = session_manager
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        raw_token = _extract_bearer_pat(scope)
+        if not raw_token:
+            resp = JSONResponse(
+                status_code=401,
+                content={
+                    "error": {
+                        "code": "unauthorized",
+                        "message": "需要提供有效的个人访问令牌 (Bearer la_pat_...)",
+                    }
+                },
+            )
+            await resp(scope, receive, send)
+            return
+
+        async with get_sessionmaker()() as session:
+            try:
+                actor = await authenticate_pat(session, raw_token)
+            except PermissionError:
+                resp = JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": {
+                            "code": "unauthorized",
+                            "message": "个人访问令牌无效、已过期或已吊销",
+                        }
+                    },
+                )
+                await resp(scope, receive, send)
+                return
+
+        patched_scope = _ensure_mcp_accept_header(scope)
+        ctx_token = _MCP_HTTP_ACTOR_ID.set(actor.id)
+        try:
+            if (
+                self.session_manager is not None
+                and getattr(self.session_manager, "_task_group", None) is None
+            ):
+                self.session_manager._has_started = False
+                async with self.session_manager.run():
+                    await self.app(patched_scope, receive, send)
+            else:
+                await self.app(patched_scope, receive, send)
+        finally:
+            _MCP_HTTP_ACTOR_ID.reset(ctx_token)
+
+
+def build_http_app(streamable_http_path: str = "/mcp") -> Starlette:
+    """Build a Streamable HTTP MCP Starlette ASGI app protected by Personal Access Tokens."""
+    server = build_server()
+    starlette_app = server.streamable_http_app(
+        streamable_http_path=streamable_http_path,
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
+    starlette_app.add_middleware(
+        _MCPPatAuthMiddleware,
+        session_manager=getattr(server, "_session_manager", None)
+        or getattr(server._lowlevel_server, "_session_manager", None),
+    )
+    return starlette_app
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Lab Agent MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http", "streamable-http"],
+        default="stdio",
+        help="MCP transport protocol (default: stdio)",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
+    parser.add_argument("--port", type=int, default=8001, help="HTTP bind port")
+    args = parser.parse_args(argv)
+
+    if args.transport == "stdio":
+        if not os.environ.get("MCP_ACTOR_EMAIL"):
+            raise SystemExit("MCP_ACTOR_EMAIL is required")
+        build_server().run(transport="stdio")
+    else:
+        import uvicorn
+
+        uvicorn.run(build_http_app(), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

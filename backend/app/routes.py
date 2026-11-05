@@ -9,7 +9,7 @@ import ipaddress
 import json
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -24,9 +24,12 @@ from app.acl import Principal, acl_sql, can_read
 from app.agent import run_agent
 from app.audit import run_retention, write_audit
 from app.auth import (
+    PAT_PREFIX,
     Actor,
     authenticate_local,
+    authenticate_pat,
     decode_unverified_for_logout,
+    generate_pat,
     issue_token,
     revoke_token,
     verify_password,
@@ -35,7 +38,7 @@ from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.llm import LLM
 from app.maintenance import purge_document, scrub_missing_document_citations
-from app.models import Conversation, Document, DocumentACL, Group, Message, User
+from app.models import ApiToken, Conversation, Document, DocumentACL, Group, Message, User
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
 from app.rag.index_meta import check_index
@@ -78,6 +81,12 @@ class DocumentACLBody(BaseModel):
     user_emails: list[str] = Field(default_factory=list)
     group_slugs: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
+
+
+class CreateTokenBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    expires_in_days: int | None = Field(default=90, ge=1, le=3650)
+
 
 
 async def _serialize_document_acl(
@@ -136,6 +145,24 @@ def _llm(request: Request) -> LLM:
     return request.app.state.llm  # type: ignore[no-any-return]
 
 
+def _is_pat_allowed_request(request: Request) -> bool:
+    """Return True if a Personal Access Token (`la_pat_`) is permitted for this route."""
+    method = request.method.upper()
+    path = request.url.path.rstrip("/")
+    if method == "POST" and path in {"/api/v1/search", "/api/v1/chat", "/api/v1/chat/stream"}:
+        return True
+    if method == "GET" and (
+        path == "/api/v1/documents"
+        or (path.startswith("/api/v1/documents/") and not path.endswith("/acl"))
+    ):
+        return True
+    if method == "GET" and (
+        path == "/api/v1/conversations" or path.startswith("/api/v1/conversations/")
+    ):
+        return True
+    return False
+
+
 async def _actor(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
@@ -143,9 +170,28 @@ async def _actor(
     if credentials is None:
         raise APIError(401, "unauthorized", "需要登录")
     settings = _settings(request)
+    raw_token = credentials.credentials
     async with get_sessionmaker()() as session:
+        if raw_token.startswith(PAT_PREFIX):
+            try:
+                actor = await authenticate_pat(session, raw_token)
+            except PermissionError as exc:
+                raise APIError(401, "unauthorized", "令牌无效或已过期") from exc
+            if not _is_pat_allowed_request(request):
+                await write_audit(
+                    settings=settings,
+                    actor_id=actor.id,
+                    action="permission_denied",
+                    resource_type="api_token",
+                    resource_id=str(actor.token_id) if actor.token_id else None,
+                    request_id=getattr(request.state, "request_id", None),
+                    ip=_client_ip(request),
+                    detail={"operation": f"{request.method} {request.url.path}"},
+                )
+                raise APIError(403, "forbidden", "个人访问令牌无权访问此接口")
+            return actor
         try:
-            return await authenticate_local(session, credentials.credentials, settings)
+            return await authenticate_local(session, raw_token, settings)
         except PermissionError as exc:
             raise APIError(401, "unauthorized", "登录已失效") from exc
 
@@ -299,6 +345,116 @@ async def me(
 ) -> dict[str, str]:
     user = await _user(session, actor)
     return {"id": str(user.id), "display_name": user.display_name, "role": user.role}
+
+
+def _serialize_api_token(tok: ApiToken) -> dict[str, object]:
+    now = datetime.now(UTC)
+    return {
+        "id": str(tok.id),
+        "name": tok.name,
+        "prefix": tok.prefix,
+        "created_at": tok.created_at.isoformat() if tok.created_at else None,
+        "last_used_at": tok.last_used_at.isoformat() if tok.last_used_at else None,
+        "expires_at": tok.expires_at.isoformat() if tok.expires_at else None,
+        "revoked_at": tok.revoked_at.isoformat() if tok.revoked_at else None,
+        "is_expired": bool(tok.expires_at is not None and tok.expires_at <= now),
+    }
+
+
+@router.get("/tokens")
+async def list_tokens(
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _user(session, actor)
+    rows = list(
+        await session.scalars(
+            select(ApiToken)
+            .where(ApiToken.user_id == actor.id)
+            .order_by(ApiToken.created_at.desc())
+        )
+    )
+    return {"tokens": [_serialize_api_token(tok) for tok in rows]}
+
+
+@router.post("/tokens", status_code=201)
+async def create_token(
+    body: CreateTokenBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    settings = _settings(request)
+    user = await _user(session, actor)
+    clean_name = body.name.strip()
+    if not clean_name:
+        raise APIError(400, "invalid_name", "令牌名称不能为空")
+    raw_token, token_hash, prefix = generate_pat()
+    now = datetime.now(UTC)
+    expires_at = (
+        now + timedelta(days=body.expires_in_days)
+        if body.expires_in_days is not None
+        else None
+    )
+    tok = ApiToken(
+        user_id=user.id,
+        name=clean_name,
+        token_hash=token_hash,
+        prefix=prefix,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    session.add(tok)
+    await session.commit()
+    await session.refresh(tok)
+    await write_audit(
+        settings=settings,
+        actor_id=user.id,
+        action="token_create",
+        resource_type="api_token",
+        resource_id=str(tok.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "name": clean_name,
+            "prefix": prefix,
+            "expires_in_days": body.expires_in_days,
+        },
+    )
+    payload = _serialize_api_token(tok)
+    payload["token"] = raw_token
+    return payload
+
+
+@router.delete("/tokens/{token_id}")
+async def revoke_personal_token(
+    token_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, str]:
+    settings = _settings(request)
+    user = await _user(session, actor)
+    tok = await session.scalar(
+        select(ApiToken).where(ApiToken.id == token_id, ApiToken.user_id == user.id)
+    )
+    if tok is None:
+        raise APIError(404, "not_found", "令牌不存在")
+    if tok.revoked_at is None:
+        tok.revoked_at = datetime.now(UTC)
+        await session.commit()
+    await write_audit(
+        settings=settings,
+        actor_id=user.id,
+        action="token_revoke",
+        resource_type="api_token",
+        resource_id=str(tok.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"name": tok.name, "prefix": tok.prefix},
+    )
+    return {"status": "revoked", "id": str(tok.id)}
+
 
 
 @router.get("/groups")
@@ -733,6 +889,119 @@ async def search(
             }
             for hit in hits
         ]
+    }
+
+
+async def _noop_chat_emit(_event: dict[str, object]) -> None:
+    return None
+
+
+@router.post("/chat")
+async def chat_json(
+    body: ChatBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    settings = _settings(request)
+    user = await _user(session, actor)
+    allowed = await request.app.state.limiter.allow(
+        f"chat:{actor.id}",
+        settings.chat_rate_limit,
+        settings.chat_rate_window_seconds,
+    )
+    if not allowed:
+        raise APIError(429, "rate_limited", "提问过于频繁")
+    request_id = getattr(request.state, "request_id", None)
+    conversation = None
+    if body.conversation_id is not None:
+        conversation = await session.get(Conversation, body.conversation_id)
+        if conversation is None or conversation.user_id != user.id:
+            raise APIError(404, "not_found", "会话不存在")
+    if conversation is None:
+        conversation = Conversation(user_id=user.id, title=body.message[:40])
+        session.add(conversation)
+        await session.flush()
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            role="user",
+            content=body.message,
+            refused=False,
+            citations=[],
+        )
+    )
+    await session.commit()
+    result = await run_agent(
+        session=session,
+        user=user,
+        settings=settings,
+        embedder=_embedder(request),
+        llm=_llm(request),
+        question=body.message,
+        emit=_noop_chat_emit,
+        request_id=request_id,
+        group_ids=actor.group_ids,
+    )
+    decision = result["decision"]
+    refused = bool(result["refused"])
+    llm_error = result.get("llm_error")
+    embedding_error = result.get("embedding_error")
+    reason: str | None = (
+        str(decision.get("reason"))
+        if refused and isinstance(decision, dict) and decision.get("reason") is not None
+        else None
+    )
+    if llm_error:
+        content = "模型服务暂时不可用，没有生成回答。请稍后重试。"
+        refused = True
+        reason = str(llm_error)
+        saved_citations: list[dict[str, object]] = []
+    elif embedding_error:
+        content = "检索服务暂时不可用，没有生成回答。请稍后重试。"
+        refused = True
+        reason = str(embedding_error)
+        saved_citations = []
+    elif refused and isinstance(decision, dict):
+        if decision.get("reason") == "model_declined":
+            content = "模型认为现有证据不足以回答这个问题。"
+        else:
+            content = (
+                "没有足够依据回答这个问题。"
+                f"决策分数 {float(decision.get('score') or 0):.2f}，"
+                f"阈值 {float(settings.evidence_score_min or 0):.2f}。"
+                "系统没有在证据不足时生成答案。"
+            )
+        saved_citations = []
+    else:
+        content = str(result["answer"])
+        raw_citations = (
+            list(result["citations"]) if isinstance(result["citations"], list) else []
+        )
+        saved_citations = await scrub_missing_document_citations(session, raw_citations)
+    message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=content,
+        refused=refused,
+        citations=saved_citations,
+    )
+    session.add(message)
+    await session.commit()
+    usage = result["usage"] if isinstance(result["usage"], dict) else {}
+    return {
+        "conversation_id": str(conversation.id),
+        "message_id": str(message.id),
+        "answer": content,
+        "content": content,
+        "refused": refused,
+        "reason": reason,
+        "citations": saved_citations,
+        "model": usage.get("model", settings.llm_model),
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+        },
     }
 
 

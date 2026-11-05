@@ -93,7 +93,7 @@ async def clean_db() -> AsyncIterator[None]:
     async with maker() as session:
         await session.execute(
             text(
-                "TRUNCATE audit_events, messages, conversations, revoked_tokens, "
+                "TRUNCATE audit_events, messages, conversations, api_tokens, revoked_tokens, "
                 "embedding_index_meta, chunks, document_acl, documents, group_members, groups, users RESTART IDENTITY CASCADE"
             )
         )
