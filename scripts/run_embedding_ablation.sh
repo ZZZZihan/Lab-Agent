@@ -343,6 +343,35 @@ EOF
 EXECUTED_SLUGS=()
 EXECUTED_GROUPS=()
 
+if [[ "$DRY_RUN" != "true" ]]; then
+  echo "==> Pre-populating evaluation corpus..."
+  (
+    cd "$REPO_ROOT/backend"
+    unset LLM_CAPTURE EVIDENCE_SCORE_MIN RARE_COVERAGE_MIN CITE_MARGIN CITE_K RRF_K RETRIEVAL_MODE
+    export LLM_PROVIDER=fake
+    export LLM_MODEL=fake-grounded-v1
+    export EMBEDDER=hashing
+    export EMBEDDING_DIM=512
+    export EMBEDDING_STORAGE=vector
+    export EMBEDDING_INDEX=auto
+    uv run --frozen python -W ignore::UserWarning - <<'PY'
+import asyncio
+from app.config import get_settings, reset_settings_cache
+from app.db import dispose_engine
+from evals.run_eval import _prepare
+
+async def _prepopulate() -> None:
+    reset_settings_cache()
+    try:
+        await _prepare(get_settings())
+    finally:
+        await dispose_engine()
+
+asyncio.run(_prepopulate())
+PY
+  )
+fi
+
 for group in "${SELECTED_GROUPS[@]}"; do
   if [[ "$group" == "E7" && -z "$Q8_DIGEST" ]]; then
     echo "==> [E7] Skipping optional group E7: model '${Q8_MODEL}' not found in 'ollama list'."

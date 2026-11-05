@@ -253,6 +253,7 @@ def test_ablation_script_dry_run_all_groups(tmp_path: Path) -> None:
     assert "python -m evals.run_eval --tune --commit" in proc.stdout
     assert "python -m evals.report" in proc.stdout
     assert "python -m evals.report --check" in proc.stdout
+    assert "Pre-populating evaluation corpus" not in proc.stdout
 
 
 def test_ablation_script_subset_and_optional_e7_skip(tmp_path: Path) -> None:
