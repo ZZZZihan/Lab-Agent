@@ -18,10 +18,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
       - "127.0.0.1:56379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -34,7 +37,7 @@ services:
     environment:
       APP_ENV: dev
       DATABASE_URL: postgresql+asyncpg://labagent:${POSTGRES_PASSWORD}@postgres:5432/labagent
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET}
       CORS_ORIGINS: http://127.0.0.1:43123,http://localhost:43123
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:3425/v1}

@@ -66,6 +66,7 @@ fi
 
 jwt="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 pg="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
+redis_pw="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
 proxy_secret="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 audit_hmac_key="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
@@ -76,7 +77,8 @@ if [[ "$OFFLINE" == "true" ]]; then
 APP_ENV=dev
 POSTGRES_PASSWORD=${pg}
 DATABASE_URL=postgresql+asyncpg://labagent:${pg}@127.0.0.1:55432/labagent
-REDIS_URL=redis://127.0.0.1:56379/0
+REDIS_PASSWORD=${redis_pw}
+REDIS_URL=redis://:${redis_pw}@127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
 INTERNAL_PROXY_SECRET=${proxy_secret}
@@ -116,7 +118,8 @@ else
 APP_ENV=dev
 POSTGRES_PASSWORD=${pg}
 DATABASE_URL=postgresql+asyncpg://labagent:${pg}@127.0.0.1:55432/labagent
-REDIS_URL=redis://127.0.0.1:56379/0
+REDIS_PASSWORD=${redis_pw}
+REDIS_URL=redis://:${redis_pw}@127.0.0.1:56379/0
 JWT_SECRET=${jwt}
 JWT_TTL_MINUTES=480
 INTERNAL_PROXY_SECRET=${proxy_secret}

@@ -113,6 +113,11 @@ else
   if [[ -n "$(env_val LLM_API_KEY)" ]]; then
     echo "Warning: LLM_API_KEY is set in .env; 建议改用密钥文件 (${LAB_AGENT_MAGPIE_KEY_FILE})." >&2
   fi
+  if [[ -z "$(env_val REDIS_PASSWORD)" ]]; then
+    new_redis_pw="$(python3 -c 'import secrets; print(secrets.token_hex(18))')"
+    set_env_val REDIS_PASSWORD "$new_redis_pw"
+    set_env_val REDIS_URL "redis://:${new_redis_pw}@127.0.0.1:56379/0"
+  fi
   if [[ "$OFFLINE" != "true" ]]; then
     cfg_llm_provider="$(env_val LLM_PROVIDER)"
     cfg_embedder="$(env_val EMBEDDER)"

@@ -107,6 +107,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run offline compose smoke test
         run: ./scripts/demo.sh --offline
+      - name: Verify non-root container UIDs
+        run: |
+          test "$(docker compose -f docker-compose.yml -f docker-compose.offline.yml exec -T api id -u)" = "10001"
+          test "$(docker compose -f docker-compose.yml -f docker-compose.offline.yml exec -T web id -u)" != "0"
       - name: Collect compose logs on failure
         if: failure()
         run: |
@@ -122,4 +126,47 @@ jobs:
       - name: Tear down compose stack
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.offline.yml down -v || true
+
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend and frontend images
+        run: |
+          docker build -f backend/Dockerfile -t lab-agent-api:ci .
+          docker build -f frontend/Dockerfile -t lab-agent-web:ci .
+      - name: Trivy scan backend image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: lab-agent-api:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - name: Trivy scan frontend image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: lab-agent-web:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+      - name: Generate backend SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: lab-agent-api:ci
+          format: spdx-json
+          output-file: sbom-backend.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-backend.spdx.json
+      - name: Generate frontend SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: lab-agent-web:ci
+          format: spdx-json
+          output-file: sbom-frontend.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-frontend.spdx.json
 
