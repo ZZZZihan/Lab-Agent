@@ -65,32 +65,35 @@ async def _prepare(settings: object) -> User:
     assert isinstance(settings, Settings)
     embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
     maker = get_sessionmaker()
-    async with maker() as session:
-        user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
-        if user is None:
-            user = User(
-                email="eval@lab.local",
-                display_name="评测",
-                role="admin",
-                password_hash=UNUSABLE_PASSWORD_HASH,
-                is_active=False,
+    try:
+        async with maker() as session:
+            user = await session.scalar(select(User).where(User.email == "eval@lab.local"))
+            if user is None:
+                user = User(
+                    email="eval@lab.local",
+                    display_name="评测",
+                    role="admin",
+                    password_hash=UNUSABLE_PASSWORD_HASH,
+                    is_active=False,
+                )
+                session.add(user)
+                await session.flush()
+            else:
+                user.password_hash = UNUSABLE_PASSWORD_HASH
+                user.is_active = False
+                await session.flush()
+            count = await replace_source(
+                session,
+                embedder=embedder,
+                owner_id=user.id,
+                source="eval",
+                records=_read_corpus(Path(settings.corpus_dir)),
             )
-            session.add(user)
-            await session.flush()
-        else:
-            user.password_hash = UNUSABLE_PASSWORD_HASH
-            user.is_active = False
-            await session.flush()
-        count = await replace_source(
-            session,
-            embedder=embedder,
-            owner_id=user.id,
-            source="eval",
-            records=_read_corpus(Path(settings.corpus_dir)),
-        )
-        await session.commit()
-        print(f"ingested {count} eval documents with embedder={embedder.name}")
-        return user
+            await session.commit()
+            print(f"ingested {count} eval documents with embedder={embedder.name}")
+            return user
+    finally:
+        await embedder.aclose()
 
 
 async def _featurize(settings: object, user: User, questions: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -102,56 +105,59 @@ async def _featurize(settings: object, user: User, questions: list[dict[str, obj
     gold_map = _gold_map(Path(settings.corpus_dir))
     maker = get_sessionmaker()
     features: list[dict[str, object]] = []
-    async with maker() as session:
-        for question in questions:
-            bundle = await search_knowledge(
-                session,
-                settings=settings,
-                embedder=embedder,
-                user=Principal(id=user.id, role=user.role),
-                query=str(question["question"]),
-                mode="dense",
-                source="eval",
-                limit=None,
-            )
-            gold = []
-            gold_refs = question["gold"]
-            if not isinstance(gold_refs, list):
-                raise RuntimeError(f"gold must be a list for {question['id']}")
-            for ref in gold_refs:
-                assert isinstance(ref, dict)
-                try:
-                    gold.append(gold_map[(str(ref["doc"]), str(ref["heading"]))])
-                except KeyError as exc:
-                    raise RuntimeError(f"missing gold heading for {question['id']}: {ref}") from exc
-            features.append(
-                {
-                    "id": question["id"],
-                    "split": question["split"],
-                    "type": question["type"],
-                    "answerable": bool(question["answerable"]),
-                    "gold": gold,
-                    "query_tokens": content_tokens(str(question["question"])),
-                    "elapsed_ms": bundle.elapsed_ms,
-                    "df": bundle.df,
-                    "n_docs": bundle.n_docs,
-                    "hits": [
-                        {
-                            "key": hit["key"],
-                            "cosine": float(hit.get("cosine") or 0.0),
-                            "bm25": float(hit.get("bm25") or 0.0),
-                            "tokens": list(hit.get("tokens") or []),
-                            "chunk_id": hit["chunk_id"],
-                            "document_id": hit["document_id"],
-                            "heading": hit.get("heading"),
-                            "title": hit.get("title"),
-                            "chunk_index": hit.get("chunk_index"),
-                        }
-                        for hit in bundle.hits
-                    ],
-                }
-            )
-    return features
+    try:
+        async with maker() as session:
+            for question in questions:
+                bundle = await search_knowledge(
+                    session,
+                    settings=settings,
+                    embedder=embedder,
+                    user=Principal(id=user.id, role=user.role),
+                    query=str(question["question"]),
+                    mode="dense",
+                    source="eval",
+                    limit=None,
+                )
+                gold = []
+                gold_refs = question["gold"]
+                if not isinstance(gold_refs, list):
+                    raise RuntimeError(f"gold must be a list for {question['id']}")
+                for ref in gold_refs:
+                    assert isinstance(ref, dict)
+                    try:
+                        gold.append(gold_map[(str(ref["doc"]), str(ref["heading"]))])
+                    except KeyError as exc:
+                        raise RuntimeError(f"missing gold heading for {question['id']}: {ref}") from exc
+                features.append(
+                    {
+                        "id": question["id"],
+                        "split": question["split"],
+                        "type": question["type"],
+                        "answerable": bool(question["answerable"]),
+                        "gold": gold,
+                        "query_tokens": content_tokens(str(question["question"])),
+                        "elapsed_ms": bundle.elapsed_ms,
+                        "df": bundle.df,
+                        "n_docs": bundle.n_docs,
+                        "hits": [
+                            {
+                                "key": hit["key"],
+                                "cosine": float(hit.get("cosine") or 0.0),
+                                "bm25": float(hit.get("bm25") or 0.0),
+                                "tokens": list(hit.get("tokens") or []),
+                                "chunk_id": hit["chunk_id"],
+                                "document_id": hit["document_id"],
+                                "heading": hit.get("heading"),
+                                "title": hit.get("title"),
+                                "chunk_index": hit.get("chunk_index"),
+                            }
+                            for hit in bundle.hits
+                        ],
+                    }
+                )
+        return features
+    finally:
+        await embedder.aclose()
 
 
 def _choose_rrf(rows: list[dict[str, object]], mode: str) -> int:

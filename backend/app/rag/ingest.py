@@ -30,7 +30,7 @@ async def ingest_text(
     chunks = chunk_markdown(text)
     if not chunks:
         raise ValueError("empty_document")
-    vectors = embedder.embed_documents([chunk.text for chunk in chunks])
+    vectors = await embedder.embed_documents([chunk.text for chunk in chunks])
     if document_id is None:
         document = Document(
             doc_key=doc_key,

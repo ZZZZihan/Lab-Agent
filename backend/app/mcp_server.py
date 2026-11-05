@@ -57,17 +57,20 @@ def build_server() -> MCPServer:
     async def search_knowledge_base_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
         embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
-        async with get_sessionmaker()() as session:
-            user = await _user(session)
-            hits = await search_knowledge_base(
-                session,
-                settings=settings,
-                embedder=embedder,
-                user=user,
-                query=query,
-                k=k,
-            )
-            await session.commit()
+        try:
+            async with get_sessionmaker()() as session:
+                user = await _user(session)
+                hits = await search_knowledge_base(
+                    session,
+                    settings=settings,
+                    embedder=embedder,
+                    user=user,
+                    query=query,
+                    k=k,
+                )
+                await session.commit()
+        finally:
+            await embedder.aclose()
         public = [
             {
                 "chunk_id": hit["chunk_id"],
@@ -105,17 +108,20 @@ def build_server() -> MCPServer:
     async def query_lab_projects_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
         embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
-        async with get_sessionmaker()() as session:
-            user = await _user(session)
-            result = await query_lab_projects(
-                session,
-                settings=settings,
-                embedder=embedder,
-                user=user,
-                query=query,
-                k=k,
-            )
-            await session.commit()
+        try:
+            async with get_sessionmaker()() as session:
+                user = await _user(session)
+                result = await query_lab_projects(
+                    session,
+                    settings=settings,
+                    embedder=embedder,
+                    user=user,
+                    query=query,
+                    k=k,
+                )
+                await session.commit()
+        finally:
+            await embedder.aclose()
         raw_hits = result["hits"]
         hits = raw_hits if isinstance(raw_hits, list) else []
         public = [
@@ -128,17 +134,20 @@ def build_server() -> MCPServer:
     async def query_meetings_tool(query: str, k: int = 8) -> str:
         settings = get_settings()
         embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
-        async with get_sessionmaker()() as session:
-            user = await _user(session)
-            result = await query_meetings(
-                session,
-                settings=settings,
-                embedder=embedder,
-                user=user,
-                query=query,
-                k=k,
-            )
-            await session.commit()
+        try:
+            async with get_sessionmaker()() as session:
+                user = await _user(session)
+                result = await query_meetings(
+                    session,
+                    settings=settings,
+                    embedder=embedder,
+                    user=user,
+                    query=query,
+                    k=k,
+                )
+                await session.commit()
+        finally:
+            await embedder.aclose()
         raw_hits = result["hits"]
         hits = raw_hits if isinstance(raw_hits, list) else []
         public = [

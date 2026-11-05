@@ -47,38 +47,41 @@ async def seed() -> None:
     assert_demo_seed_allowed(settings.app_env)
     embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
     maker = get_sessionmaker()
-    async with maker() as session:
-        users: dict[str, User] = {}
-        for email, name, role, password in DEMO_USERS:
-            user = await session.scalar(select(User).where(User.email == email))
-            if user is None:
-                user = User(
-                    email=email,
-                    display_name=name,
-                    role=role,
-                    password_hash=hash_password(password),
-                    is_active=True,
-                )
-                session.add(user)
-                await session.flush()
-            users[email] = user
-        admin = users["admin@lab.local"]
-        grants = {
-            "project-helios": [users["member@lab.local"].id],
-            "procurement": [users["zhou@lab.local"].id],
-        }
-        corpus = _read_dir(Path(settings.corpus_dir))
-        private = _read_dir(Path(settings.seed_only_dir))
-        count = await replace_source(
-            session,
-            embedder=embedder,
-            owner_id=admin.id,
-            source="seed",
-            records=corpus + private,
-            grants=grants,
-        )
-        await session.commit()
-    await dispose_engine()
+    try:
+        async with maker() as session:
+            users: dict[str, User] = {}
+            for email, name, role, password in DEMO_USERS:
+                user = await session.scalar(select(User).where(User.email == email))
+                if user is None:
+                    user = User(
+                        email=email,
+                        display_name=name,
+                        role=role,
+                        password_hash=hash_password(password),
+                        is_active=True,
+                    )
+                    session.add(user)
+                    await session.flush()
+                users[email] = user
+            admin = users["admin@lab.local"]
+            grants = {
+                "project-helios": [users["member@lab.local"].id],
+                "procurement": [users["zhou@lab.local"].id],
+            }
+            corpus = _read_dir(Path(settings.corpus_dir))
+            private = _read_dir(Path(settings.seed_only_dir))
+            count = await replace_source(
+                session,
+                embedder=embedder,
+                owner_id=admin.id,
+                source="seed",
+                records=corpus + private,
+                grants=grants,
+            )
+            await session.commit()
+    finally:
+        await embedder.aclose()
+        await dispose_engine()
     print(f"seeded {count} documents for 清衡实验室")
 
 
