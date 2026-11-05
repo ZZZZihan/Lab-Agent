@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import get_settings
 from app.db import dispose_engine, get_sessionmaker
+from app.ingest_worker import recover_processing, run_worker
 from app.llm import build_llm
 from app.logging_conf import configure_logging, get_logger
 from app.otel import setup_telemetry
@@ -106,11 +108,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         llm_provider=settings.llm_provider,
         retrieval_mode=settings.retrieval_mode,
     )
-    yield
-    await app.state.embedder.aclose()
-    await app.state.llm.aclose()
-    await app.state.limiter.close()
-    await dispose_engine()
+    worker_stop: asyncio.Event | None = None
+    worker_task: asyncio.Task[None] | None = None
+    if settings.ingest_worker_enabled:
+        await recover_processing()
+        worker_stop = asyncio.Event()
+        worker_task = asyncio.create_task(run_worker(app.state.embedder, settings, worker_stop))
+    try:
+        yield
+    finally:
+        if worker_stop is not None and worker_task is not None:
+            worker_stop.set()
+            await worker_task
+        await app.state.embedder.aclose()
+        await app.state.llm.aclose()
+        await app.state.limiter.close()
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 
 import pytest
@@ -48,7 +49,11 @@ async def _upload(
     visibility: str = "lab",
     collection: str = "knowledge",
     grant_emails: str | None = None,
+    process: bool = True,
 ) -> str:
+    from app.ingest_worker import process_next_pending
+    from app.main import app
+
     form = {
         "title": title,
         "text": body,
@@ -58,8 +63,13 @@ async def _upload(
     if grant_emails:
         form["grant_emails"] = grant_emails
     response = await client.post("/api/v1/documents", data=form, headers=headers)
-    assert response.status_code == 200, response.text
-    return str(response.json()["id"])
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "pending"
+    if process:
+        while await process_next_pending(app.state.embedder, app.state.settings) is not None:
+            pass
+    return str(payload["id"])
 
 
 def _events(raw: str) -> list[dict[str, object]]:
@@ -823,3 +833,128 @@ async def test_client_ip_forwarding_and_login_rate_limit_audit(
         app.state.settings.rate_limit_enabled = original_rate_limit
         app.state.limiter.redis = original_redis
         await fake_redis.aclose()
+
+
+async def test_pending_document_visibility_and_file_upload_workflow(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    from app.ingest_worker import process_next_pending
+    from app.main import app
+    from app.models import Document
+    from tests.test_ingest import make_pdf_bytes
+
+    admin = await _login(client, "admin@lab.local")
+    member = await _login(client, "member@lab.local")
+    outsider = await _login(client, "zhou@lab.local")
+
+    # 1. Both text and file -> 400 ambiguous_input
+    both_resp = await client.post(
+        "/api/v1/documents",
+        data={"title": "冲突输入", "text": "文字内容", "visibility": "lab", "collection": "knowledge"},
+        files={"file": ("note.txt", b"file content", "text/plain")},
+        headers=member,
+    )
+    assert both_resp.status_code == 400
+    assert both_resp.json()["error"]["code"] == "ambiguous_input"
+
+    # 2. Member uploads a lab-visible document without running the worker yet
+    doc_id = await _upload(
+        client,
+        member,
+        title="待处理实验记录",
+        body="这里是一段没有二级标题的纯文本实验记录，应该被当作 text 格式。",
+        visibility="lab",
+        process=False,
+    )
+
+    # Owner sees the pending document in list
+    member_list = (await client.get("/api/v1/documents", headers=member)).json()["documents"]
+    owner_doc = next((d for d in member_list if d["id"] == doc_id), None)
+    assert owner_doc is not None
+    assert owner_doc["status"] == "pending"
+    assert owner_doc["source_format"] == "text"
+
+    # Outsider does NOT see the pending document in list even though visibility is 'lab'
+    outsider_list = (await client.get("/api/v1/documents", headers=outsider)).json()["documents"]
+    assert all(d["id"] != doc_id for d in outsider_list)
+
+    # Process the pending document -> now outsider sees it with status='ready'
+    processed = await process_next_pending(app.state.embedder, app.state.settings)
+    assert str(processed) == doc_id
+
+    outsider_list_after = (await client.get("/api/v1/documents", headers=outsider)).json()["documents"]
+    outsider_doc = next((d for d in outsider_list_after if d["id"] == doc_id), None)
+    assert outsider_doc is not None
+    assert outsider_doc["status"] == "ready"
+    assert outsider_doc["error_code"] is None
+
+    # 3. Verify error_code is only exposed to owner and admin
+    maker = get_sessionmaker()
+    async with maker() as session:
+        await session.execute(
+            text("UPDATE documents SET error_code = 'timeout' WHERE id = CAST(:id AS uuid)"),
+            {"id": doc_id},
+        )
+        await session.commit()
+
+    member_doc_err = next(
+        d for d in (await client.get("/api/v1/documents", headers=member)).json()["documents"] if d["id"] == doc_id
+    )
+    admin_doc_err = next(
+        d for d in (await client.get("/api/v1/documents", headers=admin)).json()["documents"] if d["id"] == doc_id
+    )
+    outsider_doc_err = next(
+        d for d in (await client.get("/api/v1/documents", headers=outsider)).json()["documents"] if d["id"] == doc_id
+    )
+    assert member_doc_err["error_code"] == "timeout"
+    assert admin_doc_err["error_code"] == "timeout"
+    assert outsider_doc_err["error_code"] is None
+
+    # 4. Upload a 2-page PDF file and verify audit fields + citation heading
+    pdf_bytes = make_pdf_bytes(
+        [
+            "Page 1: General lab orientation and equipment safety overview.",
+            "Page 2: Cryogenic nitrogen tank valve pressure limit is 350 kPa.",
+        ]
+    )
+    pdf_resp = await client.post(
+        "/api/v1/documents",
+        data={"title": "低温手册", "visibility": "lab", "collection": "knowledge"},
+        files={"file": ("cryo-manual.pdf", pdf_bytes, "application/pdf")},
+        headers=member,
+    )
+    assert pdf_resp.status_code == 202, pdf_resp.text
+    pdf_id = pdf_resp.json()["id"]
+    while await process_next_pending(app.state.embedder, app.state.settings) is not None:
+        pass
+
+    async with maker() as session:
+        upload_audit = (
+            await session.execute(
+                text(
+                    "SELECT detail FROM audit_events WHERE action = 'document_upload' AND resource_id = :rid"
+                ),
+                {"rid": pdf_id},
+            )
+        ).scalar_one()
+        assert upload_audit["format"] == "pdf"
+        assert upload_audit["bytes"] == len(pdf_bytes)
+
+    search_resp = await client.post(
+        "/api/v1/search",
+        json={"query": "Cryogenic nitrogen tank valve pressure limit 350 kPa", "k": 5},
+        headers=member,
+    )
+    assert search_resp.status_code == 200
+    hits = search_resp.json()["hits"]
+    assert any(h["document_id"] == pdf_id and "第 2 页" in h["heading"] for h in hits)
+
+    # 5. Delete sets deleted_at without changing status to 'failed'
+    del_resp = await client.delete(f"/api/v1/documents/{pdf_id}", headers=member)
+    assert del_resp.status_code == 200
+    async with maker() as session:
+        deleted_doc = await session.get(Document, uuid.UUID(pdf_id))
+        assert deleted_doc is not None
+        assert deleted_doc.deleted_at is not None
+        assert deleted_doc.status == "ready"

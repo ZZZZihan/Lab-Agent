@@ -13,7 +13,7 @@ from app.db import dispose_engine, get_sessionmaker
 from app.models import User
 from app.rag.chunker import parse_front_matter
 from app.rag.embedder import build_embedder
-from app.rag.ingest import replace_source
+from app.rag.ingest import upsert_source
 
 DEMO_USERS = (
     ("admin@lab.local", "沈昭", "admin", "LabAgent-Demo-2026-Admin"),
@@ -70,7 +70,7 @@ async def seed() -> None:
             }
             corpus = _read_dir(Path(settings.corpus_dir))
             private = _read_dir(Path(settings.seed_only_dir))
-            count = await replace_source(
+            stats = await upsert_source(
                 session,
                 embedder=embedder,
                 owner_id=admin.id,
@@ -82,7 +82,7 @@ async def seed() -> None:
     finally:
         await embedder.aclose()
         await dispose_engine()
-    print(f"seeded {count} documents for 清衡实验室")
+    print(f"seeded {stats.total} documents for 清衡实验室")
 
 
 def main() -> None:

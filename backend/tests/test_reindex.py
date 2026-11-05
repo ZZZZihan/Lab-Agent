@@ -12,8 +12,9 @@ from app.acl import Principal
 from app.auth import hash_password
 from app.config import Settings, get_settings, reset_settings_cache
 from app.db import get_sessionmaker
+from app.ingest_worker import process_next_pending
 from app.models import User
-from app.rag.embedder import HashingEmbedder, OpenAICompatibleEmbedder
+from app.rag.embedder import Embedder, HashingEmbedder, OpenAICompatibleEmbedder
 from app.rag.index_meta import check_index, column_type, has_hnsw_index, read_meta
 from app.rag.ingest import ingest_text
 from app.rag.retrieve import search_knowledge
@@ -21,6 +22,11 @@ from app.reindex import apply_reindex
 from sqlalchemy import text
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
+
+
+async def _drain_pending(embedder: Embedder, settings: Settings) -> None:
+    while await process_next_pending(embedder, settings) is not None:
+        pass
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -124,6 +130,7 @@ async def test_reindex_lifecycle_across_dimensions_and_storage() -> None:
             assert await check_index(session, s_4096) == "mismatch"
             rebuilt_4096 = await apply_reindex(session, s_4096, emb_4096, if_needed=True)
             assert rebuilt_4096 is True
+            await _drain_pending(emb_4096, s_4096)
             assert await check_index(session, s_4096) == "ok"
             assert await column_type(session) == ("vector", 4096)
             assert await has_hnsw_index(session) is False
@@ -160,6 +167,7 @@ async def test_reindex_lifecycle_across_dimensions_and_storage() -> None:
         async with maker() as session:
             assert await check_index(session, s_1024) == "mismatch"
             await apply_reindex(session, s_1024, emb_1024)
+            await _drain_pending(emb_1024, s_1024)
             assert await check_index(session, s_1024) == "ok"
             assert await column_type(session) == ("vector", 1024)
             assert await has_hnsw_index(session) is True
@@ -198,6 +206,7 @@ async def test_reindex_lifecycle_across_dimensions_and_storage() -> None:
 
         async with maker() as session:
             await apply_reindex(session, s_3072_half, emb_3072)
+            await _drain_pending(emb_3072, s_3072_half)
             assert await check_index(session, s_3072_half) == "ok"
             assert await column_type(session) == ("halfvec", 3072)
             assert await has_hnsw_index(session) is True

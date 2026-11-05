@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import write_audit
 from app.config import Settings, get_settings
 from app.db import dispose_engine, get_sessionmaker
+from app.ingest_worker import process_next_pending
 from app.logging_conf import configure_logging, get_logger
 from app.rag.embedder import Embedder, build_embedder
 from app.rag.index_meta import (
@@ -22,7 +23,7 @@ from app.rag.index_meta import (
     has_hnsw_index,
     read_meta,
 )
-from app.rag.ingest import ALLOWED_STORAGES, reindex_all
+from app.rag.ingest import ALLOWED_STORAGES
 
 log = get_logger("reindex")
 
@@ -112,7 +113,19 @@ async def apply_reindex(
         },
     )
 
-    doc_count = await reindex_all(session, embedder, storage=storage)
+    res = await session.execute(
+        text(
+            """
+            UPDATE documents
+               SET status = 'pending',
+                   error_code = NULL,
+                   attempts = 0,
+                   updated_at = now()
+             WHERE deleted_at IS NULL
+            """
+        )
+    )
+    doc_count = int(getattr(res, "rowcount", 0) or 0)
     await session.commit()
 
     new_slug = settings.embedding_slug[:200]
@@ -161,6 +174,9 @@ async def _run(check_only: bool, apply: bool, if_needed: bool, force: bool) -> i
                         if_needed=if_needed,
                         force=force,
                     )
+                if rebuilt:
+                    while await process_next_pending(embedder, settings) is not None:
+                        pass
                 print(
                     f"rebuilt={str(rebuilt).lower()} fingerprint={settings.embedding_fingerprint} "
                     f"storage={settings.embedding_storage}({settings.embedding_dim}) "

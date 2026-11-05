@@ -53,12 +53,24 @@ class Document(Base):
             "collection IN ('knowledge', 'project', 'meeting', 'paper_note')",
             name="documents_collection",
         ),
-        CheckConstraint("status IN ('pending', 'ready', 'failed')", name="documents_status"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'ready', 'failed')",
+            name="documents_status",
+        ),
+        CheckConstraint(
+            "source_format IN ('markdown', 'text', 'pdf')",
+            name="documents_source_format",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     doc_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="upload")
+    source_format: Mapped[str] = mapped_column(String(16), default="markdown", server_default="markdown")
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     title: Mapped[str] = mapped_column(String(300))
     collection: Mapped[str] = mapped_column(String(32), default="knowledge")
     visibility: Mapped[str] = mapped_column(String(16), default="lab")
@@ -66,6 +78,9 @@ class Document(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     content_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

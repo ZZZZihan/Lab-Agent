@@ -136,7 +136,11 @@ class Settings(BaseSettings):
     questions_path: str = ""
     audit_retention_days: int = 180
     upload_dir: str = "./data/uploads"
-    max_upload_bytes: int = 5_000_000
+    max_upload_bytes: int = 5 * 1024 * 1024
+    max_document_chars: int = 300_000
+    ingest_worker_enabled: bool = True
+    ingest_max_attempts: int = 3
+    ingest_poll_seconds: float = 1.0
     otel_exporter: Literal["none", "console", "otlp"] = "none"
     otel_endpoint: str | None = None
     internal_proxy_secret: SecretStr | None = None
@@ -147,6 +151,8 @@ class Settings(BaseSettings):
     login_account_rate_window_seconds: int = 900
     chat_rate_limit: int = 30
     chat_rate_window_seconds: int = 60
+    upload_rate_limit: int = 30
+    upload_rate_window_seconds: int = 3600
     llm_capture: bool = False
     oidc_issuer: str | None = None
     oidc_audience: str | None = None

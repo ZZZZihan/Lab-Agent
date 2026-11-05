@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 _ENV = Path(__file__).resolve().parents[2] / ".env"
-_password = "labagent"
+_password = os.environ.get("POSTGRES_PASSWORD", "labagent")
 if _ENV.is_file():
     for line in _ENV.read_text(encoding="utf-8").splitlines():
         if line.startswith("POSTGRES_PASSWORD="):
@@ -38,6 +38,7 @@ os.environ["LLM_PROVIDER"] = "fake"
 os.environ["EMBEDDER"] = "hashing"
 os.environ["CORS_ORIGINS"] = "http://127.0.0.1:43123"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+os.environ["INGEST_WORKER_ENABLED"] = "false"
 os.environ["OTEL_EXPORTER"] = "none"
 
 from app.config import reset_settings_cache  # noqa: E402
@@ -47,8 +48,30 @@ reset_settings_cache()
 
 @pytest.fixture(scope="session", autouse=True)
 def migrated() -> None:
+    import asyncio
+
+    from app.db import dispose_engine, get_sessionmaker
+
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     command.upgrade(config, "head")
+
+    async def _reset_vector_col() -> None:
+        maker = get_sessionmaker()
+        async with maker() as session:
+            await session.execute(text("TRUNCATE chunks CASCADE"))
+            await session.execute(text("DROP INDEX IF EXISTS chunks_embedding_hnsw"))
+            await session.execute(
+                text("ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(512)")
+            )
+            await session.execute(
+                text(
+                    "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops)"
+                )
+            )
+            await session.commit()
+        await dispose_engine()
+
+    asyncio.run(_reset_vector_col())
 
 
 @pytest.fixture(autouse=True)
