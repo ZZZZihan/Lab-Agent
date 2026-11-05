@@ -288,10 +288,12 @@ async def test_hashing_embedder_async_protocol() -> None:
 
 async def test_bge_embedder_async_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], bool]] = []
+    init_kwargs: list[dict[str, object]] = []
 
     class FakeSentenceTransformer:
-        def __init__(self, model_name: str) -> None:
+        def __init__(self, model_name: str, **kwargs: object) -> None:
             self.model_name = model_name
+            init_kwargs.append({"model_name": model_name, **kwargs})
 
         def encode(self, texts: list[str], *, normalize_embeddings: bool = False) -> list[list[float]]:
             calls.append((list(texts), normalize_embeddings))
@@ -305,6 +307,7 @@ async def test_bge_embedder_async_protocol(monkeypatch: pytest.MonkeyPatch) -> N
     assert embedder.kind == "bge"
     assert embedder.name == "BAAI/bge-small-zh-v1.5"
     assert embedder.dim == 8
+    assert init_kwargs == [{"model_name": "BAAI/bge-small-zh-v1.5", "device": "cpu"}]
     assert calls == [(["维度检查"], True)]
 
     q_vec = await embedder.embed_query("查询")

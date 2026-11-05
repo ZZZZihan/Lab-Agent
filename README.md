@@ -47,7 +47,11 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 43124
 cd frontend && npm ci && API_INTERNAL_URL=http://127.0.0.1:43124 npm run dev -- --port 43123
 ```
 
-默认嵌入器是本地哈希嵌入，不下载模型。换成 `BAAI/bge-small-zh-v1.5` 时设置 `EMBEDDER=bge` 并安装 `uv sync --extra bge`。默认回答器是抽取式本地回退。设置 `LLM_PROVIDER=deepseek`（或 `openai` / `ollama` / `vllm`）以及相应的 `LLM_API_KEY`、`LLM_BASE_URL` 后，拒绝门槛仍然在模型调用之前。
+默认嵌入器是本地哈希嵌入（`EMBEDDER=hashing`），不下载模型，API 镜像也不打包 `torch` 或本地模型权重。真实模式下推荐使用宿主机 Ollama 提供 OpenAI 兼容嵌入接口（`EMBEDDER=openai_compatible`，例如运行 `qwen3-embedding:8b`）。
+- 如果要在宿主机上直接运行 API（不经过 Docker）并使用 Hugging Face `sentence-transformers` 加载本地 BGE 模型（如 `BAAI/bge-small-zh-v1.5`），需要先执行 `cd backend && uv sync --extra bge`，再设置 `EMBEDDER=bge`（可通过 `EMBEDDING_MODEL_VERSION` 固定 HF commit revision，通过 `EMBEDDING_QUERY_TEMPLATE` / `EMBEDDING_QUERY_INSTRUCTION` 和 `EMBEDDING_DOCUMENT_PREFIX` 配置查询指令模板与文档前缀）。
+- 用 Ollama 运行 bge 类模型（例如 `bge-m3`）**不需要**启用 `EMBEDDER=bge` 或安装 `bge` 额外依赖，直接设置 `EMBEDDER=openai_compatible` 并指向 Ollama 的 `/v1` 端点即可。
+
+默认回答器是抽取式本地回退。设置 `LLM_PROVIDER=deepseek`（或 `openai` / `ollama` / `vllm` / `openai_compatible`）以及相应的 `LLM_API_KEY`（或 `LLM_API_KEY_FILE`）、`LLM_BASE_URL` 后，拒绝门槛仍然在模型调用之前。
 
 评测：
 
