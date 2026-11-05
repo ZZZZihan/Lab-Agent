@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import app.agent as agent_mod
+import app.tools as tools_mod
 from alembic import command
 from alembic.config import Config
 from app.acl import Principal
@@ -407,12 +409,15 @@ async def _run(
                     created_group_ids.append(grp.id)
                 groups_by_slug[g_slug] = grp
 
-            # Snapshot existing seed ACLs and owners so we can restore them after the run
+            # Snapshot existing seed ACLs, owners, and visibilities so we can restore them after the run
             prior_seed_docs = list(
                 await session.scalars(select(Document).where(Document.source == "seed"))
             )
             prior_owner_by_key: dict[str, uuid.UUID] = {
                 doc.doc_key: doc.owner_id for doc in prior_seed_docs if doc.doc_key
+            }
+            prior_visibility_by_key: dict[str, str] = {
+                doc.doc_key: doc.visibility for doc in prior_seed_docs if doc.doc_key
             }
             prior_acl_by_key: dict[str, list[tuple[str, str, str]]] = {}
             for doc in prior_seed_docs:
@@ -523,6 +528,7 @@ async def _run(
                     )
 
                     emitted_events: list[dict[str, object]] = []
+                    agent_tool_hits: list[Mapping[str, Any]] = []
 
                     async def _emit(
                         event: dict[str, object],
@@ -530,21 +536,64 @@ async def _run(
                     ) -> None:
                         _sink.append(event)
 
-                    agent_out = await run_agent(
-                        session=session,
-                        user=actor,
-                        settings=agent_settings,
-                        embedder=embedder,
-                        llm=llm,
-                        question=question,
-                        emit=_emit,
-                        request_id=f"acl-{case['id']}",
-                        group_ids=frozen_groups,
-                    )
+                    orig_tools_sk = tools_mod.search_knowledge
+                    orig_agent_skb = agent_mod.search_knowledge_base
+
+                    async def _wrapped_tools_sk(
+                        *args: Any,
+                        _orig: Any = orig_tools_sk,
+                        _sink: list[Mapping[str, Any]] = agent_tool_hits,
+                        **kwargs: Any,
+                    ) -> Any:
+                        res_bundle = await _orig(*args, **kwargs)
+                        raw_hits = getattr(res_bundle, "hits", None)
+                        if isinstance(raw_hits, list):
+                            for h in raw_hits:
+                                if isinstance(h, Mapping):
+                                    _sink.append(h)
+                        return res_bundle
+
+                    async def _wrapped_agent_skb(
+                        *args: Any,
+                        _orig: Any = orig_agent_skb,
+                        _sink: list[Mapping[str, Any]] = agent_tool_hits,
+                        **kwargs: Any,
+                    ) -> Any:
+                        found_hits = await _orig(*args, **kwargs)
+                        if isinstance(found_hits, list):
+                            for h in found_hits:
+                                if isinstance(h, Mapping):
+                                    _sink.append(h)
+                        return found_hits
+
+                    tools_mod.search_knowledge = _wrapped_tools_sk  # type: ignore[assignment]
+                    agent_mod.search_knowledge_base = _wrapped_agent_skb  # type: ignore[assignment]
+
+                    try:
+                        agent_out = await run_agent(
+                            session=session,
+                            user=actor,
+                            settings=agent_settings,
+                            embedder=embedder,
+                            llm=llm,
+                            question=question,
+                            emit=_emit,
+                            request_id=f"acl-{case['id']}",
+                            group_ids=frozen_groups,
+                        )
+                    finally:
+                        tools_mod.search_knowledge = orig_tools_sk  # type: ignore[assignment]
+                        agent_mod.search_knowledge_base = orig_agent_skb  # type: ignore[assignment]
                     await session.commit()
 
                     combined_hits: list[Mapping[str, Any]] = list(bundle.hits)
                     seen_chunk_ids = {str(h.get("chunk_id")) for h in combined_hits}
+                    for h in agent_tool_hits:
+                        cid = str(h.get("chunk_id") or "")
+                        if not cid or cid not in seen_chunk_ids:
+                            combined_hits.append(h)
+                            if cid:
+                                seen_chunk_ids.add(cid)
                     for ev in emitted_events:
                         if ev.get("type") == "retrieval":
                             ev_hits = ev.get("hits")
@@ -604,7 +653,9 @@ async def _run(
                     select(User).where(User.email == "admin@lab.local")
                 )
                 for doc_key, doc in doc_by_key.items():
-                    doc.visibility = default_visibilities.get(doc_key, "lab")
+                    doc.visibility = prior_visibility_by_key.get(
+                        doc_key, default_visibilities.get(doc_key, "lab")
+                    )
                     if doc_key in prior_owner_by_key and prior_owner_by_key[doc_key] not in set(
                         created_user_ids
                     ):

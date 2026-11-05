@@ -206,3 +206,102 @@ async def test_run_acl_end_to_end_zero_leaks_and_leak_failure(
     finally:
         monkeypatch.delenv("CALIBRATION_DIR", raising=False)
         reset_settings_cache()
+
+
+async def test_run_acl_restores_prior_visibility_and_catches_agent_tail_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.db import dispose_engine, get_sessionmaker
+    from app.models import Document
+    from sqlalchemy import select
+
+    monkeypatch.setenv("CALIBRATION_DIR", str(tmp_path))
+    reset_settings_cache()
+    all_cases = load_acl_cases(allowed_doc_keys=valid_doc_keys())
+
+    try:
+        # First run seeds the database cleanly
+        await _run(commit=False, check=False, cases=all_cases)
+
+        # Modify a seed document's visibility prior to running _run again
+        maker = get_sessionmaker()
+        async with maker() as session:
+            onboarding_doc = await session.scalar(
+                select(Document).where(
+                    Document.source == "seed", Document.doc_key == "onboarding"
+                )
+            )
+            assert onboarding_doc is not None
+            onboarding_doc.visibility = "private"
+            await session.commit()
+        await dispose_engine()
+
+        # Run _run and verify that onboarding's custom pre-run visibility ("private") is restored
+        await _run(commit=False, check=False, cases=all_cases)
+        maker = get_sessionmaker()
+        async with maker() as session:
+            restored_doc = await session.scalar(
+                select(Document).where(
+                    Document.source == "seed", Document.doc_key == "onboarding"
+                )
+            )
+            assert restored_doc is not None
+            assert restored_doc.visibility == "private"
+        await dispose_engine()
+
+        # Now verify that a forbidden hit at position > 8 (index 10 of 12) returned only via
+        # the agent tool path (beyond _grade_node's [:8] SSE preview slice) is caught as a leak.
+        async def _clean_direct_search(*_args: Any, **_kwargs: Any) -> SearchBundle:
+            return SearchBundle(
+                hits=[],
+                coverage=0.0,
+                df={},
+                n_docs=1,
+                elapsed_ms=1.0,
+                mode="dense",
+            )
+
+        async def _tail_leaking_agent_search(*_args: Any, **_kwargs: Any) -> SearchBundle:
+            hits: list[dict[str, Any]] = []
+            for idx in range(12):
+                is_forbidden_tail = idx == 10
+                hits.append(
+                    {
+                        "chunk_id": f"tail-chunk-{idx}",
+                        "document_id": f"tail-doc-{idx}",
+                        "doc_key": "private-review" if is_forbidden_tail else "onboarding",
+                        "chunk_index": idx,
+                        "heading": f"段落-{idx}",
+                        "title": "导师私下批注" if is_forbidden_tail else "入组指南",
+                        "collection": "knowledge",
+                        "content": "内容",
+                        "tokens": ["内容"],
+                        "cosine": 0.10,
+                        "key": f"k-{idx}",
+                    }
+                )
+            return SearchBundle(
+                hits=hits,  # type: ignore[arg-type]
+                coverage=0.0,
+                df={},
+                n_docs=12,
+                elapsed_ms=1.0,
+                mode="dense",
+            )
+
+        monkeypatch.setattr("evals.run_acl.search_knowledge", _clean_direct_search)
+        monkeypatch.setattr("app.tools.search_knowledge", _tail_leaking_agent_search)
+
+        with pytest.raises(SystemExit, match="ACL leakage detected"):
+            await _run(commit=False, check=False, cases=all_cases)
+
+        s = get_settings()
+        runtime_report_path = tmp_path / f"acl-{s.embedding_slug}.json"
+        tail_report = json.loads(runtime_report_path.read_text(encoding="utf-8"))
+        assert tail_report["leaked_cases"] > 0
+        assert tail_report["retrieval_leaks"] > 0
+        assert "private-review" in tail_report["cases"][0]["leaked_retrieval_keys"]
+    finally:
+        monkeypatch.delenv("CALIBRATION_DIR", raising=False)
+        reset_settings_cache()
+
