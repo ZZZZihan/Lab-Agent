@@ -57,6 +57,12 @@ def _extract_pdf(payload: bytes) -> str:
     return "\f".join(pages_text)
 
 
+def extract_pdf_text(source: bytes | Path | str) -> str:
+    """Extract page-joined UTF-8 text ('\\f'-separated) from PDF bytes or a file path."""
+    payload = Path(source).read_bytes() if isinstance(source, (Path, str)) else source
+    return _extract_pdf(payload)
+
+
 def extract_upload(filename: str, payload: bytes, max_chars: int) -> Extracted:
     suffix = Path(filename or "").suffix.lower()
     if suffix in {".md", ".markdown"}:

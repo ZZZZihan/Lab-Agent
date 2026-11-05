@@ -6,6 +6,7 @@ import hashlib
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from app.config import get_settings
 from app.models import Chunk, Document, DocumentACL
 from app.rag.chunker import chunk_document, parse_front_matter
 from app.rag.embedder import Embedder
+from app.rag.extract import extract_pdf_text
 from app.rag.index_meta import column_type
 from app.rag.tokenize import tokenize
 
@@ -321,6 +323,7 @@ async def upsert_source(
         title = meta.get("title") or key or "未命名"
         collection = meta.get("collection") or "knowledge"
         visibility = meta.get("visibility") or "lab"
+        source_format = meta.get("source_format") or "markdown"
         grant_ids = (grants or {}).get(key or "", [])
         grant_gids = (group_grants or {}).get(key or "", [])
         grant_rnames = (role_grants or {}).get(key or "", [])
@@ -336,7 +339,7 @@ async def upsert_source(
                 owner_id=owner_id,
                 title=title,
                 text=body,
-                source_format="markdown",
+                source_format=source_format,
                 collection=collection,
                 visibility=visibility,
                 source=source,
@@ -374,13 +377,18 @@ async def upsert_source(
                 )
             ).scalar_one()
         )
-        if existing.content_sha256 == sha and existing.status == "ready" and chunk_count > 0:
+        if (
+            existing.content_sha256 == sha
+            and existing.source_format == source_format
+            and existing.status == "ready"
+            and chunk_count > 0
+        ):
             unchanged += 1
             await session.flush()
         else:
             existing.content_text = body
             existing.content_sha256 = sha
-            existing.source_format = "markdown"
+            existing.source_format = source_format
             existing.status = "pending"
             existing.error_code = None
             await index_document(
@@ -433,12 +441,103 @@ async def replace_source(
             collection=meta.get("collection") or "knowledge",
             visibility=meta.get("visibility") or "lab",
             source=source,
+            source_format=meta.get("source_format") or "markdown",
             doc_key=key,
             grant_user_ids=(grants or {}).get(key or "", []),
             storage=resolved_storage,
         )
         count += 1
     return count
+
+
+CORPUS_FILE_META: dict[str, dict[str, str]] = {
+    "manual-cryo-cooling": {
+        "key": "manual-cryo-cooling",
+        "title": "机房精密液冷CDU巡检与告警处置手册",
+        "collection": "knowledge",
+        "visibility": "lab",
+    },
+    "manual-eye-tracker": {
+        "key": "manual-eye-tracker",
+        "title": "认知人因室 Tobii Pro 眼动仪校准与采样手册",
+        "collection": "knowledge",
+        "visibility": "lab",
+    },
+    "manual-struct-scanner": {
+        "key": "manual-struct-scanner",
+        "title": "具身智能室结构光三维扫描仪操作手册",
+        "collection": "knowledge",
+        "visibility": "lab",
+    },
+    "policy-lab-duty": {
+        "key": "policy-lab-duty",
+        "title": "清衡实验室值日与公共区域巡查简则",
+        "collection": "knowledge",
+        "visibility": "lab",
+    },
+    "project-polaris": {
+        "key": "project-polaris",
+        "title": "北极星项目：检索拒答校准与证据边际轻量化方案纪要",
+        "collection": "project",
+        "visibility": "lab",
+    },
+    "meeting-flash-sync": {
+        "key": "meeting-flash-sync",
+        "title": "周五下午工程快闪同步会备忘录",
+        "collection": "meeting",
+        "visibility": "lab",
+    },
+    "paper-chunk-overlap": {
+        "key": "paper-chunk-overlap",
+        "title": "论文札记：中文长文档无标题切块与重叠窗口笔记",
+        "collection": "paper_note",
+        "visibility": "lab",
+    },
+    "manual-bmc-ipmi": {
+        "key": "manual-bmc-ipmi",
+        "title": "带外管理网 BMC 与串口控制台急救说明",
+        "collection": "knowledge",
+        "visibility": "lab",
+    },
+}
+
+
+def read_corpus_file(path: Path) -> tuple[dict[str, str], str]:
+    suffix = path.suffix.lower()
+    defaults = CORPUS_FILE_META.get(path.stem, {})
+    if suffix in {".md", ".markdown"}:
+        meta, body = parse_front_matter(path.read_text(encoding="utf-8"))
+        source_format = "markdown"
+    elif suffix == ".txt":
+        meta, body = parse_front_matter(path.read_text(encoding="utf-8"))
+        source_format = "text"
+    elif suffix == ".pdf":
+        raw_text = extract_pdf_text(path)
+        meta, body = parse_front_matter(raw_text)
+        source_format = "pdf"
+    else:
+        raise ValueError(f"Unsupported corpus file extension: {path}")
+    first_line = next(
+        (ln.strip().lstrip("#").strip() for ln in body.splitlines() if ln.strip()),
+        path.stem,
+    )
+    merged: dict[str, str] = {
+        "key": meta.get("key") or defaults.get("key") or path.stem,
+        "title": meta.get("title") or defaults.get("title") or first_line,
+        "collection": meta.get("collection") or defaults.get("collection") or "knowledge",
+        "visibility": meta.get("visibility") or defaults.get("visibility") or "lab",
+        "source_format": meta.get("source_format") or source_format,
+    }
+    return merged, body
+
+
+def read_corpus_dir(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
+    files = sorted(
+        p
+        for p in corpus_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+    )
+    return [read_corpus_file(file) for file in files]
 
 
 def load_markdown(path_text: str) -> tuple[dict[str, str], str]:
