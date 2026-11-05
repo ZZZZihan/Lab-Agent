@@ -6,11 +6,16 @@ import re
 
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)")
-_LANDLINE = re.compile(r"(?<![A-Za-z\d.\-])0\d{2,3}-?\d{7,8}(?![A-Za-z\d.\-])")
+_LANDLINE = re.compile(
+    r"(?<![A-Za-z\d.\-])0\d{2,3}-?\d{7,8}(?![A-Za-z\d\-]|\.[A-Za-z\d])"
+)
 _CN_ID = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _CN_ID_BIRTH = re.compile(r"^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$")
-_BANK_CARD = re.compile(r"(?<![\d.])\d{16,19}(?![\d.])")
+_BANK_CARD = re.compile(r"(?<![\d.])\d{16,19}(?!\d|\.\d)")
 _PASSPORT = re.compile(r"(?<![A-Za-z\d\-])[EGDSP]\d{8}(?![A-Za-z\d])")
+_UUID = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
 
 
 def luhn_ok(digits: str) -> bool:
@@ -28,7 +33,10 @@ def luhn_ok(digits: str) -> bool:
 
 
 def contains_email_or_phone(text: str) -> bool:
-    return bool(_EMAIL.search(text) or _PHONE.search(text) or _LANDLINE.search(text))
+    if _EMAIL.search(text):
+        return True
+    scrubbed = _UUID.sub("", text)
+    return bool(_PHONE.search(scrubbed) or _LANDLINE.search(scrubbed))
 
 
 def redact_text(text: str) -> tuple[str, int]:

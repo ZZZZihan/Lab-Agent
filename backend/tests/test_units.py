@@ -100,6 +100,14 @@ def test_redacts_contact_identifiers() -> None:
     assert cleaned.count("[REDACTED_CARD]") == 2
     assert cleaned.count("[REDACTED_PASSPORT]") == 3
 
+    for punct in (".", "!", "?"):
+        card_out, card_n = redact_text(f"Card: 4532015112830366{punct}")
+        assert card_n == 1
+        assert card_out == f"Card: [REDACTED_CARD]{punct}"
+        landline_out, landline_n = redact_text(f"Call 010-62785432{punct}")
+        assert landline_n == 1
+        assert landline_out == f"Call [REDACTED_PHONE]{punct}"
+
 
 def test_redact_false_positives_and_v1_corpus() -> None:
     from app.config import REDACTION_VERSION
@@ -112,8 +120,9 @@ def test_redact_false_positives_and_v1_corpus() -> None:
     # - 9-digit / lowercase / hyphenated passport-like tokens (E123456789, e12345678, E-12345678)
     benign = (
         "内网网段 10.0.0.0/16 与 192.168.1.1/24，日期 2026-09-12 与 2026-11-05，"
-        "代号 HX-17，版本 v0.10.1234567 与 0.8.0-pg16，会议室号 883-102-447，"
-        "非 Luhn 16 位单号 4532015112830367，提交哈希 e12345678 与编号 E123456789、E-12345678。"
+        "代号 HX-17，版本 v0.10.1234567、0101234567.8 与 0.8.0-pg16，会议室号 883-102-447，"
+        "非 Luhn 16 位单号 4532015112830367，浮点序列 4532015112830366.1，"
+        "提交哈希 e12345678 与编号 E123456789、E-12345678。"
     )
     cleaned_benign, count_benign = redact_text(benign)
     assert count_benign == 0
@@ -151,11 +160,20 @@ def test_audit_rejects_prompt_text() -> None:
         sanitize_detail({"items": ["ok", "user@example.org"]})
     with pytest.raises(AuditRejected):
         sanitize_detail({"items": ["ok", "+86 13800138000"]})
+    with pytest.raises(AuditRejected):
+        sanitize_detail({"items": ["ok", "010-62785432"]})
     sanitize_detail(
         {
             "model": "fake-grounded-v1",
             "prompt_tokens": 12,
-            "hit_ids": ["abc", "01234567-89ab-cdef-0123-456789abcdef"],
+            "doc_id": "01234567-89ab-4def-8123-a13812345678",
+            "chunk_ref": "01234567-89ab-4def-8123-010627854321",
+            "hit_ids": [
+                "abc",
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "01234567-89ab-4def-8123-a13812345678",
+                "01234567-89ab-4def-8123-010627854321",
+            ],
         }
     )
 

@@ -69,6 +69,16 @@ def normalize_audit_value(value: Any) -> Any:
     return value
 
 
+def _is_uuid(value: str) -> bool:
+    if len(value) != 36:
+        return False
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
 def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     for key, value in (detail or {}).items():
@@ -77,7 +87,7 @@ def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(value, str):
             if len(value) > 200:
                 raise AuditRejected("audit string too long")
-            if contains_email_or_phone(value):
+            if not _is_uuid(value) and contains_email_or_phone(value):
                 raise AuditRejected("audit string value contains email or phone")
         if isinstance(value, list):
             if len(value) > 80:
@@ -88,7 +98,7 @@ def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
                 if isinstance(item, str):
                     if len(item) > 80:
                         raise AuditRejected("audit list item too long")
-                    if contains_email_or_phone(item):
+                    if not _is_uuid(item) and contains_email_or_phone(item):
                         raise AuditRejected("audit list item contains email or phone")
         elif isinstance(value, dict):
             raise AuditRejected("nested audit objects are not allowed")
