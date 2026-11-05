@@ -1480,3 +1480,197 @@ async def test_project_groups_api_upload_grants_and_seed_acl(
     assert (await client.get(f"/api/v1/documents/{helios_doc_id}", headers=zhou)).status_code == 404
 
 
+async def test_document_acl_edit_revokes_chunk_retrieval_immediately(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from app.ingest_worker import process_next_pending
+    from app.main import app
+
+    del people
+    admin = await _login(client, "admin@lab.local")
+    linke = await _login(client, "member@lab.local")
+    zhou = await _login(client, "zhou@lab.local")
+    viewer = await _login(client, "viewer@lab.local")
+
+    # Admin creates a project group 'orion' and adds Zhou
+    grp_resp = await client.post(
+        "/api/v1/admin/groups",
+        json={"slug": "orion", "name": "猎户座项目组"},
+        headers=admin,
+    )
+    assert grp_resp.status_code == 200, grp_resp.text
+    orion_id = grp_resp.json()["id"]
+    zhou_id = (await client.get("/api/v1/auth/me", headers=zhou)).json()["id"]
+    assert (
+        await client.put(
+            f"/api/v1/admin/groups/{orion_id}/members",
+            json={"user_ids": [zhou_id]},
+            headers=admin,
+        )
+    ).status_code == 200
+
+    # Linke (owner) uploads a lab-visible document first
+    up_resp = await client.post(
+        "/api/v1/documents",
+        data={
+            "title": "猎户座低温超导腔参数",
+            "text": "## 谐振频率\n猎户座超导谐振腔的基准频率是 9.41 GHz，品质因数达到 3e10。",
+            "collection": "project",
+            "visibility": "lab",
+        },
+        headers=linke,
+    )
+    assert up_resp.status_code == 202, up_resp.text
+    doc_id = up_resp.json()["id"]
+    while await process_next_pending(app.state.embedder, app.state.settings) is not None:
+        pass
+
+    # Owner and admin see the extra 'acl' field on GET /documents/{id}; non-owner reader does not
+    owner_detail = (await client.get(f"/api/v1/documents/{doc_id}", headers=linke)).json()
+    assert owner_detail["acl"] == {
+        "visibility": "lab",
+        "user_emails": [],
+        "group_slugs": [],
+        "roles": [],
+    }
+    admin_detail = (await client.get(f"/api/v1/documents/{doc_id}", headers=admin)).json()
+    assert "acl" in admin_detail
+
+    zhou_detail = (await client.get(f"/api/v1/documents/{doc_id}", headers=zhou)).json()
+    assert "acl" not in zhou_detail
+
+    # Non-owner / non-admin attempting PUT /documents/{id}/acl gets 404 (not_found)
+    forbidden_acl = await client.put(
+        f"/api/v1/documents/{doc_id}/acl",
+        json={
+            "visibility": "private",
+            "user_emails": [],
+            "group_slugs": [],
+            "roles": [],
+        },
+        headers=zhou,
+    )
+    assert forbidden_acl.status_code == 404
+    assert forbidden_acl.json()["error"]["code"] == "not_found"
+
+    # Owner updates ACL to restricted with user_emails=[viewer], group_slugs=['orion'], roles=['viewer']
+    put_restricted = await client.put(
+        f"/api/v1/documents/{doc_id}/acl",
+        json={
+            "visibility": "restricted",
+            "user_emails": ["viewer@lab.local"],
+            "group_slugs": ["orion"],
+            "roles": ["viewer"],
+        },
+        headers=linke,
+    )
+    assert put_restricted.status_code == 200, put_restricted.text
+    assert put_restricted.json()["acl"] == {
+        "visibility": "restricted",
+        "user_emails": ["viewer@lab.local"],
+        "group_slugs": ["orion"],
+        "roles": ["viewer"],
+    }
+
+    # Both Zhou (via group 'orion') and Viewer (via user/role grant) can retrieve the document's chunks
+    zhou_hits_before = (
+        await client.post(
+            "/api/v1/search",
+            json={"query": "9.41 GHz 猎户座超导谐振腔", "k": 5},
+            headers=zhou,
+        )
+    ).json()["hits"]
+    assert any(h["document_id"] == doc_id for h in zhou_hits_before)
+
+    viewer_hits_before = (
+        await client.post(
+            "/api/v1/search",
+            json={"query": "9.41 GHz 猎户座超导谐振腔", "k": 5},
+            headers=viewer,
+        )
+    ).json()["hits"]
+    assert any(h["document_id"] == doc_id for h in viewer_hits_before)
+
+    # Owner changes document visibility to 'private' via PUT /documents/{id}/acl
+    put_private = await client.put(
+        f"/api/v1/documents/{doc_id}/acl",
+        json={
+            "visibility": "private",
+            "user_emails": [],
+            "group_slugs": [],
+            "roles": [],
+        },
+        headers=linke,
+    )
+    assert put_private.status_code == 200, put_private.text
+    assert put_private.json()["visibility"] == "private"
+    assert put_private.json()["acl"] == {
+        "visibility": "private",
+        "user_emails": [],
+        "group_slugs": [],
+        "roles": [],
+    }
+
+    # Previously authorized users (Zhou and Viewer) immediately cannot retrieve chunks or read the doc
+    zhou_hits_after = (
+        await client.post(
+            "/api/v1/search",
+            json={"query": "9.41 GHz 猎户座超导谐振腔", "k": 5},
+            headers=zhou,
+        )
+    ).json()["hits"]
+    assert all(h["document_id"] != doc_id for h in zhou_hits_after)
+
+    viewer_hits_after = (
+        await client.post(
+            "/api/v1/search",
+            json={"query": "9.41 GHz 猎户座超导谐振腔", "k": 5},
+            headers=viewer,
+        )
+    ).json()["hits"]
+    assert all(h["document_id"] != doc_id for h in viewer_hits_after)
+
+    assert (await client.get(f"/api/v1/documents/{doc_id}", headers=zhou)).status_code == 404
+    assert (await client.get(f"/api/v1/documents/{doc_id}", headers=viewer)).status_code == 404
+
+    # Owner and admin can still retrieve chunks and read the document
+    owner_hits_after = (
+        await client.post(
+            "/api/v1/search",
+            json={"query": "9.41 GHz 猎户座超导谐振腔", "k": 5},
+            headers=linke,
+        )
+    ).json()["hits"]
+    assert any(h["document_id"] == doc_id for h in owner_hits_after)
+    assert (await client.get(f"/api/v1/documents/{doc_id}", headers=linke)).status_code == 200
+    assert (await client.get(f"/api/v1/documents/{doc_id}", headers=admin)).status_code == 200
+
+    # Verify acl_changed audit events have detail {"visibility": v, "users": n, "groups": m, "roles": k}
+    maker = get_sessionmaker()
+    async with maker() as session:
+        acl_audits = list(
+            await session.execute(
+                text(
+                    "SELECT resource_id, detail FROM audit_events "
+                    "WHERE action = 'acl_changed' ORDER BY id ASC"
+                )
+            )
+        )
+    assert len(acl_audits) == 2
+    assert acl_audits[0][0] == doc_id
+    assert acl_audits[0][1] == {
+        "visibility": "restricted",
+        "users": 1,
+        "groups": 1,
+        "roles": 1,
+    }
+    assert acl_audits[1][0] == doc_id
+    assert acl_audits[1][1] == {
+        "visibility": "private",
+        "users": 0,
+        "groups": 0,
+        "roles": 0,
+    }
+
+
+
