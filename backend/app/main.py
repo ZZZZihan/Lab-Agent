@@ -17,6 +17,7 @@ from app.db import dispose_engine, get_sessionmaker
 from app.ingest_worker import recover_processing, run_worker
 from app.llm import build_llm
 from app.logging_conf import configure_logging, get_logger
+from app.maintenance import run_maintenance_worker
 from app.otel import setup_telemetry
 from app.rag.embedder import build_embedder
 from app.rag.index_meta import check_index, read_meta
@@ -115,9 +116,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await recover_processing()
         worker_stop = asyncio.Event()
         worker_task = asyncio.create_task(run_worker(app.state.embedder, settings, worker_stop))
+    maintenance_stop: asyncio.Event | None = None
+    maintenance_task: asyncio.Task[None] | None = None
+    if settings.maintenance_interval_seconds > 0 and settings.app_env != "test":
+        maintenance_stop = asyncio.Event()
+        maintenance_task = asyncio.create_task(
+            run_maintenance_worker(settings, maintenance_stop)
+        )
     try:
         yield
     finally:
+        if maintenance_stop is not None and maintenance_task is not None:
+            maintenance_stop.set()
+            await maintenance_task
         if worker_stop is not None and worker_task is not None:
             worker_stop.set()
             await worker_task

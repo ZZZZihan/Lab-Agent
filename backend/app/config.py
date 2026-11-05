@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     seed_only_dir: str = ""
     questions_path: str = ""
     audit_retention_days: int = 180
+    deleted_document_retention_days: int = 30
+    message_retention_days: int = 180
+    maintenance_interval_seconds: int = 86400
     upload_dir: str = "./data/uploads"
     max_upload_bytes: int = 5 * 1024 * 1024
     max_document_chars: int = 300_000
@@ -274,6 +277,12 @@ class Settings(BaseSettings):
             raise RuntimeError("LLM_CAPTURE is only allowed when APP_ENV=test")
         if not 1 <= self.audit_retention_days <= 3650:
             raise RuntimeError("AUDIT_RETENTION_DAYS must be between 1 and 3650")
+        if not 1 <= self.deleted_document_retention_days <= 3650:
+            raise RuntimeError("DELETED_DOCUMENT_RETENTION_DAYS must be between 1 and 3650")
+        if not 1 <= self.message_retention_days <= 3650:
+            raise RuntimeError("MESSAGE_RETENTION_DAYS must be between 1 and 3650")
+        if self.maintenance_interval_seconds < 0:
+            raise RuntimeError("MAINTENANCE_INTERVAL_SECONDS cannot be negative")
         if self.oidc_issuer and not self.oidc_audience:
             raise RuntimeError("OIDC_AUDIENCE is required when OIDC_ISSUER is set")
         if self.app_env == "test" and "rate_limit_enabled" not in self.model_fields_set:

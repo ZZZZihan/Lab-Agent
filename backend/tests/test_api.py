@@ -1671,6 +1671,358 @@ async def test_document_acl_edit_revokes_chunk_retrieval_immediately(
         "groups": 0,
         "roles": 0,
     }
+async def test_purge_document_scrubs_chunks_acl_and_message_citations_and_delete_conversation(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    linke = await _login(client, "member@lab.local")
+    zhou = await _login(client, "zhou@lab.local")
+
+    nonce = "NONCEPURGE99482716"
+    doc_id = await _upload(
+        client,
+        linke,
+        title=f"保密实验记录-{nonce}",
+        body=f"## 样品参数\n样品批次 {nonce} 的退火温度设定为 725 摄氏度。",
+        visibility="restricted",
+        grant_emails="zhou@lab.local",
+    )
+
+    # Trigger grounded chat that cites the uploaded document so a message stores the nonce in citations
+    chat_resp = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": f"样品批次 {nonce} 的退火温度是多少？"},
+        headers=linke,
+    )
+    assert chat_resp.status_code == 200
+    events = _events(chat_resp.text)
+    done = next(ev for ev in events if ev["type"] == "done")
+    assert done["refused"] is False
+    conversation_id = str(done["conversation_id"])
+
+    conv_before = (
+        await client.get(f"/api/v1/conversations/{conversation_id}", headers=linke)
+    ).json()
+    assistant_msgs_before = [m for m in conv_before["messages"] if m["role"] == "assistant"]
+    assert len(assistant_msgs_before) == 1
+    assert any(
+        c["document_id"] == doc_id and nonce in c["excerpt"] and nonce in c["title"]
+        for c in assistant_msgs_before[0]["citations"]
+    )
+
+    # Non-owner / non-admin cannot purge
+    forbidden_purge = await client.delete(
+        f"/api/v1/documents/{doc_id}?purge=true", headers=zhou
+    )
+    assert forbidden_purge.status_code == 403
+
+    # Owner purges the document via DELETE /documents/{id}?purge=true
+    purge_resp = await client.delete(
+        f"/api/v1/documents/{doc_id}?purge=true", headers=linke
+    )
+    assert purge_resp.status_code == 200, purge_resp.text
+    assert purge_resp.json() == {"status": "purged", "messages_scrubbed": 1}
+
+    # Verify full-text / substring search across documents, chunks, document_acl, and messages.citations finds nothing
+    maker = get_sessionmaker()
+    async with maker() as session:
+        doc_hits = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM documents "
+                    "WHERE id = CAST(:id AS uuid) OR title ILIKE :pat OR content_text ILIKE :pat"
+                ),
+                {"id": doc_id, "pat": f"%{nonce}%"},
+            )
+        ).scalar_one()
+        assert int(doc_hits) == 0
+
+        chunk_hits = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM chunks "
+                    "WHERE document_id = CAST(:id AS uuid) "
+                    "OR heading ILIKE :pat OR content ILIKE :pat "
+                    "OR content_tsv @@ plainto_tsquery('simple', :nonce)"
+                ),
+                {"id": doc_id, "pat": f"%{nonce}%", "nonce": nonce},
+            )
+        ).scalar_one()
+        assert int(chunk_hits) == 0
+
+        acl_hits = (
+            await session.execute(
+                text("SELECT count(*) FROM document_acl WHERE document_id = CAST(:id AS uuid)"),
+                {"id": doc_id},
+            )
+        ).scalar_one()
+        assert int(acl_hits) == 0
+
+        citation_hits = (
+            await session.execute(
+                text("SELECT count(*) FROM messages WHERE citations::text ILIKE :pat"),
+                {"pat": f"%{nonce}%"},
+            )
+        ).scalar_one()
+        assert int(citation_hits) == 0
+
+        purge_audit = (
+            await session.execute(
+                text(
+                    "SELECT resource_id, detail FROM audit_events "
+                    "WHERE action = 'document_purged' ORDER BY id DESC LIMIT 1"
+                )
+            )
+        ).first()
+        assert purge_audit is not None
+        assert purge_audit[0] == doc_id
+        assert purge_audit[1] == {"messages_scrubbed": 1}
+
+    # Verify the citation element on the conversation message has been scrubbed in-place
+    conv_after = (
+        await client.get(f"/api/v1/conversations/{conversation_id}", headers=linke)
+    ).json()
+    assistant_msgs_after = [m for m in conv_after["messages"] if m["role"] == "assistant"]
+    matching_citations = [
+        c for c in assistant_msgs_after[0]["citations"] if c["document_id"] == doc_id
+    ]
+    assert len(matching_citations) >= 1
+    for cit in matching_citations:
+        assert cit["excerpt"] == "[已删除]"
+        assert cit["title"] == "[已删除文档]"
+
+    # DELETE /conversations/{id}: another user gets 404; owner deletes own conversation (cascading messages)
+    other_del = await client.delete(
+        f"/api/v1/conversations/{conversation_id}", headers=zhou
+    )
+    assert other_del.status_code == 404
+
+    own_del = await client.delete(
+        f"/api/v1/conversations/{conversation_id}", headers=linke
+    )
+    assert own_del.status_code == 200
+    assert own_del.json() == {"status": "deleted"}
+    assert (
+        await client.get(f"/api/v1/conversations/{conversation_id}", headers=linke)
+    ).status_code == 404
+
+
+async def test_maintenance_task_audit_retention(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    import fakeredis.aioredis
+    from app.config import get_settings
+    from app.maintenance import run_maintenance_once
+    from app.models import AuditEvent
+    from sqlalchemy import select
+
+    del client, people
+    settings = get_settings()
+    maker = get_sessionmaker()
+    async with maker() as session:
+        old_ev = AuditEvent(
+            created_at=datetime.now(UTC) - timedelta(days=settings.audit_retention_days + 5),
+            actor_id=None,
+            action="old_audit_event",
+            detail={},
+        )
+        fresh_ev = AuditEvent(
+            created_at=datetime.now(UTC) - timedelta(days=2),
+            actor_id=None,
+            action="fresh_audit_event",
+            detail={},
+        )
+        session.add_all([old_ev, fresh_ev])
+        await session.commit()
+
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    counts = await run_maintenance_once(settings, redis_client=fake_redis)
+    assert counts is not None
+    assert counts["audit_deleted"] == 1
+
+    # Second call while lock is held returns None without running again
+    locked_call = await run_maintenance_once(settings, redis_client=fake_redis)
+    assert locked_call is None
+
+    async with maker() as session:
+        remaining_actions = list(
+            await session.scalars(select(AuditEvent.action))
+        )
+    assert "old_audit_event" not in remaining_actions
+    assert "fresh_audit_event" in remaining_actions
+    assert "maintenance_run" in remaining_actions
+
+
+async def test_maintenance_task_purge_expired_soft_deleted_documents(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    import fakeredis.aioredis
+    from app.config import get_settings
+    from app.maintenance import run_maintenance_once
+    from app.models import Conversation, Document, Message
+
+    del people
+    linke = await _login(client, "member@lab.local")
+    nonce_expired = "EXPIREDSOFTDEL8821"
+    nonce_recent = "RECENTSOFTDEL8822"
+
+    expired_doc_id = await _upload(
+        client,
+        linke,
+        title=f"过期软删文档-{nonce_expired}",
+        body=f"## 章节\n过期软删正文 {nonce_expired}",
+        visibility="lab",
+    )
+    recent_doc_id = await _upload(
+        client,
+        linke,
+        title=f"近期软删文档-{nonce_recent}",
+        body=f"## 章节\n近期软删正文 {nonce_recent}",
+        visibility="lab",
+    )
+
+    maker = get_sessionmaker()
+    settings = get_settings()
+    linke_id = uuid.UUID((await client.get("/api/v1/auth/me", headers=linke)).json()["id"])
+
+    async with maker() as session:
+        exp_doc = await session.get(Document, uuid.UUID(expired_doc_id))
+        rec_doc = await session.get(Document, uuid.UUID(recent_doc_id))
+        assert exp_doc is not None and rec_doc is not None
+        exp_doc.deleted_at = datetime.now(UTC) - timedelta(
+            days=settings.deleted_document_retention_days + 2
+        )
+        rec_doc.deleted_at = datetime.now(UTC) - timedelta(days=5)
+
+        conv = Conversation(user_id=linke_id, title="测试会话")
+        session.add(conv)
+        await session.flush()
+        msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content="引用了过期软删文档",
+            refused=False,
+            citations=[
+                {
+                    "document_id": expired_doc_id,
+                    "title": f"过期软删文档-{nonce_expired}",
+                    "excerpt": f"过期软删正文 {nonce_expired}",
+                }
+            ],
+        )
+        session.add(msg)
+        await session.commit()
+        msg_id = msg.id
+
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    counts = await run_maintenance_once(settings, redis_client=fake_redis)
+    assert counts is not None
+    assert counts["documents_purged"] == 1
+    assert counts["messages_scrubbed"] == 1
+
+    async with maker() as session:
+        assert await session.get(Document, uuid.UUID(expired_doc_id)) is None
+        assert await session.get(Document, uuid.UUID(recent_doc_id)) is not None
+        scrubbed_msg = await session.get(Message, msg_id)
+        assert scrubbed_msg is not None
+        assert scrubbed_msg.citations == [
+            {
+                "document_id": expired_doc_id,
+                "title": "[已删除文档]",
+                "excerpt": "[已删除]",
+            }
+        ]
+
+
+async def test_maintenance_task_delete_expired_messages(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    import fakeredis.aioredis
+    from app.config import get_settings
+    from app.maintenance import run_maintenance_once
+    from app.models import Conversation, Message
+
+    del people
+    linke = await _login(client, "member@lab.local")
+    linke_id = uuid.UUID((await client.get("/api/v1/auth/me", headers=linke)).json()["id"])
+    settings = get_settings()
+    maker = get_sessionmaker()
+
+    async with maker() as session:
+        conv = Conversation(user_id=linke_id, title="消息保留期会话")
+        session.add(conv)
+        await session.flush()
+        old_msg = Message(
+            conversation_id=conv.id,
+            role="user",
+            content="超期旧消息",
+            refused=False,
+            citations=[],
+            created_at=datetime.now(UTC) - timedelta(days=settings.message_retention_days + 3),
+        )
+        new_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content="近期新消息",
+            refused=False,
+            citations=[],
+            created_at=datetime.now(UTC) - timedelta(days=3),
+        )
+        session.add_all([old_msg, new_msg])
+        await session.commit()
+        old_msg_id = old_msg.id
+        new_msg_id = new_msg.id
+
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    counts = await run_maintenance_once(settings, redis_client=fake_redis)
+    assert counts is not None
+    assert counts["messages_deleted"] == 1
+
+    async with maker() as session:
+        assert await session.get(Message, old_msg_id) is None
+        assert await session.get(Message, new_msg_id) is not None
+
+
+async def test_maintenance_task_delete_expired_revoked_tokens(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    import fakeredis.aioredis
+    from app.config import get_settings
+    from app.maintenance import run_maintenance_once
+    from app.models import RevokedToken
+
+    del client, people
+    settings = get_settings()
+    maker = get_sessionmaker()
+
+    async with maker() as session:
+        expired_tok = RevokedToken(
+            jti="expired-jti-001",
+            expires_at=datetime.now(UTC) - timedelta(hours=2),
+        )
+        active_tok = RevokedToken(
+            jti="active-jti-002",
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+        )
+        session.add_all([expired_tok, active_tok])
+        await session.commit()
+
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    counts = await run_maintenance_once(settings, redis_client=fake_redis)
+    assert counts is not None
+    assert counts["revoked_tokens_deleted"] == 1
+
+    async with maker() as session:
+        assert await session.get(RevokedToken, "expired-jti-001") is None
+        assert await session.get(RevokedToken, "active-jti-002") is not None
 
 
 
