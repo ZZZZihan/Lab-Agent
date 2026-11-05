@@ -24,6 +24,7 @@ from app.agent import run_agent
 from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import Settings, get_settings, repo_root
 from app.db import dispose_engine, get_sessionmaker
+from app.ingest_worker import process_next_pending
 from app.llm import LLM, build_llm
 from app.models import User
 from app.rag.chunker import chunk_markdown, parse_front_matter
@@ -740,6 +741,42 @@ async def _run_single_model_questions(
     return question_results
 
 
+def _resolve_model_settings(
+    base_settings: Settings,
+    model_name: str,
+    *,
+    corpus_dir: Path,
+    questions_path: Path,
+) -> Settings:
+    provider = base_settings.llm_provider
+    resolved_api_key = base_settings.llm_api_key
+    if (
+        provider == "fake"
+        and model_name != "fake-grounded-v1"
+        and base_settings.llm_base_url
+    ):
+        provider = "openai_compatible"
+        resolved_api_key = read_secret(
+            base_settings.llm_api_key.get_secret_value()
+            if base_settings.llm_api_key is not None
+            else None,
+            base_settings.llm_api_key_file or None,
+            "LLM_API_KEY",
+            app_env=base_settings.app_env,
+        )
+        if not (resolved_api_key and len(resolved_api_key.get_secret_value()) >= 8):
+            raise RuntimeError(f"LLM_API_KEY is required for provider {provider}")
+    return base_settings.model_copy(
+        update={
+            "llm_provider": provider,
+            "llm_model": model_name,
+            "llm_api_key": resolved_api_key,
+            "corpus_dir": str(corpus_dir),
+            "questions_path": str(questions_path),
+        }
+    )
+
+
 async def _run(
     *,
     dataset: str = "v1",
@@ -787,8 +824,12 @@ async def _run(
     reports: list[dict[str, Any]] = []
     try:
         async with maker() as session:
-            await apply_reindex(session, base_settings, embedder, if_needed=True)
+            rebuilt = await apply_reindex(session, base_settings, embedder, if_needed=True)
+        if rebuilt:
+            while await process_next_pending(embedder, base_settings) is not None:
+                pass
 
+        async with maker() as session:
             user = await session.scalar(
                 select(User).where(User.email == "eval@lab.local")
             )
@@ -819,20 +860,11 @@ async def _run(
             await session.commit()
 
             for model_name in model_list:
-                provider = base_settings.llm_provider
-                if (
-                    provider == "fake"
-                    and model_name != "fake-grounded-v1"
-                    and base_settings.llm_base_url
-                ):
-                    provider = "openai_compatible"
-                model_settings = base_settings.model_copy(
-                    update={
-                        "llm_provider": provider,
-                        "llm_model": model_name,
-                        "corpus_dir": str(corpus_dir),
-                        "questions_path": str(questions_path),
-                    }
+                model_settings = _resolve_model_settings(
+                    base_settings,
+                    model_name,
+                    corpus_dir=corpus_dir,
+                    questions_path=questions_path,
                 )
                 llm = build_llm(model_settings)
                 try:

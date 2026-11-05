@@ -538,3 +538,112 @@ async def test_codex_review_fixes_sentences_redaction_errors_and_seed_isolation(
         )
     reset_settings_cache()
 
+
+async def test_codex_followup_key_file_promotion_reindex_drain_and_q060_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import get_settings
+    from app.db import dispose_engine, get_sessionmaker
+    from app.models import Chunk, Document
+    from app.rag.index_meta import read_meta
+    from app.seed import seed
+    from evals.run_e2e import _resolve_model_settings
+    from evals.run_eval import _load_questions
+    from sqlalchemy import func, select, text
+
+    # 1. q060 answer_facts includes the negative room assertion "不在 B-214"
+    root = repo_root()
+    v1_questions = _load_questions(root / "evals" / "data" / "v1" / "questions.jsonl")
+    q060 = next(q for q in v1_questions if q["id"] == "q060")
+    assert q060["answer_facts"] == ["883-102-447", "不在 B-214"]
+
+    # 2. Promoting LLM_PROVIDER=fake with LLM_API_KEY_FILE resolves llm_api_key
+    secret_file = tmp_path / "llm_api_key.txt"
+    secret_file.chmod(0o600) if secret_file.exists() else None
+    secret_file.write_text("sk-file-resolved-secret-12345\n", encoding="utf-8")
+    secret_file.chmod(0o600)
+
+    base = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        llm_provider="fake",
+        llm_base_url="http://127.0.0.1:8317/v1",
+        llm_api_key_file=str(secret_file),
+        load_tuned_config=False,
+    )
+    assert base.llm_api_key is None
+    promoted = _resolve_model_settings(
+        base,
+        "antigravity/gemini-3.8-flash",
+        corpus_dir=root / "evals" / "data" / "v1" / "corpus",
+        questions_path=root / "evals" / "data" / "v1" / "questions.jsonl",
+    )
+    assert promoted.llm_provider == "openai_compatible"
+    assert promoted.llm_api_key is not None
+    assert promoted.llm_api_key.get_secret_value() == "sk-file-resolved-secret-12345"
+
+    # 3. When apply_reindex rebuilds in _run, process_next_pending drains pre-existing seed docs
+    monkeypatch.setenv("EMBEDDER", "hashing")
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("LLM_MODEL", "fake-grounded-v1")
+    monkeypatch.setenv("CALIBRATION_DIR", str(tmp_path / "calibrations"))
+    reset_settings_cache()
+
+    await seed()
+    maker = get_sessionmaker()
+    async with maker() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO embedding_index_meta (id, fingerprint, embedder, model, dim, storage, index_kind, updated_at)
+                VALUES (1, 'openai_compatible|stale-model|512|redact=0|qp=e3b0c442|dp=e3b0c442', 'openai_compatible', 'stale-model', 512, 'vector', 'hnsw', now())
+                ON CONFLICT (id) DO UPDATE SET
+                    fingerprint = EXCLUDED.fingerprint,
+                    embedder = EXCLUDED.embedder,
+                    model = EXCLUDED.model,
+                    dim = EXCLUDED.dim,
+                    storage = EXCLUDED.storage,
+                    index_kind = EXCLUDED.index_kind,
+                    updated_at = now()
+                """
+            )
+        )
+        await session.commit()
+    await dispose_engine()
+
+    expected_fp = get_settings().embedding_fingerprint
+    await _run(
+        dataset="v1",
+        split="test",
+        max_questions=2,
+        models=["fake-grounded-v1"],
+        use_judge=False,
+        commit=False,
+        check=False,
+    )
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        meta = await read_meta(session)
+        assert meta is not None
+        assert meta.fingerprint == expected_fp
+        seed_docs = list(
+            await session.scalars(select(Document).where(Document.source == "seed"))
+        )
+        assert len(seed_docs) > 0
+        for sdoc in seed_docs:
+            assert sdoc.status == "ready"
+            chunk_cnt = int(
+                (
+                    await session.execute(
+                        select(func.count()).where(Chunk.document_id == sdoc.id)
+                    )
+                ).scalar_one()
+            )
+            assert chunk_cnt > 0
+    await dispose_engine()
+    reset_settings_cache()
+
+

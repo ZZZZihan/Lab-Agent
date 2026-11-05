@@ -57,7 +57,7 @@
 {"id": "q057", "split": "dev", "type": "multi_chunk", "question": "bge-small-zh-v1.5 的向量维度是多少，笔记作者是谁？", "answerable": true, "gold": [{"doc": "paper-bge", "heading": "模型"}, {"doc": "paper-bge", "heading": "阅读记录"}], "answer_facts": ["512", "林可"]}
 {"id": "q058", "split": "test", "type": "multi_chunk", "question": "实验室评测使用哪些指标，阈值只允许在哪个集合上调整？", "answerable": true, "gold": [{"doc": "paper-eval", "heading": "指标"}, {"doc": "paper-eval", "heading": "数据划分"}], "answer_facts": ["Recall@5", "MRR", "开发集"]}
 {"id": "q059", "split": "dev", "type": "multi_chunk", "question": "NAS 的共享路径是什么，备份在每周什么时候？", "answerable": true, "gold": [{"doc": "storage-nas", "heading": "路径配额"}, {"doc": "storage-nas", "heading": "备份"}], "answer_facts": ["/mnt/qingheng/share", "每周日", "02:00"]}
-{"id": "q060", "split": "test", "type": "multi_chunk", "question": "周五研讨的线上会议号是多少，它是否使用 B-214？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "时间"}, {"doc": "seminar-friday", "heading": "与组会的区别"}], "answer_facts": ["883-102-447", "B-214"]}
+{"id": "q060", "split": "test", "type": "multi_chunk", "question": "周五研讨的线上会议号是多少，它是否使用 B-214？", "answerable": true, "gold": [{"doc": "seminar-friday", "heading": "时间"}, {"doc": "seminar-friday", "heading": "与组会的区别"}], "answer_facts": ["883-102-447", "不在 B-214"]}
 {"id": "q061", "split": "dev", "type": "unanswerable", "question": "周三学术例会是否对本科生开放？", "answerable": false, "gold": [], "answer_facts": []}
 {"id": "q062", "split": "dev", "type": "unanswerable", "question": "清衡-A100 集群的电费由哪个账号支付？", "answerable": false, "gold": [], "answer_facts": []}
 {"id": "q063", "split": "dev", "type": "unanswerable", "question": "bge-small-zh-v1.5 在 CMTEB 上的检索分数是多少？", "answerable": false, "gold": [], "answer_facts": []}

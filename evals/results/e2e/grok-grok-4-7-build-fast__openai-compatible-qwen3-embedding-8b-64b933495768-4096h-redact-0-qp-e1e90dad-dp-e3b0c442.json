@@ -26,7 +26,7 @@
     "citation_f1": 0.746,
     "invalid_citation_rate": 0.0,
     "unannotated_rate": 0.0,
-    "answer_fact_recall": 0.7619,
+    "answer_fact_recall": 0.7381,
     "ttft_ms": {
       "mean": 2272.58,
       "p50": 2030.08,
@@ -845,7 +845,7 @@
       ],
       "answer_facts": [
         "883-102-447",
-        "B-214"
+        "不在 B-214"
       ],
       "answer": "周五研讨的线上会议室号是 883-102-447。[2] 它不使用 B-214，该实体会议室用于周三学术例会。[1]",
       "refused": false,
@@ -868,7 +868,7 @@
       "citation_f1": 1.0,
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
-      "fact_recall": 1.0,
+      "fact_recall": 0.5,
       "ttft_ms": 2199.26,
       "total_latency_ms": 2368.99,
       "prompt_tokens": 1477,
