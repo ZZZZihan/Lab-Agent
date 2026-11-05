@@ -2383,5 +2383,75 @@ async def test_concurrent_purge_scrubs_both_citations_and_startup_maintenance(
     assert startup_calls == 1
 
 
+async def test_audit_csv_formula_escape_and_signed_zero_hash_chain(
+    client: AsyncClient,
+    people: dict[str, dict[str, str]],
+) -> None:
+    import csv
+    import io
+    from datetime import UTC, datetime
+
+    from app.audit import canonical_audit_json, verify_audit_chain, write_audit
+    from app.main import app
+
+    del people
+    admin = await _login(client, "admin@lab.local")
+    settings = app.state.settings
+
+    # 1. Canonical JSON normalizes -0.0 (both scalar and list items) to 0.0
+    now = datetime.now(UTC)
+    canon_neg_zero = canonical_audit_json(
+        created_at=now,
+        actor_id=None,
+        action="signed_zero_test",
+        resource_type="test",
+        resource_id="res-1",
+        request_id="req-1",
+        ip_hash=None,
+        detail={"score": -0.0, "margins": [-0.0, 0.25], "huge": 1.25e20},
+    )
+    canon_pos_zero = canonical_audit_json(
+        created_at=now,
+        actor_id=None,
+        action="signed_zero_test",
+        resource_type="test",
+        resource_id="res-1",
+        request_id="req-1",
+        ip_hash=None,
+        detail={"score": 0.0, "margins": [0.0, 0.25], "huge": 125000000000000000000},
+    )
+    assert canon_neg_zero == canon_pos_zero
+    assert "-0.0" not in canon_neg_zero
+
+    # 2. Planted =HYPERLINK(...) request_id and -0.0 detail round-trip through DB & CSV
+    malicious_req_id = '=HYPERLINK("http://evil.example","click")'
+    await write_audit(
+        settings=settings,
+        actor_id=None,
+        action="csv_formula_and_neg_zero_test",
+        resource_type="@formula_type",
+        resource_id="+SUM(A1:A2)",
+        request_id=malicious_req_id,
+        ip="198.51.100.99",
+        detail={"score": -0.0, "margins": [-0.0, 0.5]},
+    )
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        assert await verify_audit_chain(session) is None
+
+    csv_resp = await client.get(
+        "/api/v1/audit/export.csv?action=csv_formula_and_neg_zero_test",
+        headers=admin,
+    )
+    assert csv_resp.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(csv_resp.text)))
+    assert len(rows) == 1
+    assert rows[0]["request_id"] == f"'{malicious_req_id}"
+    assert rows[0]["resource_type"] == "'@formula_type"
+    assert rows[0]["resource_id"] == "'+SUM(A1:A2)"
+
+
+
 
 

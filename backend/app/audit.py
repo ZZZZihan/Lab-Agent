@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select, text
@@ -42,6 +44,30 @@ class AuditRejected(ValueError):
     pass
 
 
+def normalize_audit_value(value: Any) -> Any:
+    """Normalize JSONB numeric representations (e.g. -0.0 -> 0.0) so hashes survive DB round-trip."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AuditRejected("audit float must be finite")
+        if value == 0.0:
+            return 0.0
+        s = repr(value)
+        if "e+" in s or "E+" in s:
+            d = Decimal(s)
+            if d == d.to_integral_value():
+                return int(d)
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list):
+        return [normalize_audit_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): normalize_audit_value(v) for k, v in value.items()}
+    return value
+
+
 def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     for key, value in (detail or {}).items():
@@ -61,7 +87,7 @@ def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
             raise AuditRejected("nested audit objects are not allowed")
         elif not isinstance(value, (str, int, float, bool)) and value is not None:
             raise AuditRejected("unsupported audit value")
-        clean[key] = value
+        clean[key] = normalize_audit_value(value)
     return clean
 
 
@@ -95,7 +121,7 @@ def canonical_audit_json(
         "resource_id": resource_id,
         "request_id": request_id,
         "ip_hash": ip_hash,
-        "detail": detail,
+        "detail": normalize_audit_value(detail),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

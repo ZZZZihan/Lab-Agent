@@ -933,6 +933,22 @@ async def delete_conversation(
     await session.commit()
     return {"status": "deleted"}
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _escape_csv_cell(value: object) -> str:
+    if value is None:
+        return ""
+    text_val = str(value)
+    if not text_val:
+        return ""
+    if text_val.startswith(_CSV_FORMULA_PREFIXES) or text_val.lstrip().startswith(
+        _CSV_FORMULA_PREFIXES
+    ):
+        return f"'{text_val}"
+    return text_val
+
+
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
     if value is None or not value.strip():
         return None
@@ -1122,20 +1138,23 @@ async def export_audit_csv(
         ]
     )
     for row in rows:
+        detail_json = json.dumps(
+            row.get("detail") or {}, ensure_ascii=False, sort_keys=True
+        )
         writer.writerow(
             [
                 row.get("id") or "",
-                row.get("created_at") or "",
-                row.get("actor_id") or "",
-                row.get("actor_name") or "",
-                row.get("action") or "",
-                row.get("resource_type") or "",
-                row.get("resource_id") or "",
-                row.get("request_id") or "",
-                row.get("ip_hash") or "",
-                json.dumps(row.get("detail") or {}, ensure_ascii=False, sort_keys=True),
-                (str(row.get("prev_hash") or "")).strip(),
-                (str(row.get("row_hash") or "")).strip(),
+                _escape_csv_cell(row.get("created_at")),
+                _escape_csv_cell(row.get("actor_id")),
+                _escape_csv_cell(row.get("actor_name")),
+                _escape_csv_cell(row.get("action")),
+                _escape_csv_cell(row.get("resource_type")),
+                _escape_csv_cell(row.get("resource_id")),
+                _escape_csv_cell(row.get("request_id")),
+                _escape_csv_cell(row.get("ip_hash")),
+                _escape_csv_cell(detail_json),
+                _escape_csv_cell((str(row.get("prev_hash") or "")).strip()),
+                _escape_csv_cell((str(row.get("row_hash") or "")).strip()),
             ]
         )
     return Response(
