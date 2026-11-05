@@ -17,6 +17,7 @@ import argparse
 import array
 import ast
 import asyncio
+import hashlib
 import json
 import math
 import random
@@ -29,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app.acl import Principal
-from app.auth import hash_password
+from app.auth import UNUSABLE_PASSWORD_HASH
 from app.config import Settings, get_settings, repo_root, reset_settings_cache
 from app.db import dispose_engine, get_sessionmaker
 from app.ingest_worker import process_next_pending
@@ -198,6 +199,28 @@ def _load_v1_corpus_and_questions(
     return corpus_chunks, questions
 
 
+def _benchmark_input_sha256(
+    corpus_chunks: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+    seed_texts: tuple[str, ...] = DISTRACTOR_SEED_TEXTS,
+) -> str:
+    payload = {
+        "corpus": [
+            (
+                str(c.get("doc_key", "")),
+                int(c.get("chunk_index", 0)),
+                str(c.get("heading", "")),
+                str(c.get("content", "")),
+            )
+            for c in corpus_chunks
+        ],
+        "questions": [str(q.get("question", "")) for q in questions],
+        "seeds": list(seed_texts),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 async def _prepare_cached_vectors(
     *,
     settings: Settings,
@@ -213,6 +236,9 @@ async def _prepare_cached_vectors(
     queries_npy = cache_dir / f"queries_{slug}_{dim}.npy"
     queries_meta = cache_dir / f"queries_{slug}_{dim}.meta.json"
     seeds_npy = cache_dir / f"distractor_seeds_{slug}_{dim}.npy"
+    expected_sha = _benchmark_input_sha256(
+        corpus_chunks, questions, DISTRACTOR_SEED_TEXTS
+    )
 
     need_embed = not (
         corpus_npy.is_file()
@@ -220,6 +246,21 @@ async def _prepare_cached_vectors(
         and queries_meta.is_file()
         and seeds_npy.is_file()
     )
+    if not need_embed:
+        try:
+            cached_meta = json.loads(queries_meta.read_text(encoding="utf-8"))
+            cached_corpus = load_npy_f32(corpus_npy)
+            cached_queries = load_npy_f32(queries_npy)
+            cached_seeds = load_npy_f32(seeds_npy)
+            if (
+                cached_meta.get("input_sha256") != expected_sha
+                or len(cached_corpus) != len(corpus_chunks)
+                or len(cached_queries) != len(questions)
+                or len(cached_seeds) != len(DISTRACTOR_SEED_TEXTS)
+            ):
+                need_embed = True
+        except Exception:
+            need_embed = True
 
     if need_embed:
         embedder = build_embedder(settings)
@@ -241,7 +282,11 @@ async def _prepare_cached_vectors(
             save_npy_f32(queries_npy, q_vecs)
             queries_meta.write_text(
                 json.dumps(
-                    {"questions": q_texts, "latencies_ms": q_latencies},
+                    {
+                        "input_sha256": expected_sha,
+                        "questions": q_texts,
+                        "latencies_ms": q_latencies,
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -286,17 +331,22 @@ async def _ensure_eval_user_and_corpus_docs(
     maker = get_sessionmaker()
     async with maker() as session:
         user = await session.scalar(
-            select(User).where(User.email == "admin@lab.local")
+            select(User).where(User.email == "eval@lab.local")
         )
         if user is None:
             user = User(
-                email="admin@lab.local",
-                display_name="沈昭",
-                role="admin",
-                password_hash=hash_password("LabAgent-Demo-2026-Admin"),
-                is_active=True,
+                email="eval@lab.local",
+                display_name="评测",
+                role="member",
+                password_hash=UNUSABLE_PASSWORD_HASH,
+                is_active=False,
             )
             session.add(user)
+            await session.flush()
+        else:
+            user.role = "member"
+            user.password_hash = UNUSABLE_PASSWORD_HASH
+            user.is_active = False
             await session.flush()
 
         await session.execute(text("DROP INDEX IF EXISTS chunks_embedding_hnsw"))
@@ -371,7 +421,7 @@ async def _ensure_eval_user_and_corpus_docs(
         session.add(distractor_doc)
         await session.flush()
         distractor_doc_id = distractor_doc.id
-        principal = Principal(id=user.id, role="admin")
+        principal = Principal(id=user.id, role=user.role)
         await session.commit()
     return principal, distractor_doc_id
 
@@ -590,11 +640,23 @@ async def _evaluate_path(
 
     mode = str(settings.retrieval_mode or "hybrid_rrf")
     params = {
-        "rrf_k": int(settings.rrf_k or 60),
-        "evidence_score_min": float(settings.evidence_score_min or 0.5),
-        "rare_coverage_min": float(settings.rare_coverage_min or 0.0),
-        "cite_margin": float(settings.cite_margin or 0.15),
-        "cite_k": int(settings.cite_k or 3),
+        "rrf_k": int(settings.rrf_k) if settings.rrf_k is not None else 60,
+        "evidence_score_min": (
+            float(settings.evidence_score_min)
+            if settings.evidence_score_min is not None
+            else 0.50
+        ),
+        "rare_coverage_min": (
+            float(settings.rare_coverage_min)
+            if settings.rare_coverage_min is not None
+            else 0.0
+        ),
+        "cite_margin": (
+            float(settings.cite_margin)
+            if settings.cite_margin is not None
+            else 0.15
+        ),
+        "cite_k": int(settings.cite_k) if settings.cite_k is not None else 3,
     }
 
     raw_per_q = query_embed_latency_ms.get("per_question_ms")

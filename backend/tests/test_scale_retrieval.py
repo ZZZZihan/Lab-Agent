@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 from app.acl import Principal
-from app.auth import hash_password
+from app.auth import UNUSABLE_PASSWORD_HASH, hash_password
 from app.config import Settings, get_settings
 from app.db import get_sessionmaker
 from app.ingest_worker import process_next_pending
@@ -33,6 +33,8 @@ from app.rag.retrieve import (
 )
 from app.reindex import apply_reindex
 from evals.bench_scale import (
+    DISTRACTOR_SEED_TEXTS,
+    _benchmark_input_sha256,
     _build_distractor_pools_and_corpus,
     _evaluate_path,
     _make_path_settings,
@@ -41,7 +43,7 @@ from evals.bench_scale import (
     run_scale_benchmark,
     save_npy_f32,
 )
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
 
@@ -412,7 +414,7 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
         d_128_direct = _l2_normalize(sum_128)
         assert d_128_direct == pytest.approx(d_128_from_512, abs=1e-6)
 
-    # 3. Verify _prepare_cached_vectors sorts latencies before computing p50 and p95
+    # 3. Verify _prepare_cached_vectors sorts latencies before computing p50/p95 and validates input_sha256
     s_hash = _settings(
         embedder="hashing",
         embedding_dim=512,
@@ -421,33 +423,57 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
     )
     slug = s_hash.base_embedding_slug
     cache_dir = tmp_path / "lat_cache"
+    test_corpus = [{"doc_key": "d1", "chunk_index": 0, "heading": "H1", "content": "c1"}]
+    test_questions = [{"question": f"q{i}"} for i in range(10)]
+    valid_sha = _benchmark_input_sha256(test_corpus, test_questions, DISTRACTOR_SEED_TEXTS)
     save_npy_f32(cache_dir / f"corpus_{slug}_512.npy", [[1.0] + [0.0] * 511])
     save_npy_f32(
         cache_dir / f"queries_{slug}_512.npy",
         [[1.0] + [0.0] * 511 for _ in range(10)],
     )
-    save_npy_f32(cache_dir / f"distractor_seeds_{slug}_512.npy", [[1.0] + [0.0] * 511])
+    save_npy_f32(
+        cache_dir / f"distractor_seeds_{slug}_512.npy",
+        [[1.0] + [0.0] * 511 for _ in range(len(DISTRACTOR_SEED_TEXTS))],
+    )
     # Deliberately unsorted latencies where index 9 is small (1.0) and index 0 is huge (100.0)
     unsorted_lats = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 1.0]
     (cache_dir / f"queries_{slug}_512.meta.json").write_text(
         json.dumps(
             {
+                "input_sha256": valid_sha,
                 "questions": [f"q{i}" for i in range(10)],
                 "latencies_ms": unsorted_lats,
             }
         ),
         encoding="utf-8",
     )
-    _, _, lat_summary, _ = await _prepare_cached_vectors(
+    _, q_map_cached, lat_summary, _ = await _prepare_cached_vectors(
         settings=s_hash,
         cache_dir=cache_dir,
-        corpus_chunks=[],
-        questions=[],
+        corpus_chunks=test_corpus,
+        questions=test_questions,
     )
     assert lat_summary["p95"] >= lat_summary["p50"]
     assert lat_summary["p95"] == pytest.approx(95.5)
     assert lat_summary["per_question_ms"]["q0"] == 100.0
     assert lat_summary["per_question_ms"]["q9"] == 1.0
+    assert q_map_cached["q0"][0] == pytest.approx(1.0)
+
+    # Changing questions invalidates the cache and recomputes embeddings + new input_sha256
+    changed_questions = [{"question": "changed-q0"}, {"question": "changed-q1"}]
+    _, q_map_recomputed, _, _ = await _prepare_cached_vectors(
+        settings=s_hash,
+        cache_dir=cache_dir,
+        corpus_chunks=test_corpus,
+        questions=changed_questions,
+    )
+    assert set(q_map_recomputed.keys()) == {"changed-q0", "changed-q1"}
+    recomputed_meta = json.loads(
+        (cache_dir / f"queries_{slug}_512.meta.json").read_text(encoding="utf-8")
+    )
+    assert recomputed_meta["input_sha256"] == _benchmark_input_sha256(
+        test_corpus, changed_questions, DISTRACTOR_SEED_TEXTS
+    )
 
     # 4. Verify _make_path_settings preserves embedding credentials and client options
     s_with_creds = _settings(
@@ -528,6 +554,57 @@ async def test_bench_scale_mrl_distractors_bge_and_sorted_percentiles(
         assert path_res["total_search_latency_ms"]["mean"] == pytest.approx(100.0)
         assert path_res["total_search_latency_ms"]["p50"] == pytest.approx(100.0)
         assert path_res["total_search_latency_ms"]["p95"] == pytest.approx(100.0)
+
+        # 6. Verify evidence_score_min = 0.0 is preserved (not replaced by 0.50 fallback)
+        async def _fake_search_with_low_hit(
+            _session: Any,
+            **_kwargs: Any,
+        ) -> SearchBundle:
+            return SearchBundle(
+                hits=[
+                    {
+                        "key": "d1#0",
+                        "cosine": 0.25,
+                        "bm25": 1.0,
+                        "tokens": ["gpu"],
+                    }
+                ],
+                df={"gpu": 1},
+                n_docs=1,
+                coverage=1.0,
+                mode="dense",
+                elapsed_ms=5.0,
+            )
+
+        mp.setattr("evals.bench_scale.search_knowledge", _fake_search_with_low_hit)
+        s_zero_thresh = _settings(
+            embedder="hashing",
+            embedding_dim=512,
+            embedding_storage="halfvec",
+            embedding_index="none",
+            retrieval_mode="dense",
+            evidence_score_min=0.0,
+            rare_coverage_min=0.0,
+        )
+        zero_res = await _evaluate_path(
+            settings=s_zero_thresh,
+            embedder=HashingEmbedder(512),
+            user=Principal(id=uuid.uuid4(), role="member"),
+            questions=[
+                {
+                    "id": "1",
+                    "split": "test",
+                    "type": "direct",
+                    "answerable": True,
+                    "question": "gpu",
+                    "gold": [{"doc": "d1", "heading": "H1"}],
+                }
+            ],
+            corpus_chunks=[{"doc_key": "d1", "chunk_index": 0, "heading": "H1"}],
+            query_embed_latency_ms={"mean": 1.0, "p50": 1.0, "p95": 1.0},
+        )
+        # With score_min=0.0, cosine=0.25 is accepted -> refusal_correctness == 1.0 (not refused)
+        assert zero_res["test"]["refusal_correctness"] == pytest.approx(1.0)
     finally:
         mp.undo()
 
@@ -607,11 +684,24 @@ async def test_bench_scale_small_offline_hashing(tmp_path: Path) -> None:
         )
         assert report["two_stage_vs_exact"]["recall_at_5_ratio_all"] >= 0.80
 
-        # Verify cleanup restored base index and drained pending non-eval documents
+        # Verify cleanup restored base index, drained pending non-eval documents,
+        # and used non-login eval@qingheng.lab user (no active demo admin created)
         async with maker() as session:
             assert await check_index(session, s_init) == "ok"
             restored_doc = await session.get(Document, seed_doc_id)
             assert restored_doc is not None
+            assert restored_doc.status == "ready"
+            eval_user = await session.scalar(
+                select(User).where(User.email == "eval@lab.local")
+            )
+            assert eval_user is not None
+            assert eval_user.is_active is False
+            assert eval_user.role == "member"
+            assert eval_user.password_hash == UNUSABLE_PASSWORD_HASH
+            demo_admin = await session.scalar(
+                select(User).where(User.email == "admin@lab.local")
+            )
+            assert demo_admin is None
             assert restored_doc.status == "ready"
             chunk_cnt = int(
                 (
