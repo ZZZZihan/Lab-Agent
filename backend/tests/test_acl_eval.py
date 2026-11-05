@@ -208,11 +208,12 @@ async def test_run_acl_end_to_end_zero_leaks_and_leak_failure(
         reset_settings_cache()
 
 
-async def test_run_acl_restores_prior_visibility_and_catches_agent_tail_hit(
+async def test_run_acl_isolates_seed_visibility_and_catches_agent_tail_hit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from app.db import dispose_engine, get_sessionmaker
     from app.models import Document
+    from app.seed import seed
     from sqlalchemy import select
 
     monkeypatch.setenv("CALIBRATION_DIR", str(tmp_path))
@@ -220,10 +221,8 @@ async def test_run_acl_restores_prior_visibility_and_catches_agent_tail_hit(
     all_cases = load_acl_cases(allowed_doc_keys=valid_doc_keys())
 
     try:
-        # First run seeds the database cleanly
-        await _run(commit=False, check=False, cases=all_cases)
-
-        # Modify a seed document's visibility prior to running _run again
+        # Seed live source="seed" documents and tighten onboarding's visibility to "private"
+        await seed()
         maker = get_sessionmaker()
         async with maker() as session:
             onboarding_doc = await session.scalar(
@@ -236,7 +235,7 @@ async def test_run_acl_restores_prior_visibility_and_catches_agent_tail_hit(
             await session.commit()
         await dispose_engine()
 
-        # Run _run and verify that onboarding's custom pre-run visibility ("private") is restored
+        # Run _run and verify that live source="seed" onboarding visibility ("private") is untouched
         await _run(commit=False, check=False, cases=all_cases)
         maker = get_sessionmaker()
         async with maker() as session:

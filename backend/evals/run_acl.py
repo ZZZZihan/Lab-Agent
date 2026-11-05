@@ -409,47 +409,24 @@ async def _run(
                     created_group_ids.append(grp.id)
                 groups_by_slug[g_slug] = grp
 
-            # Snapshot existing seed ACLs, owners, and visibilities so we can restore them after the run
-            prior_seed_docs = list(
-                await session.scalars(select(Document).where(Document.source == "seed"))
-            )
-            prior_owner_by_key: dict[str, uuid.UUID] = {
-                doc.doc_key: doc.owner_id for doc in prior_seed_docs if doc.doc_key
-            }
-            prior_visibility_by_key: dict[str, str] = {
-                doc.doc_key: doc.visibility for doc in prior_seed_docs if doc.doc_key
-            }
-            prior_acl_by_key: dict[str, list[tuple[str, str, str]]] = {}
-            for doc in prior_seed_docs:
-                if not doc.doc_key:
-                    continue
-                acl_rows = list(
-                    await session.scalars(
-                        select(DocumentACL).where(DocumentACL.document_id == doc.id)
-                    )
-                )
-                prior_acl_by_key[doc.doc_key] = [
-                    (row.principal_type, row.principal_id, row.permission) for row in acl_rows
-                ]
-
             await upsert_source(
                 session,
                 embedder=embedder,
                 owner_id=owner.id,
-                source="seed",
+                source="eval",
                 records=records,
                 storage=agent_settings.embedding_storage,
             )
             await session.commit()
 
-            seed_docs = list(
-                await session.scalars(select(Document).where(Document.source == "seed"))
+            eval_docs = list(
+                await session.scalars(select(Document).where(Document.source == "eval"))
             )
             doc_by_key: dict[str, Document] = {
-                doc.doc_key: doc for doc in seed_docs if doc.doc_key is not None
+                doc.doc_key: doc for doc in eval_docs if doc.doc_key is not None
             }
             doc_id_to_key: dict[str, str] = {
-                str(doc.id): doc.doc_key for doc in seed_docs if doc.doc_key is not None
+                str(doc.id): doc.doc_key for doc in eval_docs if doc.doc_key is not None
             }
 
             try:
@@ -523,7 +500,7 @@ async def _run(
                         embedder=embedder,
                         user=principal,
                         query=question,
-                        source="seed",
+                        source="eval",
                         limit=None,
                     )
 
@@ -545,6 +522,7 @@ async def _run(
                         _sink: list[Mapping[str, Any]] = agent_tool_hits,
                         **kwargs: Any,
                     ) -> Any:
+                        kwargs["source"] = "eval"
                         res_bundle = await _orig(*args, **kwargs)
                         raw_hits = getattr(res_bundle, "hits", None)
                         if isinstance(raw_hits, list):
@@ -647,33 +625,13 @@ async def _run(
                     )
                     case_results.append(case_eval)
             finally:
-                # Restore baseline front-matter visibilities, owners, and ACL grants
+                # Reset isolated eval documents and remove temporary group memberships
                 await session.execute(delete(GroupMember).where(GroupMember.user_id == actor.id))
-                demo_admin = await session.scalar(
-                    select(User).where(User.email == "admin@lab.local")
-                )
                 for doc_key, doc in doc_by_key.items():
-                    doc.visibility = prior_visibility_by_key.get(
-                        doc_key, default_visibilities.get(doc_key, "lab")
-                    )
-                    if doc_key in prior_owner_by_key and prior_owner_by_key[doc_key] not in set(
-                        created_user_ids
-                    ):
-                        doc.owner_id = prior_owner_by_key[doc_key]
-                    elif demo_admin is not None:
-                        doc.owner_id = demo_admin.id
+                    doc.visibility = default_visibilities.get(doc_key, "lab")
                     await session.execute(
                         delete(DocumentACL).where(DocumentACL.document_id == doc.id)
                     )
-                    for p_type, p_id, perm in prior_acl_by_key.get(doc_key, []):
-                        session.add(
-                            DocumentACL(
-                                document_id=doc.id,
-                                principal_type=p_type,
-                                principal_id=p_id,
-                                permission=perm,
-                            )
-                        )
                 for grp_id in created_group_ids:
                     grp_obj = await session.get(Group, grp_id)
                     if grp_obj is not None:
