@@ -63,7 +63,7 @@ async def _prepare(settings: object) -> User:
     from app.config import Settings
 
     assert isinstance(settings, Settings)
-    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    embedder = build_embedder(settings)
     maker = get_sessionmaker()
     try:
         async with maker() as session:
@@ -101,7 +101,7 @@ async def _featurize(settings: object, user: User, questions: list[dict[str, obj
     from app.config import Settings
 
     assert isinstance(settings, Settings)
-    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    embedder = build_embedder(settings)
     gold_map = _gold_map(Path(settings.corpus_dir))
     maker = get_sessionmaker()
     features: list[dict[str, object]] = []

@@ -20,6 +20,25 @@ LLM_MODEL=fake-grounded-v1
 EMBEDDER=hashing
 EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
 EMBEDDING_DIM=512
+EMBEDDING_STORAGE=vector
+EMBEDDING_INDEX=auto
+# Profile 1: Qwen3-Embedding-8B 4096-dim on host Ollama
+# EMBEDDER=openai_compatible
+# EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
+# EMBEDDING_MODEL=qwen3-embedding:8b
+# EMBEDDING_MODEL_VERSION=64b933495768
+# EMBEDDING_DIM=4096
+# EMBEDDING_NATIVE_DIM=4096
+# EMBEDDING_TRUNCATE=false
+# EMBEDDING_STORAGE=vector
+# EMBEDDING_INDEX=auto
+# EMBEDDING_QUERY_TEMPLATE=Instruct: {instruction}\nQuery:{query}
+# EMBEDDING_QUERY_INSTRUCTION=Given a question from a research lab member, retrieve the lab document passage that answers it
+# Profile 2: Qwen3-Embedding-8B MRL 1024-dim (HNSW vector index)
+# EMBEDDING_DIM=1024
+# EMBEDDING_NATIVE_DIM=4096
+# EMBEDDING_TRUNCATE=true
+# EMBEDDING_INDEX=hnsw
 RERANKER=off
 LOAD_TUNED_CONFIG=true
 AUDIT_RETENTION_DAYS=180

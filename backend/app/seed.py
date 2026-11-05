@@ -45,7 +45,7 @@ def assert_demo_seed_allowed(app_env: str) -> None:
 async def seed() -> None:
     settings = get_settings()
     assert_demo_seed_allowed(settings.app_env)
-    embedder = build_embedder(settings.embedder, settings.embedding_model, settings.embedding_dim)
+    embedder = build_embedder(settings)
     maker = get_sessionmaker()
     try:
         async with maker() as session:

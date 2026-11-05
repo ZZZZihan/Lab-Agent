@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import urllib.parse
 from functools import lru_cache
 from pathlib import Path
@@ -97,9 +99,25 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_max_tokens: int = 800
     llm_redact: bool = True
-    embedder: Literal["hashing", "bge"] = "hashing"
+    embedder: Literal["hashing", "bge", "openai_compatible"] = "hashing"
+    embedding_base_url: str | None = None
+    embedding_api_key: SecretStr | None = None
+    embedding_api_key_file: str = ""
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_model_version: str = ""
     embedding_dim: int = 512
+    embedding_native_dim: int | None = None
+    embedding_truncate: bool = False
+    embedding_storage: Literal["vector", "halfvec"] = "vector"
+    embedding_index: Literal["auto", "hnsw", "none"] = "auto"
+    embedding_send_dimensions: bool = False
+    embedding_batch_size: int = 16
+    embedding_timeout_seconds: int = 120
+    embedding_max_retries: int = 3
+    embedding_query_template: str = "{query}"
+    embedding_query_instruction: str = ""
+    embedding_document_prefix: str = ""
+    embedding_redact: bool = False
     reranker: Literal["off", "lexical", "bge"] = "off"
     reranker_model: str = "BAAI/bge-reranker-base"
     retrieval_mode: str | None = None
@@ -138,9 +156,66 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce(self) -> Self:
         assert_strong_secret(self.jwt_secret.get_secret_value(), "JWT_SECRET")
-        if self.embedding_dim != 512:
+        if not 64 <= self.embedding_dim <= 4096:
+            raise RuntimeError("EMBEDDING_DIM must be between 64 and 4096")
+        if self.embedding_native_dim is not None:
+            if not 64 <= self.embedding_native_dim <= 16000:
+                raise RuntimeError("EMBEDDING_NATIVE_DIM must be between 64 and 16000")
+            if self.embedding_dim > self.embedding_native_dim:
+                raise RuntimeError("EMBEDDING_DIM cannot exceed EMBEDDING_NATIVE_DIM")
+            if self.embedding_dim < self.embedding_native_dim and not self.embedding_truncate:
+                raise RuntimeError(
+                    "EMBEDDING_TRUNCATE must be true when EMBEDDING_DIM < EMBEDDING_NATIVE_DIM"
+                )
+        max_hnsw_dim = 2000 if self.embedding_storage == "vector" else 4000
+        if self.embedding_index == "hnsw" and self.embedding_dim > max_hnsw_dim:
             raise RuntimeError(
-                "EMBEDDING_DIM must stay 512 so hashing and bge-small-zh-v1.5 share one column"
+                f"EMBEDDING_INDEX=hnsw is not supported for {self.embedding_storage}({self.embedding_dim}) "
+                f"(max {max_hnsw_dim})"
+            )
+        self.embedding_query_template = self.embedding_query_template.replace("\\n", "\n")
+        if "{query}" not in self.embedding_query_template:
+            raise RuntimeError("EMBEDDING_QUERY_TEMPLATE must contain {query}")
+        try:
+            self.embedding_query_template.format(
+                instruction=self.embedding_query_instruction,
+                query="",
+            )
+        except Exception as exc:
+            raise RuntimeError("Invalid EMBEDDING_QUERY_TEMPLATE format") from exc
+        if self.embedding_batch_size < 1:
+            raise RuntimeError("EMBEDDING_BATCH_SIZE must be at least 1")
+        if self.embedding_timeout_seconds <= 0:
+            raise RuntimeError("EMBEDDING_TIMEOUT_SECONDS must be positive")
+        if self.embedding_max_retries < 0:
+            raise RuntimeError("EMBEDDING_MAX_RETRIES cannot be negative")
+        self.embedding_api_key = read_secret(
+            self.embedding_api_key.get_secret_value()
+            if self.embedding_api_key is not None
+            else None,
+            self.embedding_api_key_file or None,
+            "EMBEDDING_API_KEY",
+            app_env=self.app_env,
+        )
+        if self.embedder == "openai_compatible":
+            if not self.embedding_base_url or not self.embedding_base_url.strip():
+                raise RuntimeError("EMBEDDING_BASE_URL is required when EMBEDDER=openai_compatible")
+            self.embedding_base_url = self.embedding_base_url.strip()
+            if (
+                not self.embedding_model.strip()
+                or self.embedding_model.strip() == "BAAI/bge-small-zh-v1.5"
+            ):
+                raise RuntimeError(
+                    "EMBEDDING_MODEL must be explicitly set when EMBEDDER=openai_compatible"
+                )
+            self.embedding_model = self.embedding_model.strip()
+        if (
+            self.app_env == "prod"
+            and self.embedder != "hashing"
+            and not self.embedding_model_version.strip()
+        ):
+            raise RuntimeError(
+                "EMBEDDING_MODEL_VERSION is required when APP_ENV=prod and EMBEDDER is not hashing"
             )
         origins = [part.strip() for part in self.cors_origins.split(",") if part.strip()]
         if not origins or any(origin == "*" for origin in origins):
@@ -218,6 +293,54 @@ class Settings(BaseSettings):
     @property
     def llm_base_host(self) -> str | None:
         return extract_host_port(self.llm_base_url)
+
+    def render_query(self, query: str) -> str:
+        return self.embedding_query_template.format(
+            instruction=self.embedding_query_instruction,
+            query=query,
+        )
+
+    @property
+    def resolved_embedding_index(self) -> Literal["hnsw", "none"]:
+        if self.embedding_index == "none":
+            return "none"
+        if self.embedding_index == "hnsw":
+            return "hnsw"
+        max_hnsw_dim = 2000 if self.embedding_storage == "vector" else 4000
+        return "hnsw" if self.embedding_dim <= max_hnsw_dim else "none"
+
+    @property
+    def embedding_fingerprint(self) -> str:
+        if self.embedder == "hashing":
+            model_id = "hashing-cjk-v1"
+        else:
+            version = self.embedding_model_version.strip()
+            model_id = (
+                f"{self.embedding_model}@{version[:12]}" if version else self.embedding_model
+            )
+        storage_suffix = "h" if self.embedding_storage == "halfvec" else ""
+        redact_flag = 0 if self.embedder == "hashing" else (1 if self.embedding_redact else 0)
+        qp_text = "" if self.embedder == "hashing" else self.render_query("")
+        dp_text = "" if self.embedder == "hashing" else self.embedding_document_prefix
+        qp_hash = hashlib.sha256(qp_text.encode("utf-8")).hexdigest()[:8]
+        dp_hash = hashlib.sha256(dp_text.encode("utf-8")).hexdigest()[:8]
+        return (
+            f"{self.embedder}|{model_id}|{self.embedding_dim}{storage_suffix}"
+            f"|redact={redact_flag}|qp={qp_hash}|dp={dp_hash}"
+        )
+
+    @property
+    def embedding_slug(self) -> str:
+        return re.sub(r"[^a-z0-9]", "-", self.embedding_fingerprint.lower())
+
+    @property
+    def embedding_base_host(self) -> str | None:
+        if self.embedder != "openai_compatible" or not self.embedding_base_url:
+            return None
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.embedding_base_url)
+        return parsed.netloc or None
 
 
 def _pick[T](current: T | None, tuned: dict[str, object], key: str, default: T) -> T:
