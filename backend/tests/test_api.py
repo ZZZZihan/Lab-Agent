@@ -1683,7 +1683,7 @@ async def test_purge_document_scrubs_chunks_acl_and_message_citations_and_delete
         client,
         linke,
         title=f"保密实验记录-{nonce}",
-        body=f"## 样品参数\n样品批次 {nonce} 的退火温度设定为 725 摄氏度。",
+        body=f"## 样品参数-{nonce}\n样品批次 {nonce} 的退火温度设定为 725 摄氏度。",
         visibility="restricted",
         grant_emails="zhou@lab.local",
     )
@@ -1706,7 +1706,10 @@ async def test_purge_document_scrubs_chunks_acl_and_message_citations_and_delete
     assistant_msgs_before = [m for m in conv_before["messages"] if m["role"] == "assistant"]
     assert len(assistant_msgs_before) == 1
     assert any(
-        c["document_id"] == doc_id and nonce in c["excerpt"] and nonce in c["title"]
+        c["document_id"] == doc_id
+        and nonce in c["excerpt"]
+        and nonce in c["title"]
+        and nonce in c["heading"]
         for c in assistant_msgs_before[0]["citations"]
     )
 
@@ -1790,6 +1793,7 @@ async def test_purge_document_scrubs_chunks_acl_and_message_citations_and_delete
     for cit in matching_citations:
         assert cit["excerpt"] == "[已删除]"
         assert cit["title"] == "[已删除文档]"
+        assert cit["heading"] == "[已删除]"
 
     # DELETE /conversations/{id}: another user gets 404; owner deletes own conversation (cascading messages)
     other_del = await client.delete(
@@ -1910,6 +1914,7 @@ async def test_maintenance_task_purge_expired_soft_deleted_documents(
                 {
                     "document_id": expired_doc_id,
                     "title": f"过期软删文档-{nonce_expired}",
+                    "heading": f"过期软删小节-{nonce_expired}",
                     "excerpt": f"过期软删正文 {nonce_expired}",
                 }
             ],
@@ -1933,6 +1938,7 @@ async def test_maintenance_task_purge_expired_soft_deleted_documents(
             {
                 "document_id": expired_doc_id,
                 "title": "[已删除文档]",
+                "heading": "[已删除]",
                 "excerpt": "[已删除]",
             }
         ]
@@ -2218,6 +2224,163 @@ async def test_audit_hash_chain_50_concurrent_writes_retention_and_tamper_detect
     assert cli_main(["verify-audit"]) != 0
     broken_out = capsys.readouterr().out
     assert f"id={target_id}" in broken_out
+async def test_concurrent_purge_scrubs_both_citations_and_startup_maintenance(
+    client: AsyncClient,
+    people: dict[str, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from app.config import get_settings
+    from app.maintenance import (
+        run_maintenance_worker,
+        scrub_missing_document_citations,
+    )
+    from app.models import Conversation, Message
+
+    del people
+    linke = await _login(client, "member@lab.local")
+    linke_id = uuid.UUID((await client.get("/api/v1/auth/me", headers=linke)).json()["id"])
+
+    nonce_a = "CONCPURGEAAA111"
+    nonce_b = "CONCPURGEBBB222"
+    nonce_live = "CONCLIVECCC333"
+
+    doc_a = await _upload(
+        client,
+        linke,
+        title=f"并发擦除A-{nonce_a}",
+        body=f"## 章节A-{nonce_a}\n正文A {nonce_a}",
+        visibility="lab",
+    )
+    doc_b = await _upload(
+        client,
+        linke,
+        title=f"并发擦除B-{nonce_b}",
+        body=f"## 章节B-{nonce_b}\n正文B {nonce_b}",
+        visibility="lab",
+    )
+    doc_live = await _upload(
+        client,
+        linke,
+        title=f"保留文档C-{nonce_live}",
+        body=f"## 章节C-{nonce_live}\n正文C {nonce_live}",
+        visibility="lab",
+    )
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        conv = Conversation(user_id=linke_id, title="并发擦除测试会话")
+        session.add(conv)
+        await session.flush()
+        msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            content="同时引用了 A 和 B",
+            refused=False,
+            citations=[
+                {
+                    "index": 1,
+                    "document_id": doc_a,
+                    "title": f"并发擦除A-{nonce_a}",
+                    "heading": f"章节A-{nonce_a}",
+                    "excerpt": f"正文A {nonce_a}",
+                },
+                {
+                    "index": 2,
+                    "document_id": doc_b,
+                    "title": f"并发擦除B-{nonce_b}",
+                    "heading": f"章节B-{nonce_b}",
+                    "excerpt": f"正文B {nonce_b}",
+                },
+            ],
+        )
+        session.add(msg)
+        await session.commit()
+        msg_id = msg.id
+
+    # Concurrently purge doc_a and doc_b via HTTP DELETE ?purge=true
+    resp_a, resp_b = await asyncio.gather(
+        client.delete(f"/api/v1/documents/{doc_a}?purge=true", headers=linke),
+        client.delete(f"/api/v1/documents/{doc_b}?purge=true", headers=linke),
+    )
+    assert resp_a.status_code == 200, resp_a.text
+    assert resp_b.status_code == 200, resp_b.text
+
+    # Both citations must be completely scrubbed (no lost update)
+    async with maker() as session:
+        refreshed = await session.get(Message, msg_id)
+        assert refreshed is not None
+        assert refreshed.citations == [
+            {
+                "index": 1,
+                "document_id": doc_a,
+                "title": "[已删除文档]",
+                "heading": "[已删除]",
+                "excerpt": "[已删除]",
+            },
+            {
+                "index": 2,
+                "document_id": doc_b,
+                "title": "[已删除文档]",
+                "heading": "[已删除]",
+                "excerpt": "[已删除]",
+            },
+        ]
+
+        # In-flight chat citation revalidation scrubs purged doc_a while keeping doc_live intact
+        revalidated = await scrub_missing_document_citations(
+            session,
+            [
+                {
+                    "index": 1,
+                    "document_id": doc_a,
+                    "title": f"并发擦除A-{nonce_a}",
+                    "heading": f"章节A-{nonce_a}",
+                    "excerpt": f"正文A {nonce_a}",
+                },
+                {
+                    "index": 2,
+                    "document_id": doc_live,
+                    "title": f"保留文档C-{nonce_live}",
+                    "heading": f"章节C-{nonce_live}",
+                    "excerpt": f"正文C {nonce_live}",
+                },
+            ],
+        )
+        assert revalidated == [
+            {
+                "index": 1,
+                "document_id": doc_a,
+                "title": "[已删除文档]",
+                "heading": "[已删除]",
+                "excerpt": "[已删除]",
+            },
+            {
+                "index": 2,
+                "document_id": doc_live,
+                "title": f"保留文档C-{nonce_live}",
+                "heading": f"章节C-{nonce_live}",
+                "excerpt": f"正文C {nonce_live}",
+            },
+        ]
+
+    # Verify run_maintenance_worker executes one pass immediately on startup before sleeping
+    startup_calls = 0
+    stop_event = asyncio.Event()
+
+    async def _fake_once(_settings: object) -> dict[str, int]:
+        nonlocal startup_calls
+        startup_calls += 1
+        stop_event.set()
+        return {}
+
+    monkeypatch.setattr("app.maintenance.run_maintenance_once", _fake_once)
+    await asyncio.wait_for(
+        run_maintenance_worker(get_settings(), stop_event),
+        timeout=2.0,
+    )
+    assert startup_calls == 1
 
 
 
