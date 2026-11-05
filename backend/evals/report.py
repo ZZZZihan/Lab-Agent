@@ -98,6 +98,38 @@ def _load_result_records(
     return records
 
 
+def _load_e2e_records(results_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    e2e_dir = results_dir / "e2e"
+    if not e2e_dir.exists():
+        return records
+    for path in sorted(e2e_dir.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("suite") != "e2e" and "llm_model" not in doc:
+            continue
+        metrics = doc.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        raw_date = doc.get("generated_at") or doc.get("date") or "unknown"
+        records.append(
+            {
+                "path": path,
+                "slug": path.stem,
+                "doc": doc,
+                "dataset": str(doc.get("dataset") or "v1"),
+                "split": str(doc.get("split") or "test"),
+                "date": _extract_date(raw_date),
+                "git_sha": str(doc.get("git_sha") or "unknown"),
+            }
+        )
+    return records
+
+
 def render_eval_block(results_dir: Path, calibrations_dir: Path) -> str:
     records = _load_result_records(results_dir, calibrations_dir)
     lines: list[str] = []
@@ -188,6 +220,84 @@ def render_eval_block(results_dir: Path, calibrations_dir: Path) -> str:
         )
         lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |")
         lines.extend(type_rows)
+
+    e2e_records = _load_e2e_records(results_dir)
+    if e2e_records:
+        show_judge_col = any(
+            isinstance(r["doc"].get("judge"), dict)
+            and r["doc"]["judge"].get("human_reviewed") is True
+            and r["doc"]["judge"].get("human_agreement") is not None
+            for r in e2e_records
+        )
+        lines.append("")
+        lines.append("### End-to-End Generation Evaluation")
+        lines.append("")
+        header = (
+            "| LLM Model | Returned Model | Embedding | Dataset | Split | Questions "
+            "| Refusal | False Refusal | False Answer | Citation P | Citation R | Citation F1 "
+            "| Invalid Cite | Unannotated | Fact Recall | TTFT p50/p95 (ms) | Latency p50/p95 (ms) | Tokens |"
+        )
+        sep = (
+            "| --- | --- | --- | --- | --- | ---: "
+            "| ---: | ---: | ---: | ---: | ---: | ---: "
+            "| ---: | ---: | ---: | ---: | ---: | ---: |"
+        )
+        if show_judge_col:
+            header += " Judge Faithfulness (Agreement) |"
+            sep += " ---: |"
+        header += " Date | Git SHA |"
+        sep += " --- | --- |"
+        lines.append(header)
+        lines.append(sep)
+
+        for rec in e2e_records:
+            doc = rec["doc"]
+            metrics = doc["metrics"]
+            llm_model = _escape_md_cell(str(doc.get("llm_model") or "unknown"))
+            ret_ids = doc.get("returned_model_ids") or []
+            ret_str = (
+                _escape_md_cell(", ".join(str(x) for x in ret_ids))
+                if isinstance(ret_ids, list) and ret_ids
+                else llm_model
+            )
+            fp = _escape_md_cell(str(doc.get("embedding_fingerprint") or "unknown"))
+            ds = _escape_md_cell(str(rec["dataset"]))
+            sp = _escape_md_cell(str(rec["split"]))
+            n_q = int(doc.get("n_questions") or 0)
+            ttft = metrics.get("ttft_ms") or {}
+            tlat = metrics.get("total_latency_ms") or {}
+            usage = metrics.get("usage") or {}
+            ttft_cell = f"{float(ttft.get('p50', 0.0)):.0f} / {float(ttft.get('p95', 0.0)):.0f}"
+            tlat_cell = f"{float(tlat.get('p50', 0.0)):.0f} / {float(tlat.get('p95', 0.0)):.0f}"
+            tok_total = int(usage.get("total_tokens") or 0)
+
+            row_str = (
+                f"| `{llm_model}` | `{ret_str}` | `{fp}` | `{ds}` | {sp} | {n_q} "
+                f"| {_fmt_metric(metrics.get('e2e_refusal_correctness'))} "
+                f"| {_fmt_metric(metrics.get('false_refusal_rate'))} "
+                f"| {_fmt_metric(metrics.get('false_answer_rate'))} "
+                f"| {_fmt_metric(metrics.get('citation_precision'))} "
+                f"| {_fmt_metric(metrics.get('citation_recall'))} "
+                f"| {_fmt_metric(metrics.get('citation_f1'))} "
+                f"| {_fmt_metric(metrics.get('invalid_citation_rate'))} "
+                f"| {_fmt_metric(metrics.get('unannotated_rate'))} "
+                f"| {_fmt_metric(metrics.get('answer_fact_recall'))} "
+                f"| {ttft_cell} | {tlat_cell} | {tok_total} |"
+            )
+            if show_judge_col:
+                judge_info = doc.get("judge")
+                if (
+                    isinstance(judge_info, dict)
+                    and judge_info.get("human_reviewed") is True
+                    and judge_info.get("human_agreement") is not None
+                ):
+                    f_score = float(judge_info.get("faithfulness_score") or 0.0)
+                    h_agree = float(judge_info.get("human_agreement") or 0.0)
+                    row_str += f" {f_score:.3f} ({h_agree:.2f}) |"
+                else:
+                    row_str += " — |"
+            row_str += f" {_escape_md_cell(str(rec['date']))} | `{_escape_md_cell(str(rec['git_sha']))}` |"
+            lines.append(row_str)
 
     return "\n".join(lines)
 

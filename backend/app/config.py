@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     llm_max_tokens: int = 800
     llm_redact: bool = True
+    judge_model: str = ""
+    judge_api_key: SecretStr = SecretStr("")
+    judge_api_key_file: str = "~/.config/lab-agent/magpie-judge.key"
+    judge_base_url: str = ""
     embedder: Literal["hashing", "bge", "openai_compatible"] = "hashing"
     embedding_base_url: str | None = None
     embedding_api_key: SecretStr | None = None
@@ -294,6 +298,8 @@ class Settings(BaseSettings):
         if self.llm_provider == "openai_compatible":
             if not self.llm_model.strip() or self.llm_model.strip() == "fake-grounded-v1":
                 raise RuntimeError("LLM_MODEL must be explicitly set for openai_compatible")
+        if not self.judge_base_url.strip() and self.llm_base_url:
+            self.judge_base_url = self.llm_base_url
         if self.llm_capture and self.app_env != "test":
             raise RuntimeError("LLM_CAPTURE is only allowed when APP_ENV=test")
         if not 1 <= self.audit_retention_days <= 3650:

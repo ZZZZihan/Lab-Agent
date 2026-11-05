@@ -34,6 +34,7 @@ class Usage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     estimated: bool = False
+    returned_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ class FakeLLM:
         usage.prompt_tokens = max(1, (len(question) + evidence_chars) // 2)
         usage.completion_tokens = max(1, len(text) // 2)
         usage.estimated = True
+        usage.returned_model = self.model
         step = 16
         for index in range(0, len(text), step):
             yield text[index : index + step]
@@ -285,6 +287,9 @@ class OpenAICompatibleLLM:
                             continue
                         if parsed.get("error"):
                             raise LLMUnavailable("bad_stream")
+                        raw_model = parsed.get("model")
+                        if isinstance(raw_model, str) and raw_model.strip():
+                            usage.returned_model = raw_model.strip()
                         raw_usage = parsed.get("usage")
                         if isinstance(raw_usage, dict) and (
                             raw_usage.get("prompt_tokens") is not None
