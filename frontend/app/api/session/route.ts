@@ -17,12 +17,36 @@ function cookieOptions(maxAge?: number) {
   };
 }
 
-export async function GET() {
+function extractClientIp(request: Request): string | null {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  const realIp = request.headers.get("x-real-ip")?.trim();
+  if (realIp) return realIp;
+  return null;
+}
+
+function buildProxyHeaders(request: Request, init?: Record<string, string>): Headers {
+  const headers = new Headers(init);
+  const clientIp = extractClientIp(request);
+  if (clientIp) {
+    headers.set("X-Client-IP", clientIp);
+  }
+  const secret = process.env.INTERNAL_PROXY_SECRET?.trim();
+  if (secret) {
+    headers.set("X-Internal-Proxy-Secret", secret);
+  }
+  return headers;
+}
+
+export async function GET(request: Request) {
   const jar = await cookies();
   const token = jar.get(COOKIE)?.value;
   if (!token) return NextResponse.json({ error: { code: "unauthorized" } }, { status: 401 });
   const upstream = await fetch(`${apiBase()}/api/v1/auth/me`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: buildProxyHeaders(request, { Authorization: `Bearer ${token}` }),
     cache: "no-store",
   });
   const body = await upstream.text();
@@ -39,7 +63,7 @@ export async function POST(request: Request) {
   const payload = await request.text();
   const upstream = await fetch(`${apiBase()}/api/v1/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildProxyHeaders(request, { "Content-Type": "application/json" }),
     body: payload,
   });
   const raw = await upstream.text();
@@ -59,13 +83,13 @@ export async function POST(request: Request) {
   return NextResponse.json({ user: parsed.user });
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   const jar = await cookies();
   const token = jar.get(COOKIE)?.value;
   if (token) {
     await fetch(`${apiBase()}/api/v1/auth/logout`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: buildProxyHeaders(request, { Authorization: `Bearer ${token}` }),
     }).catch(() => undefined);
   }
   jar.set(COOKIE, "", { ...cookieOptions(1), maxAge: 0 });

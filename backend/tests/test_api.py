@@ -695,3 +695,131 @@ async def test_project_question_retrieves_from_knowledge_collection(
         for item in items
         if isinstance(item, dict)
     )
+
+
+async def test_client_ip_forwarding_and_login_rate_limit_audit(
+    client: AsyncClient, people: dict[str, dict[str, str]]
+) -> None:
+    del people
+    import fakeredis.aioredis
+    from app.audit import hash_ip
+    from app.main import app
+    from pydantic import SecretStr
+
+    proxy_secret = "ci-only-jwt-secret-value-0123456789-abcdef"
+    jwt_secret_val = app.state.settings.jwt_secret.get_secret_value()
+    original_proxy_secret = app.state.settings.internal_proxy_secret
+    original_rate_limit = app.state.settings.rate_limit_enabled
+    original_redis = app.state.limiter.redis
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    app.state.settings.internal_proxy_secret = SecretStr(proxy_secret)
+    try:
+        # 1. Valid X-Internal-Proxy-Secret + valid X-Client-IP -> ip_hash matches 203.0.113.7
+        resp_ok = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "member@lab.local", "password": PASSWORD},
+            headers={
+                "X-Internal-Proxy-Secret": proxy_secret,
+                "X-Client-IP": "203.0.113.7",
+            },
+        )
+        assert resp_ok.status_code == 200
+        expected_forwarded_hash = hash_ip("203.0.113.7", jwt_secret_val)
+
+        maker = get_sessionmaker()
+        async with maker() as session:
+            row = await session.execute(
+                text("SELECT ip_hash FROM audit_events WHERE action = 'login' ORDER BY id DESC LIMIT 1")
+            )
+            assert row.scalar_one() == expected_forwarded_hash
+
+        # 2. Wrong X-Internal-Proxy-Secret -> X-Client-IP is ignored
+        resp_wrong_secret = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "member@lab.local", "password": PASSWORD},
+            headers={
+                "X-Internal-Proxy-Secret": "wrong-secret",
+                "X-Client-IP": "203.0.113.7",
+            },
+        )
+        assert resp_wrong_secret.status_code == 200
+        async with maker() as session:
+            row = await session.execute(
+                text("SELECT ip_hash FROM audit_events WHERE action = 'login' ORDER BY id DESC LIMIT 1")
+            )
+            fallback_hash = row.scalar_one()
+            assert fallback_hash != expected_forwarded_hash
+            assert fallback_hash == hash_ip("127.0.0.1", jwt_secret_val)
+
+        # 3. Valid secret + invalid X-Client-IP -> ignored, falls back to request.client.host
+        resp_bad_ip = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "member@lab.local", "password": PASSWORD},
+            headers={
+                "X-Internal-Proxy-Secret": proxy_secret,
+                "X-Client-IP": "not-an-ip-address",
+            },
+        )
+        assert resp_bad_ip.status_code == 200
+        async with maker() as session:
+            row = await session.execute(
+                text("SELECT ip_hash FROM audit_events WHERE action = 'login' ORDER BY id DESC LIMIT 1")
+            )
+            assert row.scalar_one() == hash_ip("127.0.0.1", jwt_secret_val)
+
+        # 4. Dual-bucket login rate limiting writes login_rate_limited audit event
+        app.state.settings.rate_limit_enabled = True
+        app.state.limiter.redis = fake_redis
+
+        # Alternate two accounts 15 times (8 + 7) from the same IP without affecting each other
+        for i in range(15):
+            email = "member@lab.local" if i % 2 == 0 else "zhou@lab.local"
+            r = await client.post(
+                "/api/v1/auth/login",
+                json={"email": email, "password": PASSWORD},
+                headers={
+                    "X-Internal-Proxy-Secret": proxy_secret,
+                    "X-Client-IP": "203.0.113.8",
+                },
+            )
+            assert r.status_code == 200
+
+        # Account bucket: 2 more attempts on member@lab.local reach 10, 11th returns 429
+        for _ in range(2):
+            r = await client.post(
+                "/api/v1/auth/login",
+                json={"email": "member@lab.local", "password": PASSWORD},
+                headers={
+                    "X-Internal-Proxy-Secret": proxy_secret,
+                    "X-Client-IP": "203.0.113.8",
+                },
+            )
+            assert r.status_code == 200
+
+        r_acct_limited = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "member@lab.local", "password": PASSWORD},
+            headers={
+                "X-Internal-Proxy-Secret": proxy_secret,
+                "X-Client-IP": "203.0.113.8",
+            },
+        )
+        assert r_acct_limited.status_code == 429
+        assert r_acct_limited.json()["error"]["code"] == "rate_limited"
+
+        async with maker() as session:
+            row = await session.execute(
+                text(
+                    "SELECT ip_hash, detail FROM audit_events "
+                    "WHERE action = 'login_rate_limited' ORDER BY id DESC LIMIT 1"
+                )
+            )
+            ip_hash_row, detail_row = row.one()
+            assert ip_hash_row == hash_ip("203.0.113.8", jwt_secret_val)
+            assert detail_row == {"bucket": "account"}
+    finally:
+        app.state.settings.internal_proxy_secret = original_proxy_secret
+        app.state.settings.rate_limit_enabled = original_rate_limit
+        app.state.limiter.redis = original_redis
+        await fake_redis.aclose()

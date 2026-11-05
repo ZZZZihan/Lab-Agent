@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+from typing import Literal
+
 import redis.asyncio as redis
 
 from app.config import Settings
 from app.logging_conf import get_logger
 
 log = get_logger("ratelimit")
+
+
+def login_ip_bucket(ip: str | None) -> str:
+    return f"login:ip:{ip or 'unknown'}"
+
+
+def login_account_bucket(email: str) -> str:
+    email_lower = email.strip().lower()
+    digest = hashlib.sha256(email_lower.encode("utf-8")).hexdigest()[:16]
+    return f"login:acct:{digest}"
 
 
 class RateLimiter:
@@ -26,6 +39,23 @@ class RateLimiter:
         except redis.RedisError:
             log.warning("rate_limit_backend_unavailable", env=self.settings.app_env)
             return self.settings.app_env != "prod"
+
+    async def check_login(
+        self, ip: str | None, email: str
+    ) -> Literal["ip", "account"] | None:
+        if not await self.allow(
+            login_ip_bucket(ip),
+            self.settings.login_ip_rate_limit,
+            self.settings.login_ip_rate_window_seconds,
+        ):
+            return "ip"
+        if not await self.allow(
+            login_account_bucket(email),
+            self.settings.login_account_rate_limit,
+            self.settings.login_account_rate_window_seconds,
+        ):
+            return "account"
+        return None
 
     async def ping(self) -> bool:
         try:

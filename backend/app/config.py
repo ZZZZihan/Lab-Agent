@@ -139,9 +139,12 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 5_000_000
     otel_exporter: Literal["none", "console", "otlp"] = "none"
     otel_endpoint: str | None = None
+    internal_proxy_secret: SecretStr | None = None
     rate_limit_enabled: bool = True
-    login_rate_limit: int = 10
-    login_rate_window_seconds: int = 60
+    login_ip_rate_limit: int = 30
+    login_ip_rate_window_seconds: int = 60
+    login_account_rate_limit: int = 10
+    login_account_rate_window_seconds: int = 900
     chat_rate_limit: int = 30
     chat_rate_window_seconds: int = 60
     llm_capture: bool = False
@@ -157,6 +160,17 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce(self) -> Self:
         assert_strong_secret(self.jwt_secret.get_secret_value(), "JWT_SECRET")
+        if (
+            self.internal_proxy_secret is not None
+            and not self.internal_proxy_secret.get_secret_value().strip()
+        ):
+            self.internal_proxy_secret = None
+        if self.app_env == "prod" and self.internal_proxy_secret is None:
+            raise RuntimeError("INTERNAL_PROXY_SECRET is required when APP_ENV=prod")
+        if self.internal_proxy_secret is not None:
+            assert_strong_secret(
+                self.internal_proxy_secret.get_secret_value(), "INTERNAL_PROXY_SECRET"
+            )
         if not 64 <= self.embedding_dim <= 4096:
             raise RuntimeError("EMBEDDING_DIM must be between 64 and 4096")
         if self.embedding_native_dim is not None:
@@ -253,7 +267,7 @@ class Settings(BaseSettings):
             raise RuntimeError("AUDIT_RETENTION_DAYS must be between 1 and 3650")
         if self.oidc_issuer and not self.oidc_audience:
             raise RuntimeError("OIDC_AUDIENCE is required when OIDC_ISSUER is set")
-        if self.app_env == "test":
+        if self.app_env == "test" and "rate_limit_enabled" not in self.model_fields_set:
             self.rate_limit_enabled = False
         root = repo_root()
         if not self.corpus_dir:

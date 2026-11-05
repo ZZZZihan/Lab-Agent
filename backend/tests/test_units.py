@@ -462,3 +462,122 @@ async def test_run_eval_check_exits_3_for_uncalibrated_embedder(
         reset_settings_cache()
 
 
+def test_internal_proxy_secret_and_rate_limit_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RATE_LIMIT_ENABLED", raising=False)
+    monkeypatch.delenv("INTERNAL_PROXY_SECRET", raising=False)
+
+    default_test = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="test",
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        load_tuned_config=False,
+    )
+    assert default_test.rate_limit_enabled is False
+    assert default_test.login_ip_rate_limit == 30
+    assert default_test.login_ip_rate_window_seconds == 60
+    assert default_test.login_account_rate_limit == 10
+    assert default_test.login_account_rate_window_seconds == 900
+
+    explicit_test = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="test",
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        rate_limit_enabled=True,
+        load_tuned_config=False,
+    )
+    assert explicit_test.rate_limit_enabled is True
+
+    with pytest.raises(RuntimeError, match="INTERNAL_PROXY_SECRET is required when APP_ENV=prod"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            app_env="prod",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+            jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            cors_origins="http://localhost:43123",
+            llm_capture=False,
+            load_tuned_config=False,
+        )
+
+    with pytest.raises(RuntimeError, match="INTERNAL_PROXY_SECRET"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            app_env="prod",
+            database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+            jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+            internal_proxy_secret="short-secret",  # type: ignore[arg-type]
+            cors_origins="http://localhost:43123",
+            llm_capture=False,
+            load_tuned_config=False,
+        )
+
+    prod_ok = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="prod",
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        internal_proxy_secret="ci-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        llm_capture=False,
+        load_tuned_config=False,
+    )
+    assert prod_ok.internal_proxy_secret is not None
+
+
+async def test_rate_limiter_login_ip_and_account_buckets() -> None:
+    import hashlib
+
+    import fakeredis.aioredis
+    from app.ratelimit import RateLimiter, login_account_bucket, login_ip_bucket
+
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="test",
+        database_url="postgresql+asyncpg://labagent:labagent@localhost/labagent",
+        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+        cors_origins="http://localhost:43123",
+        rate_limit_enabled=True,
+        load_tuned_config=False,
+    )
+    assert settings.rate_limit_enabled is True
+
+    limiter = RateLimiter(settings)
+    await limiter.close()
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    limiter.redis = fake_redis
+
+    try:
+        email = "  Alice@QingHeng.Lab "
+        expected_acct_key = (
+            f"login:acct:{hashlib.sha256(b'alice@qingheng.lab').hexdigest()[:16]}"
+        )
+        assert login_account_bucket(email) == expected_acct_key
+        assert login_ip_bucket("203.0.113.7") == "login:ip:203.0.113.7"
+
+        # Account bucket: 10 attempts allowed, 11th triggers "account"
+        for _ in range(10):
+            assert await limiter.check_login("203.0.113.7", email) is None
+        assert await limiter.check_login("203.0.113.7", "alice@qingheng.lab") == "account"
+        acct_ttl = await fake_redis.ttl(expected_acct_key)
+        assert 0 < acct_ttl <= 900
+
+        # A different account from the same IP is still allowed (IP count is 12 <= 30)
+        assert await limiter.check_login("203.0.113.7", "bob@qingheng.lab") is None
+
+        # IP bucket: 30 attempts across distinct accounts allowed, 31st triggers "ip"
+        ip2 = "198.51.100.42"
+        for i in range(30):
+            acct = f"member-{i // 5}@qingheng.lab"
+            assert await limiter.check_login(ip2, acct) is None
+        assert await limiter.check_login(ip2, "fresh@qingheng.lab") == "ip"
+        ip_ttl = await fake_redis.ttl("login:ip:198.51.100.42")
+        assert 0 < ip_ttl <= 60
+    finally:
+        await limiter.close()
+
+
