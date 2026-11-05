@@ -97,6 +97,29 @@ jobs:
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
-        run: npm run lint && npx tsc --noEmit
+        run: npm run lint && npx tsc --noEmit && npm run build
       - working-directory: frontend
         run: npm audit --audit-level=high
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run offline compose smoke test
+        run: ./scripts/demo.sh --offline
+      - name: Collect compose logs on failure
+        if: failure()
+        run: |
+          mkdir -p compose-logs
+          docker compose -f docker-compose.yml -f docker-compose.offline.yml ps > compose-logs/ps.txt || true
+          docker compose -f docker-compose.yml -f docker-compose.offline.yml logs --no-color > compose-logs/compose.log || true
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-smoke-logs
+          path: compose-logs/
+      - name: Tear down compose stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.offline.yml down -v || true
+

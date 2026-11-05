@@ -589,3 +589,152 @@ async def test_rate_limiter_login_ip_and_account_buckets() -> None:
         await limiter.close()
 
 
+def test_smoke_parse_sse_events() -> None:
+    from app.smoke import parse_sse_events
+
+    raw = (
+        ": keep-alive comment\n\n"
+        'event: status\r\ndata: {"type": "status", "phase": "search_knowledge_base"}\r\n\r\n'
+        'event: citations\ndata: {"type": "citations", "items": [{"document_id": "doc-1", "index": 1}]}\n\n'
+        'event: token\ndata: {"type": "token", "text": "门禁每 17 天"}\n\n'
+        'event: token\ndata: {"text": "轮换 [1]。"}\n\n'
+        'event: citation_check\ndata: {"type": "citation_check", "used": [1], "invalid": [], "uncited": false}\n\n'
+        "data: [DONE]\n\n"
+        'event: done\ndata: {"type": "done", "refused": false, "conversation_id": "c1", "message_id": "m1"}\n\n'
+    )
+    events = parse_sse_events(raw)
+    assert [e["type"] for e in events] == [
+        "status",
+        "citations",
+        "token",
+        "token",
+        "citation_check",
+        "done",
+    ]
+    assert "".join(str(e.get("text") or "") for e in events if e["type"] == "token") == (
+        "门禁每 17 天轮换 [1]。"
+    )
+    assert events[1]["items"] == [{"document_id": "doc-1", "index": 1}]
+    assert events[-1]["refused"] is False
+
+
+async def test_run_smoke_offline_and_real_modes() -> None:
+    import json
+    import urllib.parse
+
+    import httpx
+    from app.smoke import run_smoke
+
+    def make_transport(*, real_mode: bool) -> httpx.MockTransport:
+        uploaded_docs: dict[str, dict[str, str]] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/v1/health":
+                fp = (
+                    "openai_compatible|lab-agent-qwen3-embed@64b933495768|4096h|redact=0|qp=0b6f261e|dp=e3b0c442"
+                    if real_mode
+                    else "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "database": True,
+                        "redis": True,
+                        "index_ok": True,
+                        "calibrated": True,
+                        "embedding_fingerprint": fp,
+                        "embedding_index": "none" if real_mode else "hnsw",
+                        "llm_provider": "openai_compatible" if real_mode else "fake",
+                    },
+                )
+            if path == "/api/session" and request.method == "POST":
+                body = json.loads(request.content.decode("utf-8"))
+                email = str(body["email"])
+                return httpx.Response(
+                    200,
+                    headers={"set-cookie": f"la_session={email}; Path=/; HttpOnly"},
+                    json={"user": {"id": "u1", "display_name": "测试", "role": "member"}},
+                )
+            cookie = request.headers.get("cookie") or ""
+            if path == "/api/backend/documents" and request.method == "POST":
+                if "viewer@lab.local" in cookie:
+                    return httpx.Response(403, json={"error": {"code": "forbidden"}})
+                parsed_form = urllib.parse.parse_qs(request.content.decode("utf-8"))
+                title = parsed_form.get("title", ["doc"])[0]
+                doc_id = "doc-uploaded-1"
+                uploaded_docs[doc_id] = {"id": doc_id, "title": title, "status": "ready"}
+                return httpx.Response(202, json={"id": doc_id, "status": "pending"})
+            if path == "/api/backend/documents" and request.method == "GET":
+                docs = list(uploaded_docs.values())
+                if "admin@lab.local" in cookie or "member@lab.local" in cookie:
+                    docs.append(
+                        {
+                            "id": "helios-doc-id",
+                            "title": "项目赫利俄斯",
+                            "doc_key": "project-helios",
+                            "status": "ready",
+                        }
+                    )
+                return httpx.Response(200, json={"documents": docs})
+            if path == "/api/backend/documents/helios-doc-id" and request.method == "GET":
+                if "zhou@lab.local" in cookie:
+                    return httpx.Response(404, json={"error": {"code": "not_found"}})
+                return httpx.Response(200, json={"id": "helios-doc-id", "title": "项目赫利俄斯"})
+            if path.startswith("/api/backend/documents/") and request.method == "DELETE":
+                doc_id = path.rsplit("/", 1)[-1]
+                uploaded_docs.pop(doc_id, None)
+                return httpx.Response(200, json={"status": "deleted"})
+            if path == "/api/backend/chat/stream" and request.method == "POST":
+                msg = str(json.loads(request.content.decode("utf-8")).get("message") or "")
+                if "火星基地" in msg:
+                    sse = (
+                        'event: refusal\ndata: {"type": "refusal", "reason": "low_score"}\n\n'
+                        'event: done\ndata: {"type": "done", "refused": true}\n\n'
+                    )
+                else:
+                    sse = (
+                        'event: citations\ndata: {"type": "citations", "items": [{"document_id": "doc-uploaded-1", "index": 1}]}\n\n'
+                        'event: token\ndata: {"type": "token", "text": "门禁每 17 天轮换一次 [1]。"}\n\n'
+                        'event: citation_check\ndata: {"type": "citation_check", "used": [1], "invalid": [], "uncited": false}\n\n'
+                        'event: done\ndata: {"type": "done", "refused": false}\n\n'
+                    )
+                return httpx.Response(200, text=sse)
+            if path == "/api/backend/search" and request.method == "POST":
+                return httpx.Response(200, json={"hits": []})
+            if path == "/api/backend/audit" and request.method == "GET":
+                events = [
+                    {"action": "login", "detail": {}},
+                    {"action": "document_upload", "detail": {}},
+                    {"action": "document_indexed", "detail": {}},
+                    {"action": "retrieval", "detail": {}},
+                    {"action": "answer_refused", "detail": {}},
+                    {"action": "permission_denied", "detail": {}},
+                    {"action": "llm_call", "detail": {}},
+                ]
+                return httpx.Response(200, json={"events": events})
+            return httpx.Response(404)
+
+        return httpx.MockTransport(handler)
+
+    code_off, table_off = await run_smoke(
+        web_url="http://web:3000",
+        api_url="http://127.0.0.1:8000",
+        offline=True,
+        transport=make_transport(real_mode=False),
+    )
+    assert code_off == 0, table_off
+    assert "S9 cleanup" in table_off
+
+    code_real, table_real = await run_smoke(
+        web_url="http://web:3000",
+        api_url="http://127.0.0.1:8000",
+        offline=False,
+        transport=make_transport(real_mode=True),
+    )
+    assert code_real == 0, table_real
+    assert "S9 cleanup" in table_real
+
+
+
+

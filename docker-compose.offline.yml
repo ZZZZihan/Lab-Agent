@@ -1,0 +1,22 @@
+services:
+  api:
+    environment:
+      LLM_PROVIDER: fake
+      LLM_MODEL: fake-grounded-v1
+      LLM_API_KEY_FILE: ""
+      EMBEDDER: hashing
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_MODEL_VERSION: ""
+      EMBEDDING_DIM: "512"
+      EMBEDDING_STORAGE: vector
+      EMBEDDING_INDEX: auto
+      EMBEDDING_QUERY_TEMPLATE: "{query}"
+      EMBEDDING_QUERY_INSTRUCTION: ""
+      EMBEDDING_DOCUMENT_PREFIX: ""
+      EMBEDDING_REDACT: "false"
+      EVIDENCE_SCORE_MIN: "0.30"
+      RARE_COVERAGE_MIN: "0.35"
+
+secrets:
+  magpie_key:
+    file: ./docker/empty-secret

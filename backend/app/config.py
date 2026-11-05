@@ -179,6 +179,8 @@ class Settings(BaseSettings):
             )
         if not 64 <= self.embedding_dim <= 4096:
             raise RuntimeError("EMBEDDING_DIM must be between 64 and 4096")
+        if self.embedder == "hashing":
+            self.embedding_native_dim = None
         if self.embedding_native_dim is not None:
             if not 64 <= self.embedding_native_dim <= 16000:
                 raise RuntimeError("EMBEDDING_NATIVE_DIM must be between 64 and 16000")
@@ -242,12 +244,13 @@ class Settings(BaseSettings):
         if not origins or any(origin == "*" for origin in origins):
             raise RuntimeError("CORS_ORIGINS must be an explicit list and cannot contain *")
         self.cors_origins = ",".join(origins)
-        self.llm_api_key = read_secret(
-            self.llm_api_key.get_secret_value() if self.llm_api_key is not None else None,
-            self.llm_api_key_file or None,
-            "LLM_API_KEY",
-            app_env=self.app_env,
-        )
+        if self.llm_provider not in {"fake", "ollama"} or self.llm_api_key is not None:
+            self.llm_api_key = read_secret(
+                self.llm_api_key.get_secret_value() if self.llm_api_key is not None else None,
+                self.llm_api_key_file or None,
+                "LLM_API_KEY",
+                app_env=self.app_env,
+            )
         if self.llm_provider not in {"fake", "ollama"} and not (
             self.llm_api_key and len(self.llm_api_key.get_secret_value()) >= 8
         ):
