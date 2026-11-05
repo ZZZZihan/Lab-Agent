@@ -102,3 +102,44 @@ After signing in as the administrator, additional users and project groups can b
      docker compose exec -T api python -m app.admin_cli verify-audit
      ```
    - Periodic retention cleanup runs automatically every `MAINTENANCE_INTERVAL_SECONDS` (default `86400`s) under a Redis distributed lock (`maintenance:lock`).
+
+---
+
+## 6. Containerized Linux Ollama Deployment (`--profile linux-embed`)
+
+When deploying on a Linux server without a Mac host or host-installed Ollama, enable the `linux-embed` Compose profile. This starts:
+- `embedder` (`ollama/ollama:0.32.14`, persisted in volume `ollama_models`, bound on loopback `127.0.0.1:${OLLAMA_CONTAINER_PORT:-11435}:11434`), and
+- `embedder-init` (one-shot initializer that pulls `${OLLAMA_BASE_MODEL:-qwen3-embedding:8b}` and builds `lab-agent-qwen3-embed` with `num_ctx 8192` from `/Modelfile.qwen3-embed`).
+
+### Quick Start on Linux
+
+```bash
+export LLM_MODEL=claude-sonnet-5-5
+./scripts/init-env.sh --linux-embed
+docker compose --profile linux-embed up -d --build --wait
+```
+
+(Or run the full end-to-end setup and smoke suite with `./scripts/demo.sh --linux-embed`. `--linux-embed` sets `EMBEDDING_BASE_URL=http://embedder:11434/v1` in `.env` so `api` communicates with the `embedder` container over the internal Compose network.)
+
+### Optional NVIDIA GPU Passthrough
+
+On Linux hosts with an NVIDIA GPU and `nvidia-container-toolkit` installed, create a `docker-compose.gpu.yml` override to attach GPU resources to `embedder`:
+
+```yaml
+services:
+  embedder:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+Then start with:
+
+```bash
+docker compose --profile linux-embed -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --wait
+```
+
