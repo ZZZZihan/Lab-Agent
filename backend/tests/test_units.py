@@ -1107,8 +1107,10 @@ def test_evals_report_generation_and_check_mode(tmp_path: Path) -> None:
     rendered_results = results_readme.read_text(encoding="utf-8")
     rendered_root = root_readme.read_text(encoding="utf-8")
 
+    escaped_fp = fp.replace("|", r"\|")
     for content in (rendered_results, rendered_root):
-        assert fp in content
+        assert f"`{escaped_fp}`" in content
+        assert f"`{fp}`" not in content
         assert "`v1`" in content
         assert "2026-11-05" in content
         assert "`abc1234`" in content

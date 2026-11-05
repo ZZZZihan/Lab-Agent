@@ -21,6 +21,10 @@ MODE_LABELS: dict[str, str] = {
 }
 
 
+def _escape_md_cell(text: str) -> str:
+    return text.replace("|", r"\|")
+
+
 def _fmt_metric(val: Any) -> str:
     if val is None:
         return "—"
@@ -113,10 +117,10 @@ def render_eval_block(results_dir: Path, calibrations_dir: Path) -> str:
 
     for rec in records:
         doc = rec["doc"]
-        fp = str(doc["embedder_fingerprint"])
-        dataset = rec["dataset"]
-        date_str = rec["date"]
-        git_sha = rec["git_sha"]
+        fp = _escape_md_cell(str(doc["embedder_fingerprint"]))
+        dataset = _escape_md_cell(str(rec["dataset"]))
+        date_str = _escape_md_cell(str(rec["date"]))
+        git_sha = _escape_md_cell(str(rec["git_sha"]))
         selected_mode = str(doc.get("selected_mode") or "dense")
         modes = doc.get("modes") or {}
         questions_meta = doc.get("questions") or {}
