@@ -11,7 +11,7 @@ import docx
 from app.auth import hash_password
 from app.db import get_sessionmaker
 from app.importer.pii import assert_no_pii
-from app.models import Chunk, Document, User
+from app.models import Chunk, Document, DocumentACL, Group, User
 from httpx import AsyncClient
 from sqlalchemy import select, text
 
@@ -891,6 +891,9 @@ async def test_login_conflict_resolved_by_replacement_login_name(
     lin_person = next(
         p for p in job_data["preview"]["people"] if p["name"] == "林雪莹"
     )
+    shan_person = next(
+        p for p in job_data["preview"]["people"] if p["name"] == "单立飞"
+    )
     assert lin_person["match"]["status"] == "conflict"
     assert "LOGIN_CONFLICT" in lin_person["warnings"]
 
@@ -908,12 +911,32 @@ async def test_login_conflict_resolved_by_replacement_login_name(
         f"/api/v1/admin/imports/{job_id}/provision",
         json={
             "initial_password": INITIAL_PW,
-            "people": [{"key": lin_person["key"], "login_name": "linxueying2431"}],
+            "people": [
+                {"key": lin_person["key"], "login_name": "linxueying2431"},
+                {"key": shan_person["key"], "exclude": True},
+            ],
         },
         headers=headers,
     )
     assert ok_resp.status_code == 200, ok_resp.text
     assert ok_resp.json()["status"] == "provisioned"
+
+    # Downloaded roster reflects actual provisioning decisions (overridden login_name & excluded person omitted)
+    roster_dl = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster",
+        headers=headers,
+    )
+    assert roster_dl.status_code == 200
+    dl_text = roster_dl.json()["roster_text"]
+    dl_csv = roster_dl.json()["roster_csv"]
+    assert "linxueying2431" in dl_text
+    assert "linxueying2431" in dl_csv
+    assert "2431101262" not in dl_text
+    assert "2431101262" not in dl_csv
+    assert "单立飞" not in dl_text
+    assert "单立飞" not in dl_csv
+    assert "shanlifei" not in dl_text
+    assert "shanlifei" not in dl_csv
 
     # 林雪莹 can now log in with the replacement login_name
     r_login = await client.post(
@@ -1631,14 +1654,41 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_md_export.status_code == 200
     assert distinct_rel in r_md_export.content.decode("utf-8")
 
-    # --- Round 3 Regression A: Member edits and /lab/reindex preserve canonical profile document owner_id & visibility ---
+    # --- Round 3 & Round 4 Regression A: Member edits, /lab/reindex, and new import replacement
+    # preserve canonical profile document owner_id, visibility, and DocumentACL grants ---
     async with maker() as session:
         prof_doc_before = await session.scalar(
             select(Document).where(Document.doc_key == new_doc_key)
         )
         assert prof_doc_before is not None
         assert prof_doc_before.owner_id == admin_user.id
+        acl_group = Group(slug="profile-readers", name="档案授权阅读组")
+        session.add(acl_group)
+        await session.flush()
+        acl_group_id = acl_group.id
         prof_doc_before.visibility = "private"
+        session.add_all(
+            [
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="user",
+                    principal_id= str(yang_row["user_id"]),
+                    permission="read",
+                ),
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="group",
+                    principal_id=str(acl_group_id),
+                    permission="read",
+                ),
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="role",
+                    principal_id="pi",
+                    permission="read",
+                ),
+            ]
+        )
         await session.commit()
 
     r_member_reindex = await client.post("/api/v1/lab/reindex", headers=yang_headers)
@@ -1650,6 +1700,21 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
         assert prof_doc_after is not None
         assert prof_doc_after.owner_id == admin_user.id
         assert prof_doc_after.visibility == "private"
+        preserved_acls = list(
+            await session.scalars(
+                select(DocumentACL).where(
+                    DocumentACL.document_id == prof_doc_after.id
+                )
+            )
+        )
+        preserved_pairs = {
+            (row.principal_type, row.principal_id) for row in preserved_acls
+        }
+        assert preserved_pairs == {
+            ("user", str(yang_row["user_id"])),
+            ("group", str(acl_group_id)),
+            ("role", "pi"),
+        }
         prof_doc_after.visibility = "lab"
         await session.commit()
 

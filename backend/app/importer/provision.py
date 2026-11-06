@@ -33,6 +33,7 @@ from app.importer.pii import assert_no_pii
 from app.models import (
     Chunk,
     Document,
+    DocumentACL,
     ImportJob,
     LabAchievement,
     LabFacility,
@@ -248,7 +249,9 @@ async def provision_import_job(
         pkey = str(person.get("key") or "")
         ov = overrides_by_key.get(pkey)
         if ov and ov.exclude:
+            person["exclude"] = True
             continue
+        person["exclude"] = False
 
         cur_warnings = person.get("warnings")
         warn_list = list(cur_warnings) if isinstance(cur_warnings, list) else []
@@ -258,6 +261,8 @@ async def provision_import_job(
             if linked_target is None:
                 raise ProvisionError(422, "link_user_invalid", f"关联的目标用户不存在 ({pkey})")
             person["match"] = {"status": "existing", "user_id": str(linked_target.id)}
+            if linked_target.login_name:
+                person["login_name"] = linked_target.login_name
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
             ]
@@ -384,7 +389,9 @@ async def provision_import_job(
                         "name": pname,
                         "login_name": existing_user.login_name or existing_user.email or "",
                         "has_email": existing_user.email is not None,
+                        "suffixed": False,
                         "affiliation": p_aff,
+                        "account_status": "existing",
                     }
                 )
             else:
@@ -409,6 +416,7 @@ async def provision_import_job(
                         "has_email": p_email is not None,
                         "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
                         "affiliation": p_aff,
+                        "account_status": "new",
                     }
                 )
 
@@ -599,6 +607,15 @@ async def provision_import_job(
             "开号过程中登录名或邮箱发生并发冲突，请刷新后重试",
         ) from exc
 
+    roster_rows: list[dict[str, object]] = [
+        *new_roster_items,
+        *existing_roster_items,
+    ]
+    preview["people"] = raw_people
+    preview["provisioned_roster_rows"] = roster_rows
+    assert_no_pii(preview)
+    job.preview = preview
+
     job.as_of_time = as_of_date
     job.status = "provisioned"
     job.provisioned_at = now_utc
@@ -623,6 +640,7 @@ async def provision_import_job(
         "facilities_inserted": fac_inserted,
         "facilities_skipped": fac_skipped,
         "rag_doc_key": doc_key,
+        "roster_rows": roster_rows,
     }
 
     job.rag_document_id = rag_doc.id if rag_doc is not None else None
@@ -816,6 +834,36 @@ async def sync_lab_profile_rag(
         )
         effective_owner_id = admin_user_id or actor_id
 
+    acl_source_doc = (
+        existing_doc
+        if (existing_doc is not None and existing_doc.deleted_at is None)
+        else (prev_profile_doc or existing_doc)
+    )
+    preserved_user_grants: list[uuid.UUID] = []
+    preserved_group_grants: list[uuid.UUID] = []
+    preserved_role_grants: list[str] = []
+    if acl_source_doc is not None:
+        existing_acl_rows = list(
+            await session.scalars(
+                select(DocumentACL).where(
+                    DocumentACL.document_id == acl_source_doc.id
+                )
+            )
+        )
+        for acl_row in existing_acl_rows:
+            if acl_row.principal_type == "user":
+                try:
+                    preserved_user_grants.append(uuid.UUID(acl_row.principal_id))
+                except ValueError:
+                    pass
+            elif acl_row.principal_type == "group":
+                try:
+                    preserved_group_grants.append(uuid.UUID(acl_row.principal_id))
+                except ValueError:
+                    pass
+            elif acl_row.principal_type == "role" and acl_row.principal_id:
+                preserved_role_grants.append(acl_row.principal_id)
+
     await upsert_source(
         session,
         embedder=embedder,
@@ -833,6 +881,13 @@ async def sync_lab_profile_rag(
                 profile_md,
             )
         ],
+        grants={doc_key: preserved_user_grants} if preserved_user_grants else None,
+        group_grants=(
+            {doc_key: preserved_group_grants} if preserved_group_grants else None
+        ),
+        role_grants=(
+            {doc_key: preserved_role_grants} if preserved_role_grants else None
+        ),
     )
     rag_doc = await session.scalar(select(Document).where(Document.doc_key == doc_key))
     if rag_doc is not None and rag_doc.owner_id != effective_owner_id:
@@ -869,70 +924,87 @@ async def build_job_roster(
 ) -> tuple[str, str]:
     """Re-render password-free text & CSV rosters for a provisioned ImportJob."""
     preview: dict[str, Any] = dict(job.preview or {})
-    raw_people_list = preview.get("people")
-    raw_people: list[dict[str, Any]] = [
-        dict(p)
-        for p in (raw_people_list if isinstance(raw_people_list, list) else [])
-        if isinstance(p, dict)
-    ]
-
-    users = list(await session.scalars(select(User)))
-    by_login = {
-        u.login_name.lower(): u
-        for u in users
-        if u.login_name is not None and u.login_name.strip()
-    }
-    by_email = {
-        u.email.lower(): u for u in users if u.email is not None and u.email.strip()
-    }
+    stats: dict[str, Any] = dict(job.stats or {})
+    persisted_rows = stats.get("roster_rows")
+    if not isinstance(persisted_rows, list):
+        persisted_rows = preview.get("provisioned_roster_rows")
 
     new_roster_items: list[dict[str, object]] = []
     existing_roster_items: list[dict[str, object]] = []
 
-    for person in raw_people:
-        pname = normalize_person_name(str(person.get("name") or ""))
-        p_login = str(person.get("login_name") or "").strip().lower()
-        p_email = str(person.get("email") or "").strip().lower() or None
-        p_aff = str(person.get("affiliation") or "").strip() or None
-        raw_w = person.get("warnings")
-        p_warnings = [str(w) for w in (raw_w if isinstance(raw_w, list) else [])]
+    if isinstance(persisted_rows, list):
+        for raw_row in persisted_rows:
+            if not isinstance(raw_row, dict):
+                continue
+            row_copy = dict(raw_row)
+            if str(row_copy.get("account_status") or "new") == "existing":
+                existing_roster_items.append(row_copy)
+            else:
+                new_roster_items.append(row_copy)
+    else:
+        raw_people_list = preview.get("people")
+        raw_people: list[dict[str, Any]] = [
+            dict(p)
+            for p in (raw_people_list if isinstance(raw_people_list, list) else [])
+            if isinstance(p, dict) and not p.get("exclude")
+        ]
 
-        matched_user = by_login.get(p_login) if p_login else None
-        if matched_user is None and p_email:
-            matched_user = by_email.get(p_email)
+        users = list(await session.scalars(select(User)))
+        by_login = {
+            u.login_name.lower(): u
+            for u in users
+            if u.login_name is not None and u.login_name.strip()
+        }
+        by_email = {
+            u.email.lower(): u
+            for u in users
+            if u.email is not None and u.email.strip()
+        }
 
-        effective_login = (
-            (matched_user.login_name or matched_user.email or p_login)
-            if matched_user is not None
-            else p_login
-        )
-        has_email = (
-            (matched_user.email is not None)
-            if matched_user is not None
-            else (p_email is not None)
-        )
+        for person in raw_people:
+            pname = normalize_person_name(str(person.get("name") or ""))
+            p_login = str(person.get("login_name") or "").strip().lower()
+            p_email = str(person.get("email") or "").strip().lower() or None
+            p_aff = str(person.get("affiliation") or "").strip() or None
+            raw_w = person.get("warnings")
+            p_warnings = [str(w) for w in (raw_w if isinstance(raw_w, list) else [])]
 
-        raw_match = person.get("match")
-        match_info = raw_match if isinstance(raw_match, dict) else {}
-        if str(match_info.get("status") or "new") == "existing":
-            existing_roster_items.append(
-                {
-                    "name": pname,
-                    "login_name": effective_login,
-                    "has_email": has_email,
-                    "affiliation": p_aff,
-                }
+            matched_user = by_login.get(p_login) if p_login else None
+            if matched_user is None and p_email:
+                matched_user = by_email.get(p_email)
+
+            effective_login = (
+                (matched_user.login_name or matched_user.email or p_login)
+                if matched_user is not None
+                else p_login
             )
-        else:
-            new_roster_items.append(
-                {
-                    "name": pname,
-                    "login_name": effective_login,
-                    "has_email": has_email,
-                    "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
-                    "affiliation": p_aff,
-                }
+            has_email = (
+                (matched_user.email is not None)
+                if matched_user is not None
+                else (p_email is not None)
             )
+
+            raw_match = person.get("match")
+            match_info = raw_match if isinstance(raw_match, dict) else {}
+            if str(match_info.get("status") or "new") == "existing":
+                existing_roster_items.append(
+                    {
+                        "name": pname,
+                        "login_name": effective_login,
+                        "has_email": has_email,
+                        "affiliation": p_aff,
+                    }
+                )
+            else:
+                new_roster_items.append(
+                    {
+                        "name": pname,
+                        "login_name": effective_login,
+                        "has_email": has_email,
+                        "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
+                        "affiliation": p_aff,
+                    }
+                )
 
     oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
     base_time = job.provisioned_at or job.created_at or datetime.now(UTC)
