@@ -14,42 +14,51 @@
   "embedding_fingerprint": "openai_compatible|qwen3-embedding:8b@64b933495768|4096h|redact=0|qp=e1e90dad|dp=e3b0c442",
   "embedding_slug": "openai-compatible-qwen3-embedding-8b-64b933495768-4096h-redact-0-qp-e1e90dad-dp-e3b0c442",
   "retrieval_mode": "hybrid_rrf",
-  "date": "2026-11-05",
-  "generated_at": "2026-11-05T14:26:26Z",
-  "git_sha": "4576097",
+  "date": "2026-11-06",
+  "generated_at": "2026-11-06T02:36:35Z",
+  "git_sha": "265e8de",
   "metrics": {
     "e2e_refusal_correctness": 0.8519,
     "false_refusal_rate": 0.1905,
     "false_answer_rate": 0.0,
-    "citation_precision": 0.7381,
+    "citation_precision": 0.7619,
     "citation_recall": 0.7619,
-    "citation_f1": 0.746,
+    "citation_f1": 0.7619,
     "invalid_citation_rate": 0.0,
     "unannotated_rate": 0.0,
-    "answer_fact_recall": 0.7619,
+    "answer_fact_recall": 0.7381,
     "ttft_ms": {
-      "mean": 2998.15,
-      "p50": 2608.06,
-      "p95": 5020.54
+      "mean": 2934.17,
+      "p50": 2650.59,
+      "p95": 4506.78
     },
     "total_latency_ms": {
-      "mean": 2663.37,
-      "p50": 2634.65,
-      "p95": 5122.6
+      "mean": 2661.73,
+      "p50": 2753.09,
+      "p95": 4514.79
     },
     "usage": {
       "prompt_tokens_total": 3834,
-      "completion_tokens_total": 4686,
-      "total_tokens": 8520,
+      "completion_tokens_total": 4236,
+      "total_tokens": 8070,
       "prompt_tokens_mean": 142.0,
-      "completion_tokens_mean": 173.56,
-      "total_tokens_mean": 315.56,
+      "completion_tokens_mean": 156.89,
+      "total_tokens_mean": 298.89,
       "returned_models": [
         "gemini-3.8-flash"
       ]
     }
   },
-  "judge": null,
+  "judge": {
+    "judge_model": "grok/grok-4.7-build-fast",
+    "judge_vendor": "xai",
+    "faithfulness_score": 0.95,
+    "n_sentences": 20,
+    "sampled_audit_rows": 20,
+    "human_audit_csv": "evals/results/e2e/antigravity-gemini-3-8-flash__openai-compatible-qwen3-embedding-8b-64b933495768-4096h-redact-0-qp-e1e90dad-dp-e3b0c442/human_audit.csv",
+    "human_reviewed": false,
+    "human_agreement": null
+  },
   "questions": [
     {
       "id": "q009",
@@ -65,7 +74,7 @@
         "周宁",
         "林可"
       ],
-      "answer": "本学期组会主持轮值的顺序是陈予安、周宁、林可 [1]。",
+      "answer": "本学期组会主持轮值顺序是陈予安、周宁、林可 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -85,11 +94,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2853.06,
-      "total_latency_ms": 2927.65,
+      "ttft_ms": 3171.25,
+      "total_latency_ms": 3395.01,
       "prompt_tokens": 143,
-      "completion_tokens": 218,
-      "total_tokens": 361,
+      "completion_tokens": 200,
+      "total_tokens": 343,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -104,7 +113,7 @@
       "answer_facts": [
         "notes/group-meeting"
       ],
-      "answer": "组会提纲应提交到仓库路径 notes/group-meeting [1]。",
+      "answer": "组会提纲应该提交到仓库路径 notes/group-meeting [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -124,11 +133,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 4976.52,
-      "total_latency_ms": 5053.71,
+      "ttft_ms": 3051.07,
+      "total_latency_ms": 3171.02,
       "prompt_tokens": 149,
-      "completion_tokens": 328,
-      "total_tokens": 477,
+      "completion_tokens": 106,
+      "total_tokens": 255,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -143,7 +152,7 @@
       "answer_facts": [
         "10:00"
       ],
-      "answer": "周五论文研讨于 10:00 开始。[1]",
+      "answer": "周五论文研讨于 10:00 开始 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -163,11 +172,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2169.59,
-      "total_latency_ms": 2239.44,
+      "ttft_ms": 3089.88,
+      "total_latency_ms": 3108.05,
       "prompt_tokens": 156,
-      "completion_tokens": 145,
-      "total_tokens": 301,
+      "completion_tokens": 255,
+      "total_tokens": 411,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -202,11 +211,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2608.06,
-      "total_latency_ms": 2739.68,
+      "ttft_ms": 2167.4,
+      "total_latency_ms": 2279.84,
       "prompt_tokens": 147,
-      "completion_tokens": 178,
-      "total_tokens": 325,
+      "completion_tokens": 184,
+      "total_tokens": 331,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -241,11 +250,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2537.26,
-      "total_latency_ms": 2634.65,
+      "ttft_ms": 2154.5,
+      "total_latency_ms": 2279.62,
       "prompt_tokens": 146,
-      "completion_tokens": 133,
-      "total_tokens": 279,
+      "completion_tokens": 157,
+      "total_tokens": 303,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -280,11 +289,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2486.51,
-      "total_latency_ms": 2556.79,
+      "ttft_ms": 3571.13,
+      "total_latency_ms": 3770.38,
       "prompt_tokens": 230,
-      "completion_tokens": 267,
-      "total_tokens": 497,
+      "completion_tokens": 199,
+      "total_tokens": 429,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -319,11 +328,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 5025.43,
-      "total_latency_ms": 5152.12,
+      "ttft_ms": 1717.49,
+      "total_latency_ms": 1830.29,
       "prompt_tokens": 147,
-      "completion_tokens": 218,
-      "total_tokens": 365,
+      "completion_tokens": 241,
+      "total_tokens": 388,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -338,7 +347,7 @@
       "answer_facts": [
         "12000"
       ],
-      "answer": "流明使用的 CTW-synth 子集有 12000 条样本。[1]",
+      "answer": "流明使用的 CTW-synth 子集有 12000 条样本 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -358,11 +367,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2933.06,
-      "total_latency_ms": 3012.43,
+      "ttft_ms": 2264.85,
+      "total_latency_ms": 2711.3,
       "prompt_tokens": 142,
-      "completion_tokens": 226,
-      "total_tokens": 368,
+      "completion_tokens": 185,
+      "total_tokens": 327,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -398,11 +407,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2121.41,
-      "total_latency_ms": 2188.15,
+      "ttft_ms": 2175.26,
+      "total_latency_ms": 2250.04,
       "prompt_tokens": 142,
-      "completion_tokens": 185,
-      "total_tokens": 327,
+      "completion_tokens": 171,
+      "total_tokens": 313,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -418,7 +427,7 @@
         "RAGAS",
         "faithfulness"
       ],
-      "answer": "实验室不使用 RAGAS 的 faithfulness 自动分数作为发布门禁 [1]。",
+      "answer": "实验室不把 RAGAS 的 faithfulness 自动分数当作发布门禁 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -438,11 +447,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2211.08,
-      "total_latency_ms": 2283.66,
+      "ttft_ms": 2299.5,
+      "total_latency_ms": 2411.76,
       "prompt_tokens": 154,
-      "completion_tokens": 144,
-      "total_tokens": 298,
+      "completion_tokens": 184,
+      "total_tokens": 338,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -474,7 +483,7 @@
       "is_unannotated": null,
       "fact_recall": 0.0,
       "ttft_ms": null,
-      "total_latency_ms": 197.51,
+      "total_latency_ms": 180.91,
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "total_tokens": 0,
@@ -509,7 +518,7 @@
       "is_unannotated": null,
       "fact_recall": 0.0,
       "ttft_ms": null,
-      "total_latency_ms": 173.06,
+      "total_latency_ms": 184.37,
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "total_tokens": 0,
@@ -547,11 +556,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 3236.97,
-      "total_latency_ms": 3355.6,
+      "ttft_ms": 2924.72,
+      "total_latency_ms": 3057.91,
       "prompt_tokens": 154,
-      "completion_tokens": 169,
-      "total_tokens": 323,
+      "completion_tokens": 161,
+      "total_tokens": 315,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -583,7 +592,7 @@
       "is_unannotated": null,
       "fact_recall": 0.0,
       "ttft_ms": null,
-      "total_latency_ms": 196.59,
+      "total_latency_ms": 217.88,
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "total_tokens": 0,
@@ -601,7 +610,7 @@
       "answer_facts": [
         "每周日 02:00"
       ],
-      "answer": "备份不是每天执行，而是在每周日 02:00 进行 [1]。",
+      "answer": "备份不是每天凌晨进行的，备份时间是每周日 02:00，不是每天执行 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -621,11 +630,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2340.5,
-      "total_latency_ms": 2407.05,
+      "ttft_ms": 2010.58,
+      "total_latency_ms": 2029.22,
       "prompt_tokens": 131,
-      "completion_tokens": 125,
-      "total_tokens": 256,
+      "completion_tokens": 113,
+      "total_tokens": 244,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -640,30 +649,28 @@
       "answer_facts": [
         "项目成员"
       ],
-      "answer": "受限数据不是所有登录用户都能检索，只有项目成员可以检索 [1]。检索权限是依据数据分级设定的，而不是根据是否登录来决定 [2]。",
+      "answer": "受限数据不是所有登录用户都能检索，只有项目成员可以检索 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
-        1,
-        2
+        1
       ],
       "invalid_indices": [],
       "uncited": false,
       "used_citation_keys": [
-        "dataset-policy#1",
-        "dataset-policy#0"
+        "dataset-policy#1"
       ],
       "refusal_correct": 1.0,
       "false_refusal": 0.0,
       "false_answer": null,
-      "citation_precision": 0.5,
+      "citation_precision": 1.0,
       "citation_recall": 1.0,
-      "citation_f1": 0.6666666666666666,
+      "citation_f1": 1.0,
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2736.92,
-      "total_latency_ms": 2865.59,
+      "ttft_ms": 2962.32,
+      "total_latency_ms": 3531.63,
       "prompt_tokens": 182,
       "completion_tokens": 247,
       "total_tokens": 429,
@@ -681,7 +688,7 @@
       "answer_facts": [
         "git.qingheng.lab/helios"
       ],
-      "answer": "不是，git.qingheng.lab/lumen 是流明的代码仓库，与赫利俄斯的仓库不同 [1]。",
+      "answer": "不是，git.qingheng.lab/lumen 是流明的代码仓库，且与赫利俄斯的仓库不同 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -701,11 +708,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 0.0,
-      "ttft_ms": 2718.97,
-      "total_latency_ms": 2849.81,
+      "ttft_ms": 2476.49,
+      "total_latency_ms": 2753.52,
       "prompt_tokens": 150,
-      "completion_tokens": 357,
-      "total_tokens": 507,
+      "completion_tokens": 149,
+      "total_tokens": 299,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -722,7 +729,7 @@
         "周宁",
         "12000"
       ],
-      "answer": "流明的负责人是周宁 [1]。流明项目的样本共有 12000 条 [2]。",
+      "answer": "流明项目的负责人是周宁 [1]。样本有 12000 条 [2]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -744,11 +751,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 3982.44,
-      "total_latency_ms": 4101.26,
+      "ttft_ms": 2387.35,
+      "total_latency_ms": 2588.78,
       "prompt_tokens": 193,
-      "completion_tokens": 138,
-      "total_tokens": 331,
+      "completion_tokens": 189,
+      "total_tokens": 382,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -782,11 +789,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": 0.0,
-      "ttft_ms": 2557.46,
-      "total_latency_ms": 2649.12,
+      "ttft_ms": 3046.38,
+      "total_latency_ms": 3119.02,
       "prompt_tokens": 153,
-      "completion_tokens": 272,
-      "total_tokens": 425,
+      "completion_tokens": 264,
+      "total_tokens": 417,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -804,7 +811,7 @@
         "MRR",
         "开发集"
       ],
-      "answer": "实验室评测采用的指标是 Recall@5、MRR、引用准确率和拒答正确率 [2]。阈值（相似度阈值和拒答阈值）只允许在开发集上调整 [1]。",
+      "answer": "实验室评测使用的指标包括 Recall@5、MRR、引用准确率和拒答正确率 [2]。相似度阈值和拒答阈值只允许在开发集上调整 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -826,11 +833,11 @@
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
       "fact_recall": 1.0,
-      "ttft_ms": 2395.74,
-      "total_latency_ms": 2513.22,
+      "ttft_ms": 2607.96,
+      "total_latency_ms": 2804.17,
       "prompt_tokens": 204,
-      "completion_tokens": 146,
-      "total_tokens": 350,
+      "completion_tokens": 212,
+      "total_tokens": 416,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -847,7 +854,7 @@
         "883-102-447",
         "不在 B-214"
       ],
-      "answer": "周五论文研讨的线上会议室号是 883-102-447 [2]。周五论文研讨不在 B-214，不使用该会议室 [1]。",
+      "answer": "周五研讨的线上会议号是 883-102-447 [2]。它不使用 B-214，周五论文研讨不在该会议室举行 [1]。",
       "refused": false,
       "decision_reason": "grounded",
       "used_indices": [
@@ -868,12 +875,12 @@
       "citation_f1": 1.0,
       "has_invalid_citation": 0.0,
       "is_unannotated": 0.0,
-      "fact_recall": 1.0,
-      "ttft_ms": 2693.44,
-      "total_latency_ms": 2819.4,
+      "fact_recall": 0.5,
+      "ttft_ms": 2650.59,
+      "total_latency_ms": 2770.37,
       "prompt_tokens": 254,
-      "completion_tokens": 282,
-      "total_tokens": 536,
+      "completion_tokens": 337,
+      "total_tokens": 591,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -900,11 +907,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": null,
-      "ttft_ms": 1684.39,
-      "total_latency_ms": 1766.14,
+      "ttft_ms": 4610.74,
+      "total_latency_ms": 4833.82,
       "prompt_tokens": 180,
-      "completion_tokens": 102,
-      "total_tokens": 282,
+      "completion_tokens": 104,
+      "total_tokens": 284,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -931,11 +938,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": null,
-      "ttft_ms": 7643.99,
-      "total_latency_ms": 7729.82,
+      "ttft_ms": 7817.05,
+      "total_latency_ms": 7914.01,
       "prompt_tokens": 143,
-      "completion_tokens": 86,
-      "total_tokens": 229,
+      "completion_tokens": 111,
+      "total_tokens": 254,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -962,11 +969,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": null,
-      "ttft_ms": 2902.41,
-      "total_latency_ms": 2984.76,
+      "ttft_ms": 2686.47,
+      "total_latency_ms": 2753.09,
       "prompt_tokens": 232,
-      "completion_tokens": 375,
-      "total_tokens": 607,
+      "completion_tokens": 124,
+      "total_tokens": 356,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -993,11 +1000,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": null,
-      "ttft_ms": 2151.91,
-      "total_latency_ms": 2235.83,
+      "ttft_ms": 3468.31,
+      "total_latency_ms": 3497.34,
       "prompt_tokens": 159,
-      "completion_tokens": 197,
-      "total_tokens": 356,
+      "completion_tokens": 225,
+      "total_tokens": 384,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -1024,11 +1031,11 @@
       "has_invalid_citation": null,
       "is_unannotated": null,
       "fact_recall": null,
-      "ttft_ms": 1990.39,
-      "total_latency_ms": 2078.94,
+      "ttft_ms": 2174.66,
+      "total_latency_ms": 2246.44,
       "prompt_tokens": 143,
-      "completion_tokens": 148,
-      "total_tokens": 291,
+      "completion_tokens": 118,
+      "total_tokens": 261,
       "returned_model": "gemini-3.8-flash"
     },
     {
@@ -1056,7 +1063,7 @@
       "is_unannotated": null,
       "fact_recall": null,
       "ttft_ms": null,
-      "total_latency_ms": 199.01,
+      "total_latency_ms": 177.03,
       "prompt_tokens": 0,
       "completion_tokens": 0,
       "total_tokens": 0,

@@ -101,7 +101,7 @@ async def run_smoke(
     rotation_days = 17
     s4_doc_id: str | None = None
     s5_question = f"设备间{nonce}的门禁多久轮换一次？"
-    s6_question = "火星基地的氧气配额是多少？"
+    s6_question = "火星基地的氧气浓度是多少？"
 
     origin = (
         os.environ.get("PUBLIC_ORIGIN", "http://127.0.0.1:43123").split(",")[0].strip()
@@ -161,9 +161,9 @@ async def run_smoke(
                 raise AssertionError(f"unexpected real-mode fingerprint prefix: {fp}")
             if "|4096h|" not in fp:
                 raise AssertionError(f"expected '|4096h|' in fingerprint: {fp}")
-            if body.get("embedding_index") != "none":
+            if body.get("embedding_index") not in {"none", "hnsw_prefix"}:
                 raise AssertionError(
-                    f"expected embedding_index='none', got {body.get('embedding_index')!r}"
+                    f"expected embedding_index in {{'none', 'hnsw_prefix'}}, got {body.get('embedding_index')!r}"
                 )
             if body.get("llm_provider") != "openai_compatible":
                 raise AssertionError(

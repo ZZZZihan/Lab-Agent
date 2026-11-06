@@ -41,8 +41,8 @@ async def run_embed_check(
         q_anchor = await active_embedder.embed_query(ANCHOR_QUERY)
         q_paraphrase = await active_embedder.embed_query(PARAPHRASE_QUERY)
         q_unrelated = await active_embedder.embed_query(UNRELATED_QUERY)
-        docs = await active_embedder.embed_documents([PARAPHRASE_DOC, UNRELATED_DOC])
         det_1 = await active_embedder.embed_query(DETERMINISM_QUERY)
+        docs = await active_embedder.embed_documents([PARAPHRASE_DOC, UNRELATED_DOC])
         det_2 = await active_embedder.embed_query(DETERMINISM_QUERY)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
     except EmbeddingError as exc:
