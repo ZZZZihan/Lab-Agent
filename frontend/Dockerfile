@@ -1,7 +1,12 @@
-FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS build
+ARG BASE_WEB_DEPS=deps
+
+FROM node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS deps
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --prefer-offline --no-audit --no-fund --progress=false
+
+FROM ${BASE_WEB_DEPS} AS build
+WORKDIR /app
 COPY frontend/ .
 ENV NEXT_TELEMETRY_DISABLED=1
 # Next inlines this at build time. The default image does not prefill demo accounts.

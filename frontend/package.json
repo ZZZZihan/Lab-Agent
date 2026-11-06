@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
+    "lint": "eslint --cache --cache-location .next/cache/eslint/",
     "test": "node --test tests/security.test.mjs"
   },
   "dependencies": {
