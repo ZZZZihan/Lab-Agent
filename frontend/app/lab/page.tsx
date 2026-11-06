@@ -268,7 +268,7 @@ export default function LabAssetsPage() {
         body: form,
       });
       setImportJob(parsed);
-      setProvisionAsOf(parsed.as_of_time || parsed.preview?.as_of_time || "2026-06-01");
+      setProvisionAsOf(parsed.as_of_time || parsed.preview?.as_of_time || "");
       const initOv: Record<string, PersonOverrideState> = {};
       for (const p of parsed.preview?.people || []) {
         initOv[p.key] = {
@@ -287,6 +287,10 @@ export default function LabAssetsPage() {
 
   async function handleProvision() {
     if (!importJob) return;
+    if (!provisionAsOf.trim()) {
+      setWizardError("请填写本子基准日期 (as_of_time)");
+      return;
+    }
     setWizardError("");
     setProvisioning(true);
     try {
@@ -1025,7 +1029,7 @@ export default function LabAssetsPage() {
                   </Button>
                   <Button
                     type="button"
-                    disabled={provisioning}
+                    disabled={provisioning || !provisionAsOf.trim()}
                     onClick={handleProvision}
                   >
                     {provisioning ? "正在开号并写入知识库…" : "确认一键开号并入库"}

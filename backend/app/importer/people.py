@@ -166,6 +166,7 @@ def assign_people_identities(
             login_name=base_login if tier == "T1" else None,
             name=name,
             affiliation=affiliation,
+            email=valid_email,
         )
 
         matched_user: User | None = None
@@ -173,7 +174,15 @@ def assign_people_identities(
         if valid_email and valid_email in by_email:
             matched_user = by_email[valid_email]
             match_status = "existing"
-        elif candidate_fp in by_fp and by_fp[candidate_fp].id not in used_matched_user_ids:
+        elif (
+            candidate_fp in by_fp
+            and by_fp[candidate_fp].id not in used_matched_user_ids
+            and not (
+                valid_email
+                and (by_fp[candidate_fp].email or "").strip()
+                and (by_fp[candidate_fp].email or "").strip().lower() != valid_email.lower()
+            )
+        ):
             matched_user = by_fp[candidate_fp]
             match_status = "existing"
         elif tier == "T1" and base_login in by_login:
@@ -216,6 +225,7 @@ def assign_people_identities(
             login_name=str(person.get("login_name") or ""),
             name=name,
             affiliation=affiliation,
+            email=valid_email,
         )
 
 

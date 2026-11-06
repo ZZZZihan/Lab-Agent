@@ -414,6 +414,7 @@ async def provision_import_job(
                 login_name=p_login,
                 name=pname,
                 affiliation=p_aff,
+                email=p_email,
             )
             if fp_val in existing_person_fps or user_id in existing_person_user_ids:
                 people_skipped += 1

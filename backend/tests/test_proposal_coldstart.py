@@ -626,6 +626,40 @@ async def test_three_in_one_login_password_change_and_expiry(
     )
     assert r_shan_after.status_code == 200
 
+    # CLI reset-password also clears must_change_password_by and supports login_name lookup
+    from app.admin_cli import _run, build_parser
+
+    async with maker() as session:
+        shan = await session.scalar(select(User).where(User.login_name == "shanlifei"))
+        assert shan is not None
+        shan.must_change_password_by = datetime.now(UTC) - timedelta(days=1)
+        await session.commit()
+
+    cli_args = build_parser().parse_args(
+        ["reset-password", "--email", "shanlifei", "--password-stdin"]
+    )
+    cli_pw = "ShanCliReset-2026#Ok"
+    rc = await _run(cli_args, cli_pw)
+    assert rc == 0
+    r_shan_cli = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "shanlifei", "password": cli_pw},
+    )
+    assert r_shan_cli.status_code == 200
+    assert r_shan_cli.json()["user"]["must_change_password"] is False
+
+    # Two T3 members with identical (name, affiliation) and distinct emails get distinct fingerprints
+    from app.importer.people import assign_people_identities
+
+    t3_twins: list[dict[str, object]] = [
+        {"name": "张同名", "affiliation": "计算机学院", "email": "ztm1@example.edu.cn"},
+        {"name": "张同名", "affiliation": "计算机学院", "email": "ztm2@example.edu.cn"},
+    ]
+    assign_people_identities(t3_twins)
+    assert t3_twins[0]["fingerprint"] != t3_twins[1]["fingerprint"]
+    assert t3_twins[0]["login_name"] == "zhangtongming"
+    assert t3_twins[1]["login_name"] == "zhangtongming2"
+
 
 async def test_lab_assets_api_formatters_and_rag_chat_integration(
     client: AsyncClient,

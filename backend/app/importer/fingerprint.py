@@ -24,9 +24,12 @@ def person_fp(
     login_name: str | None,
     name: str,
     affiliation: str | None = None,
+    email: str | None = None,
 ) -> str:
     if tier == "T1" and login_name:
         return fp("person", "cert", norm(login_name))
+    if email and email.strip():
+        return fp("person", "email", norm(name), norm(affiliation), norm(email))
     return fp("person", "name", norm(name), norm(affiliation))
 
 
