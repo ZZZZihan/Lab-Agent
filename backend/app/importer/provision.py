@@ -354,6 +354,10 @@ async def provision_import_job(
     people_skipped = 0
     new_roster_items: list[dict[str, object]] = []
     existing_roster_items: list[dict[str, object]] = []
+    inserted_people: list[LabPerson] = []
+    inserted_achievements: list[LabAchievement] = []
+    inserted_projects: list[LabProject] = []
+    inserted_facilities: list[LabFacility] = []
 
     pw_hash = (
         hash_password(f"OIDC-Only-{uuid.uuid4().hex}#99")
@@ -435,26 +439,26 @@ async def provision_import_job(
                 proj_role = (
                     "applicant" if person.get("project_role") == "applicant" else "member"
                 )
-                session.add(
-                    LabPerson(
-                        user_id=user_id,
-                        name=pname,
-                        email=p_email,
-                        title=str(person.get("title") or "").strip() or None,
-                        admin_duty=str(person.get("admin_duty") or "").strip() or None,
-                        tutor_role=str(person.get("tutor_role") or "").strip() or None,
-                        research_specialty=(
-                            str(person.get("research_specialty") or "").strip() or None
-                        ),
-                        degree=str(person.get("degree") or "").strip() or None,
-                        affiliation=p_aff,
-                        project_role=proj_role,
-                        bio=str(person.get("bio") or "").strip() or None,
-                        entity_fingerprint=fp_val,
-                        as_of_time=as_of_date,
-                        source_import_id=job.id,
-                    )
+                new_person = LabPerson(
+                    user_id=user_id,
+                    name=pname,
+                    email=p_email,
+                    title=str(person.get("title") or "").strip() or None,
+                    admin_duty=str(person.get("admin_duty") or "").strip() or None,
+                    tutor_role=str(person.get("tutor_role") or "").strip() or None,
+                    research_specialty=(
+                        str(person.get("research_specialty") or "").strip() or None
+                    ),
+                    degree=str(person.get("degree") or "").strip() or None,
+                    affiliation=p_aff,
+                    project_role=proj_role,
+                    bio=str(person.get("bio") or "").strip() or None,
+                    entity_fingerprint=fp_val,
+                    as_of_time=as_of_date,
+                    source_import_id=job.id,
                 )
+                session.add(new_person)
+                inserted_people.append(new_person)
                 people_inserted += 1
 
         # Achievements
@@ -483,22 +487,22 @@ async def provision_import_job(
                 ach_skipped += 1
                 continue
             existing_ach_fps.add(fp_val)
-            session.add(
-                LabAchievement(
-                    kind=kind,
-                    title=title,
-                    first_author=str(ach.get("first_author") or "").strip() or None,
-                    authors_text=str(ach.get("authors_text") or "").strip() or None,
-                    venue=str(ach.get("venue") or "").strip() or None,
-                    year=year_val,
-                    support_note=str(ach.get("support_note") or "").strip() or None,
-                    raw_text=raw_text,
-                    parse_quality=pq,
-                    entity_fingerprint=fp_val,
-                    as_of_time=as_of_date,
-                    source_import_id=job.id,
-                )
+            new_ach = LabAchievement(
+                kind=kind,
+                title=title,
+                first_author=str(ach.get("first_author") or "").strip() or None,
+                authors_text=str(ach.get("authors_text") or "").strip() or None,
+                venue=str(ach.get("venue") or "").strip() or None,
+                year=year_val,
+                support_note=str(ach.get("support_note") or "").strip() or None,
+                raw_text=raw_text,
+                parse_quality=pq,
+                entity_fingerprint=fp_val,
+                as_of_time=as_of_date,
+                source_import_id=job.id,
             )
+            session.add(new_ach)
+            inserted_achievements.append(new_ach)
             ach_inserted += 1
 
         # Projects
@@ -535,27 +539,27 @@ async def provision_import_job(
                 proj_skipped += 1
                 continue
             existing_proj_fps.add(fp_val)
-            session.add(
-                LabProject(
-                    title=title,
-                    funder=funder,
-                    grant_no=grant_no,
-                    pi_name=pi_name,
-                    lab_role=lab_role,
-                    start_date=start_d,
-                    end_date=end_d,
-                    amount_wan=amt_wan,
-                    status=status,
-                    status_source=status_source,
-                    relationship_note=(
-                        str(proj.get("relationship_note") or "").strip() or None
-                    ),
-                    raw_text=raw_text,
-                    entity_fingerprint=fp_val,
-                    as_of_time=as_of_date,
-                    source_import_id=job.id,
-                )
+            new_proj = LabProject(
+                title=title,
+                funder=funder,
+                grant_no=grant_no,
+                pi_name=pi_name,
+                lab_role=lab_role,
+                start_date=start_d,
+                end_date=end_d,
+                amount_wan=amt_wan,
+                status=status,
+                status_source=status_source,
+                relationship_note=(
+                    str(proj.get("relationship_note") or "").strip() or None
+                ),
+                raw_text=raw_text,
+                entity_fingerprint=fp_val,
+                as_of_time=as_of_date,
+                source_import_id=job.id,
             )
+            session.add(new_proj)
+            inserted_projects.append(new_proj)
             proj_inserted += 1
 
         # Facilities
@@ -583,21 +587,61 @@ async def provision_import_job(
                 fac_skipped += 1
                 continue
             existing_fac_fps.add(fp_val)
-            session.add(
-                LabFacility(
-                    category=category,
-                    name=name,
-                    spec=spec,
-                    value_wan=val_wan,
-                    usage_scenario=usage,
-                    raw_text=raw_text,
-                    entity_fingerprint=fp_val,
-                    as_of_time=as_of_date,
-                    source_import_id=job.id,
-                )
+            new_fac = LabFacility(
+                category=category,
+                name=name,
+                spec=spec,
+                value_wan=val_wan,
+                usage_scenario=usage,
+                raw_text=raw_text,
+                entity_fingerprint=fp_val,
+                as_of_time=as_of_date,
+                source_import_id=job.id,
             )
+            session.add(new_fac)
+            inserted_facilities.append(new_fac)
             fac_inserted += 1
 
+        await session.flush()
+
+        from app.importer.provenance import record_entity_import_provenance
+
+        for p_ent in inserted_people:
+            await record_entity_import_provenance(
+                session,
+                entity_type="person",
+                entity=p_ent,
+                job_id=job.id,
+                as_of_time=as_of_date,
+                recorded_by=actor_id,
+            )
+        for a_ent in inserted_achievements:
+            await record_entity_import_provenance(
+                session,
+                entity_type="achievement",
+                entity=a_ent,
+                job_id=job.id,
+                as_of_time=as_of_date,
+                recorded_by=actor_id,
+            )
+        for j_ent in inserted_projects:
+            await record_entity_import_provenance(
+                session,
+                entity_type="project",
+                entity=j_ent,
+                job_id=job.id,
+                as_of_time=as_of_date,
+                recorded_by=actor_id,
+            )
+        for f_ent in inserted_facilities:
+            await record_entity_import_provenance(
+                session,
+                entity_type="facility",
+                entity=f_ent,
+                job_id=job.id,
+                as_of_time=as_of_date,
+                recorded_by=actor_id,
+            )
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()

@@ -9,6 +9,7 @@ from decimal import Decimal
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -270,7 +271,7 @@ class ImportJob(Base):
     __tablename__ = "import_jobs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('parsed', 'provisioned', 'failed')",
+            "status IN ('parsed', 'provisioned', 'merged', 'failed')",
             name="import_jobs_status",
         ),
     )
@@ -424,3 +425,48 @@ class LabFacility(Base):
         UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FieldProvenance(Base):
+    __tablename__ = "field_provenance"
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('person', 'project', 'achievement', 'facility')",
+            name="field_provenance_entity_type",
+        ),
+        CheckConstraint(
+            "source_kind IN ('import', 'manual', 'legacy')",
+            name="field_provenance_source_kind",
+        ),
+        CheckConstraint(
+            "source_kind <> 'import' OR source_job_id IS NOT NULL",
+            name="field_provenance_import_job_check",
+        ),
+        Index("field_provenance_entity_field_idx", "entity_type", "entity_id", "field"),
+        Index("field_provenance_job_idx", "source_job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    field: Mapped[str] = mapped_column(String(64))
+    value: Mapped[object] = mapped_column(JSONB, nullable=True)
+    source_kind: Mapped[str] = mapped_column(String(16))
+    source_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("import_jobs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    as_of_time: Mapped[date] = mapped_column(Date)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc, server_default=func.now()
+    )
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    superseded: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+
