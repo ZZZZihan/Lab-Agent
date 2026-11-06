@@ -626,11 +626,70 @@ async def test_lab_assets_api_formatters_and_rag_chat_integration(
         for j in projs
     )
 
+    all_projs = (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+        "projects"
+    ]
+    participant_proj = next(j for j in all_projs if j["pi_name"] == "单立飞")
+    assert participant_proj["lab_role"] == "participant"
+    assert "单立飞参与：" in participant_proj["application_text"]
+    assert "单立飞主持" not in participant_proj["application_text"]
+
     achs = (
         await client.get("/api/v1/lab/achievements?kind=report", headers=headers)
     ).json()["achievements"]
     assert len(achs) == 1
     assert "研究报告/资政报告" in achs[0]["application_text"]
+
+    all_achs = (await client.get("/api/v1/lab/achievements", headers=headers)).json()[
+        "achievements"
+    ]
+    venues = {a["venue"] for a in all_achs if a["venue"]}
+    assert "探索科学" in venues
+    assert "时代教育" in venues
+    assert "2024年" not in venues
+
+    # Verify _rerank_failed=True from search_knowledge_base is preserved on injected profile hits
+    from unittest.mock import AsyncMock, patch
+
+    from app.main import app as fastapi_app
+    from app.tools import query_lab_assets
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        admin_user = await session.scalar(select(User).where(User.email == ADMIN_EMAIL))
+        assert admin_user is not None
+        fake_failed_hit = {
+            "chunk_id": "00000000-0000-0000-0000-000000000001",
+            "document_id": "00000000-0000-0000-0000-000000000002",
+            "doc_key": "other-doc",
+            "chunk_index": 0,
+            "title": "Other",
+            "collection": "general",
+            "heading": "H",
+            "content": "C",
+            "tokens": [],
+            "cosine": 0.5,
+            "bm25": 0.1,
+            "rrf": 0.02,
+            "_coverage": 0.5,
+            "_elapsed_ms": 1.0,
+            "_mode": "hybrid_rrf_rerank",
+            "_rerank_failed": True,
+        }
+        with patch(
+            "app.tools.search_knowledge_base",
+            new=AsyncMock(return_value=[fake_failed_hit]),
+        ):
+            res_rf = await query_lab_assets(
+                session,
+                settings=fastapi_app.state.settings,
+                embedder=fastapi_app.state.embedder,
+                user=admin_user,
+                query="课题组有哪些在研项目？",
+            )
+            rf_hits = res_rf["hits"]
+            assert isinstance(rf_hits, list) and len(rf_hits) > 0
+            assert rf_hits[0]["_rerank_failed"] is True
 
     facs = (await client.get("/api/v1/lab/facilities", headers=headers)).json()[
         "facilities"

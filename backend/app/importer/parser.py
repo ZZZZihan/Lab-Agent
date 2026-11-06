@@ -671,14 +671,21 @@ def _parse_achievement_item(raw_item: str, *, index: int) -> dict[str, object]:
             else:
                 title = raw_title
         kind = _detect_achievement_kind(first_sentence)
-        if len(parts) >= 3:
-            raw_venue = parts[2]
-            if raw_venue.startswith("《") and raw_venue.endswith("》"):
-                venue = raw_venue[1:-1].strip()
+        explicit_kind_re = re.compile(
+            r"^(学术论文|期刊论文|会议论文|论文|专著|著作|教材|编著|译著|"
+            r"发明专利|专利|软件著作权|软著|研究报告|咨询报告|报告|标准|奖项|获奖)$"
+        )
+        bare_year_re = re.compile(r"^(?:19|20)\d{2}\s*年?(?:\d{1,2}月?)?$")
+        raw_venue = ""
+        if len(parts) >= 2:
+            if explicit_kind_re.match(parts[1]):
+                raw_venue = parts[2] if len(parts) >= 3 else ""
             else:
-                venue = raw_venue
-        elif len(parts) == 2:
-            venue = parts[1]
+                raw_venue = parts[1]
+        if raw_venue.startswith("《") and raw_venue.endswith("》"):
+            raw_venue = raw_venue[1:-1].strip()
+        if raw_venue and not bare_year_re.match(raw_venue):
+            venue = raw_venue
         years = re.findall(r"((?:19|20)\d{2})", first_sentence)
         if years:
             year = int(years[-1])
@@ -776,7 +783,10 @@ def _parse_project_item(
                 pi_name = normalize_person_name(m_host.group(1))
                 lab_role = "host"
                 continue
-            m_part = re.match(r"^([一-龥·]{2,6})\s*(?:参与|参加)$", seg)
+            m_part = re.match(
+                r"^([一-龥·]{2,6})\s*[（(]?(?:参与|参加)[)）]?$",
+                seg,
+            )
             if m_part:
                 pi_name = normalize_person_name(m_part.group(1))
                 lab_role = "participant"

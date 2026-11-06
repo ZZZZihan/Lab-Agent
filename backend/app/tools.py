@@ -295,6 +295,7 @@ async def query_lab_assets(
             scored_chunks.append((0.80, profile_chunks[0]))
 
         scored_chunks.sort(key=lambda item: (-item[0], item[1].chunk_index))
+        rerank_failed = any(bool(h.get("_rerank_failed")) for h in hits)
         merged_hits: list[Hit] = []
         seen_ids: set[str] = set()
         for bonus, ch in scored_chunks[: min(k, 4)]:
@@ -333,7 +334,7 @@ async def query_lab_assets(
                 if hits
                 else settings.retrieval_mode
             )
-            hit_obj["_rerank_failed"] = False  # type: ignore[typeddict-unknown-key]
+            hit_obj["_rerank_failed"] = rerank_failed  # type: ignore[typeddict-unknown-key]
             merged_hits.append(hit_obj)
 
         for h in hits:

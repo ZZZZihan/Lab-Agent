@@ -72,6 +72,7 @@ def format_project_application(project: Any, *, include_relationship: bool = Fal
     title = str(_get(project, "title") or "").strip()
     grant_no = str(_get(project, "grant_no") or "").strip()
     pi_name = str(_get(project, "pi_name") or "").strip()
+    lab_role = str(_get(project, "lab_role") or "unknown").strip()
     funder = str(_get(project, "funder") or "").strip()
     status = str(_get(project, "status") or "unknown").strip()
     start_val = _get(project, "start_date")
@@ -83,7 +84,13 @@ def format_project_application(project: Any, *, include_relationship: bool = Fal
 
     segments: list[str] = []
     if pi_name:
-        segments.append(f"{pi_name}主持：{wrapped_title}")
+        if lab_role == "participant":
+            role_label = pi_name if pi_name.endswith("参与") else f"{pi_name}参与"
+        elif lab_role == "host":
+            role_label = pi_name if pi_name.endswith("主持") else f"{pi_name}主持"
+        else:
+            role_label = pi_name
+        segments.append(f"{role_label}：{wrapped_title}")
     else:
         segments.append(wrapped_title)
 
