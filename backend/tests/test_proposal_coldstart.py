@@ -11,7 +11,7 @@ import docx
 from app.auth import hash_password
 from app.db import get_sessionmaker
 from app.importer.pii import assert_no_pii
-from app.models import User
+from app.models import Chunk, Document, DocumentACL, Group, User
 from httpx import AsyncClient
 from sqlalchemy import select, text
 
@@ -891,6 +891,9 @@ async def test_login_conflict_resolved_by_replacement_login_name(
     lin_person = next(
         p for p in job_data["preview"]["people"] if p["name"] == "林雪莹"
     )
+    shan_person = next(
+        p for p in job_data["preview"]["people"] if p["name"] == "单立飞"
+    )
     assert lin_person["match"]["status"] == "conflict"
     assert "LOGIN_CONFLICT" in lin_person["warnings"]
 
@@ -908,12 +911,32 @@ async def test_login_conflict_resolved_by_replacement_login_name(
         f"/api/v1/admin/imports/{job_id}/provision",
         json={
             "initial_password": INITIAL_PW,
-            "people": [{"key": lin_person["key"], "login_name": "linxueying2431"}],
+            "people": [
+                {"key": lin_person["key"], "login_name": "linxueying2431"},
+                {"key": shan_person["key"], "exclude": True},
+            ],
         },
         headers=headers,
     )
     assert ok_resp.status_code == 200, ok_resp.text
     assert ok_resp.json()["status"] == "provisioned"
+
+    # Downloaded roster reflects actual provisioning decisions (overridden login_name & excluded person omitted)
+    roster_dl = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster",
+        headers=headers,
+    )
+    assert roster_dl.status_code == 200
+    dl_text = roster_dl.json()["roster_text"]
+    dl_csv = roster_dl.json()["roster_csv"]
+    assert "linxueying2431" in dl_text
+    assert "linxueying2431" in dl_csv
+    assert "2431101262" not in dl_text
+    assert "2431101262" not in dl_csv
+    assert "单立飞" not in dl_text
+    assert "单立飞" not in dl_csv
+    assert "shanlifei" not in dl_text
+    assert "shanlifei" not in dl_csv
 
     # 林雪莹 can now log in with the replacement login_name
     r_login = await client.post(
@@ -1004,3 +1027,907 @@ async def test_oidc_mode_provisioning_and_login_name_claim_matching(
         settings.oidc_issuer = orig_issuer
         settings.oidc_audience = orig_audience
         settings.oidc_jwks_json = orig_jwks
+
+
+async def test_import_job_mgmt_roster_lab_crud_autoreindex_batch_and_export(
+    client: AsyncClient,
+) -> None:
+    await _seed_admin()
+    headers = await _login_headers(client, ADMIN_EMAIL)
+    raw_docx = build_synthetic_proposal_docx()
+
+    # 1. Upload via alias POST /api/v1/admin/imports & verify deduplication on unprovisioned parsed job
+    r_up1 = await client.post(
+        "/api/v1/admin/imports",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up1.status_code == 200, r_up1.text
+    temp_job_id = r_up1.json()["job_id"]
+    assert r_up1.json()["deduplicated"] is False
+
+    r_up_dup = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up_dup.status_code == 200
+    assert r_up_dup.json()["job_id"] == temp_job_id
+    assert r_up_dup.json()["deduplicated"] is True
+
+    # 2. List imports, get import detail & preview alias, patch preview, reparse, and delete parsed job
+    r_list = await client.get("/api/v1/admin/imports", headers=headers)
+    assert r_list.status_code == 200
+    assert any(j["job_id"] == temp_job_id for j in r_list.json()["imports"])
+    assert "preview" not in r_list.json()["imports"][0]
+
+    r_detail = await client.get(f"/api/v1/admin/imports/{temp_job_id}", headers=headers)
+    assert r_detail.status_code == 200
+    assert "preview" in r_detail.json()
+
+    r_prev_alias = await client.get(
+        f"/api/v1/admin/imports/{temp_job_id}/preview", headers=headers
+    )
+    assert r_prev_alias.status_code == 200
+    assert r_prev_alias.json()["job_id"] == temp_job_id
+
+    # Patch preview (update as_of_time to 2028-01-01 and corrupt a project title)
+    corrupted_projs = [dict(j) for j in r_prev_alias.json()["preview"]["projects"]]
+    orig_first_proj_title = corrupted_projs[0]["title"]
+    corrupted_projs[0]["title"] = "被篡改的错误项目标题"
+    r_patch_prev = await client.patch(
+        f"/api/v1/admin/imports/{temp_job_id}/preview",
+        json={
+            "as_of_time": "2028-01-01",
+            "relationship_note": f"拓展说明（联系电话：{SYNTH_MOBILE_1}）",
+            "projects": corrupted_projs,
+        },
+        headers=headers,
+    )
+    assert r_patch_prev.status_code == 200, r_patch_prev.text
+    patched_prev = r_patch_prev.json()["preview"]
+    assert r_patch_prev.json()["as_of_time"] == "2028-01-01"
+    assert SYNTH_MOBILE_1 not in json.dumps(patched_prev, ensure_ascii=False)
+    assert "[已脱敏]" in patched_prev["relationship_note"]
+    assert patched_prev["projects"][0]["title"] == "被篡改的错误项目标题"
+    j6_after_patch = next(j for j in patched_prev["projects"] if j["key"] == "j6")
+    assert j6_after_patch["status"] == "completed"
+
+    # Reparse with mode="llm" when llm_provider == "fake" -> 422 llm_reparse_unavailable
+    r_reparse_llm = await client.post(
+        f"/api/v1/admin/imports/{temp_job_id}/reparse",
+        json={"mode": "llm"},
+        headers=headers,
+    )
+    assert r_reparse_llm.status_code == 422
+    assert r_reparse_llm.json()["error"]["code"] == "llm_reparse_unavailable"
+
+    # Reparse with mode="fsm" -> restores corrupted title from source_snapshot
+    r_reparse = await client.post(
+        f"/api/v1/admin/imports/{temp_job_id}/reparse",
+        json={"mode": "fsm"},
+        headers=headers,
+    )
+    assert r_reparse.status_code == 200, r_reparse.text
+    assert r_reparse.json()["parser_version"] == "v2.1-fsm"
+    assert r_reparse.json()["preview"]["extraction_mode"] == "rule+regex_fsm"
+    assert (
+        r_reparse.json()["preview"]["projects"][0]["title"] == orig_first_proj_title
+    )
+
+    # Delete parsed job -> 200 deleted, then 404 on subsequent GET
+    r_del_parsed = await client.delete(
+        f"/api/v1/admin/imports/{temp_job_id}", headers=headers
+    )
+    assert r_del_parsed.status_code == 200
+    assert r_del_parsed.json()["status"] == "deleted"
+
+    r_after_del = await client.get(
+        f"/api/v1/admin/imports/{temp_job_id}", headers=headers
+    )
+    assert r_after_del.status_code == 404
+
+    # 3. Upload fresh job, provision it, verify DELETE returns 409 & roster endpoint has zero plaintext password
+    r_up2 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up2.status_code == 200
+    job_id = r_up2.json()["job_id"]
+
+    r_roster_before = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster", headers=headers
+    )
+    assert r_roster_before.status_code == 409
+    assert r_roster_before.json()["error"]["code"] == "import_not_provisioned"
+
+    r_prov = await client.post(
+        f"/api/v1/admin/imports/{job_id}/provision",
+        json={"initial_password": INITIAL_PW, "include_password": True},
+        headers=headers,
+    )
+    assert r_prov.status_code == 200, r_prov.text
+
+    # Deleting a provisioned job must fail with 409 import_already_provisioned
+    r_del_prov = await client.delete(
+        f"/api/v1/admin/imports/{job_id}", headers=headers
+    )
+    assert r_del_prov.status_code == 409
+    assert r_del_prov.json()["error"]["code"] == "import_already_provisioned"
+
+    # Roster endpoint returns login names but NEVER plaintext password
+    r_roster_txt = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster?format=text", headers=headers
+    )
+    assert r_roster_txt.status_code == 200
+    roster_payload = r_roster_txt.json()
+    assert "wanzhenkai" in roster_payload["roster_text"]
+    assert "2431101262" in roster_payload["roster_text"]
+    assert "初始口令：（见开号时的通知）" in roster_payload["roster_text"]
+    assert INITIAL_PW not in roster_payload["roster_text"]
+    assert INITIAL_PW not in roster_payload["roster_csv"]
+    assert "初始口令" not in roster_payload["roster_csv"]
+
+    r_roster_bad = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster?format=xml", headers=headers
+    )
+    assert r_roster_bad.status_code == 400
+    assert r_roster_bad.json()["error"]["code"] == "invalid_format"
+
+    # 4. Modify lab person & create lab project -> verify auto-reindex updates lab-profile-* immediately
+    people_list = (await client.get("/api/v1/lab/people", headers=headers)).json()[
+        "people"
+    ]
+    yang_person = next(p for p in people_list if p["name"] == "杨硕")
+    r_patch_person = await client.patch(
+        f"/api/v1/lab/people/{yang_person['id']}",
+        json={"research_specialty": "知识图谱与大模型对齐评测"},
+        headers=headers,
+    )
+    assert r_patch_person.status_code == 200, r_patch_person.text
+    assert (
+        r_patch_person.json()["person"]["research_specialty"]
+        == "知识图谱与大模型对齐评测"
+    )
+
+    r_new_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "教育智能体可信推理关键技术研究",
+            "grant_no": "TJAI2026-99",
+            "funder": "天津市自然科学基金重点项目",
+            "pi_name": "杨硕",
+            "lab_role": "host",
+            "start_date": "2026-01-01",
+            "status": "ongoing",
+            "amount_wan": "30.00",
+        },
+        headers=headers,
+    )
+    assert r_new_proj.status_code == 200, r_new_proj.text
+    new_proj_id = r_new_proj.json()["project"]["id"]
+    rag_doc_key = r_new_proj.json()["rag_doc_key"]
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        prof_doc = await session.scalar(
+            select(Document).where(Document.doc_key == rag_doc_key)
+        )
+        assert prof_doc is not None
+        assert "知识图谱与大模型对齐评测" in prof_doc.content_text
+        assert "TJAI2026-99" in prof_doc.content_text
+        prof_chunks = list(
+            await session.scalars(
+                select(Chunk).where(Chunk.document_id == prof_doc.id)
+            )
+        )
+        joined_chunks = "\n".join(c.content for c in prof_chunks)
+        assert "知识图谱与大模型对齐评测" in joined_chunks
+        assert "TJAI2026-99" in joined_chunks
+
+    # Chat stream immediately reflects newly added project TJAI2026-99 without manual reindex
+    r_chat_new = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "课题组承担的 TJAI2026-99 项目由谁主持？"},
+        headers=headers,
+    )
+    assert r_chat_new.status_code == 200
+    chat_events = [
+        json.loads(block.split("data:", 1)[1].strip())
+        for block in r_chat_new.text.split("\n\n")
+        if "data:" in block
+    ]
+    streamed_answer = "".join(
+        str(e.get("text") or "") for e in chat_events if e.get("type") == "token"
+    )
+    assert "TJAI2026-99" in streamed_answer
+    assert "杨硕" in streamed_answer
+
+    # Delete the newly added project so counts return to 6
+    r_del_proj = await client.delete(
+        f"/api/v1/lab/projects/{new_proj_id}", headers=headers
+    )
+    assert r_del_proj.status_code == 200
+
+    # Manual reindex endpoint works
+    r_reindex = await client.post("/api/v1/lab/reindex", headers=headers)
+    assert r_reindex.status_code == 200
+    assert r_reindex.json()["status"] == "ok"
+
+    # 5. Batch formatting (/api/v1/lab/format/batch)
+    r_batch_proj = await client.post(
+        "/api/v1/lab/format/batch",
+        json={
+            "tab": "projects",
+            "numbered": True,
+            "only_ongoing": True,
+            "recent_years": 5,
+            "include_relationship": True,
+        },
+        headers=headers,
+    )
+    assert r_batch_proj.status_code == 200, r_batch_proj.text
+    bp_data = r_batch_proj.json()
+    assert bp_data["count"] == 4
+    assert bp_data["items"][0].startswith("[1] ")
+    assert bp_data["items"][1].startswith("[2] ")
+    assert "与本课题关系：" in bp_data["text"]
+
+    r_batch_fac = await client.post(
+        "/api/v1/lab/format/batch",
+        json={"tab": "facilities", "numbered": True},
+        headers=headers,
+    )
+    assert r_batch_fac.status_code == 200
+    assert r_batch_fac.json()["count"] == 1
+    assert r_batch_fac.json()["items"][0].startswith("[1] ")
+
+    r_batch_ach = await client.post(
+        "/api/v1/lab/format/batch",
+        json={"tab": "achievements", "numbered": True, "with_support": False},
+        headers=headers,
+    )
+    assert r_batch_ach.status_code == 200
+    assert r_batch_ach.json()["count"] == 5
+    assert "成果为大模型安全治理提供支撑" not in r_batch_ach.json()["text"]
+
+    # 6. Export Markdown & Word (.docx)
+    r_exp_md = await client.get("/api/v1/lab/export?format=md", headers=headers)
+    assert r_exp_md.status_code == 200
+    assert "text/markdown" in r_exp_md.headers["content-type"]
+    md_text = r_exp_md.content.decode("utf-8")
+    assert "AGE240005" in md_text
+    assert_no_pii(md_text)
+
+    r_exp_docx = await client.get("/api/v1/lab/export?format=docx", headers=headers)
+    assert r_exp_docx.status_code == 200
+    assert (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        in r_exp_docx.headers["content-type"]
+    )
+    exported_doc = docx.Document(io.BytesIO(r_exp_docx.content))
+    doc_full_text = "\n".join(p.text for p in exported_doc.paragraphs)
+    assert "万振凯" in doc_full_text
+    assert "AGE240005" in doc_full_text
+    assert_no_pii(doc_full_text)
+
+
+async def test_codex_review_regressions(client: AsyncClient) -> None:
+    """Regression suite covering all 5 Codex review scenarios."""
+    admin_user = await _seed_admin()
+    admin_headers = await _login_headers(client, ADMIN_EMAIL)
+    raw_docx = build_synthetic_proposal_docx()
+
+    # --- Regression 2: Manual assets created while an unprovisioned (`parsed`) import exists
+    # must NOT attach to the deletable `parsed` import or be wiped when it is deleted ---
+    r_parsed = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("unprovisioned.docx", raw_docx, "application/octet-stream")},
+        headers=admin_headers,
+    )
+    assert r_parsed.status_code == 200
+    parsed_job_id = r_parsed.json()["job_id"]
+
+    # Explicitly linking a manual asset to an unprovisioned import must be rejected (409)
+    r_bad_link = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "试图挂载未开号任务的项目",
+            "grant_no": "BAD-LINK-01",
+            "source_import_id": parsed_job_id,
+        },
+        headers=admin_headers,
+    )
+    assert r_bad_link.status_code == 409
+    assert r_bad_link.json()["error"]["code"] == "import_not_provisioned"
+
+    # Creating manual project, achievement, facility without explicit source_import_id creates
+    # a safe `provisioned` placeholder job rather than attaching to `parsed_job_id`
+    r_man_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "手工独立重点项目",
+            "grant_no": "MAN-PROJ-01",
+            "funder": "国家自然科学基金",
+            "pi_name": "万振凯",
+            "status": "ongoing",
+        },
+        headers=admin_headers,
+    )
+    assert r_man_proj.status_code == 200, r_man_proj.text
+    man_proj_id = r_man_proj.json()["project"]["id"]
+    placeholder_doc_key = r_man_proj.json()["rag_doc_key"]
+    assert r_man_proj.json()["project"]["source_import_id"] != parsed_job_id
+
+    r_man_ach = await client.post(
+        "/api/v1/lab/achievements",
+        json={
+            "kind": "paper",
+            "title": "手工录入代表性论文",
+            "first_author": "万振凯",
+            "year": 2026,
+        },
+        headers=admin_headers,
+    )
+    assert r_man_ach.status_code == 200
+    man_ach_id = r_man_ach.json()["achievement"]["id"]
+
+    r_man_fac = await client.post(
+        "/api/v1/lab/facilities",
+        json={
+            "category": "compute",
+            "name": "手工录入A800推理集群",
+            "spec": "8xA800-80GB",
+        },
+        headers=admin_headers,
+    )
+    assert r_man_fac.status_code == 200
+    man_fac_id = r_man_fac.json()["facility"]["id"]
+
+    # Deleting the unprovisioned `parsed` import job succeeds and leaves all manual assets intact
+    r_del_unprov = await client.delete(
+        f"/api/v1/admin/imports/{parsed_job_id}",
+        headers=admin_headers,
+    )
+    assert r_del_unprov.status_code == 200
+    projs_after = (
+        await client.get("/api/v1/lab/projects", headers=admin_headers)
+    ).json()["projects"]
+    achs_after = (
+        await client.get("/api/v1/lab/achievements", headers=admin_headers)
+    ).json()["achievements"]
+    facs_after = (
+        await client.get("/api/v1/lab/facilities", headers=admin_headers)
+    ).json()["facilities"]
+    assert any(p["id"] == man_proj_id for p in projs_after)
+    assert any(a["id"] == man_ach_id for a in achs_after)
+    assert any(f["id"] == man_fac_id for f in facs_after)
+
+    # --- Regression 3 & 4: Upload & provision a second import; verify stale `lab-profile-*`
+    # documents are retired (`deleted_at IS NOT NULL`) and their chunks deleted ---
+    r_imp2 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal2.docx", raw_docx, "application/octet-stream")},
+        headers=admin_headers,
+    )
+    assert r_imp2.status_code == 200
+    imp2_id = r_imp2.json()["job_id"]
+
+    # Corrupt both a project title and an achievement title via PATCH /preview, then restore via reparse(fsm)
+    prev2 = (
+        await client.get(
+            f"/api/v1/admin/imports/{imp2_id}/preview", headers=admin_headers
+        )
+    ).json()["preview"]
+    orig_ach_title = prev2["achievements"][0]["title"]
+    mod_achs = [dict(a) for a in prev2["achievements"]]
+    mod_achs[0]["title"] = "被人为破坏的成果标题"
+    await client.patch(
+        f"/api/v1/admin/imports/{imp2_id}/preview",
+        json={"achievements": mod_achs},
+        headers=admin_headers,
+    )
+    r_rep_fsm = await client.post(
+        f"/api/v1/admin/imports/{imp2_id}/reparse",
+        json={"mode": "fsm"},
+        headers=admin_headers,
+    )
+    assert r_rep_fsm.status_code == 200
+    assert (
+        r_rep_fsm.json()["preview"]["achievements"][0]["title"] == orig_ach_title
+    )
+
+    r_prov2 = await client.post(
+        f"/api/v1/admin/imports/{imp2_id}/provision",
+        json={"initial_password": INITIAL_PW},
+        headers=admin_headers,
+    )
+    assert r_prov2.status_code == 200, r_prov2.text
+    new_doc_key = r_prov2.json()["rag_doc_key"]
+    assert new_doc_key != placeholder_doc_key
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        active_profile_docs = list(
+            await session.scalars(
+                select(Document).where(
+                    Document.doc_key.like("lab-profile-%"),
+                    Document.deleted_at.is_(None),
+                )
+            )
+        )
+        assert len(active_profile_docs) == 1
+        assert active_profile_docs[0].doc_key == new_doc_key
+
+        old_doc = await session.scalar(
+            select(Document).where(Document.doc_key == placeholder_doc_key)
+        )
+        assert old_doc is not None
+        assert old_doc.deleted_at is not None
+        old_chunks = list(
+            await session.scalars(
+                select(Chunk).where(Chunk.document_id == old_doc.id)
+            )
+        )
+        assert len(old_chunks) == 0
+
+    # --- Regression 1: Non-admin member cannot edit their own `name` or `project_role` (403),
+    # cannot edit another person's project/achievement, and cannot transfer `pi_name` to someone else ---
+    yang_init_headers = await _login_headers(client, "yangshuo", INITIAL_PW)
+    yang_new_pw = "YangShuo-NewPw-2026!"
+    r_chg = await client.post(
+        "/api/v1/auth/change-password",
+        json={"old_password": INITIAL_PW, "new_password": yang_new_pw},
+        headers=yang_init_headers,
+    )
+    assert r_chg.status_code == 200, r_chg.text
+    yang_headers = await _login_headers(client, "yangshuo", yang_new_pw)
+    people_rows = (
+        await client.get("/api/v1/lab/people", headers=yang_headers)
+    ).json()["people"]
+    yang_row = next(p for p in people_rows if p["name"] == "杨硕")
+    orig_yang_fp = yang_row["entity_fingerprint"]
+
+    # Member attempting to rename self to hijack ownership -> 403 forbidden
+    r_hijack_name = await client.patch(
+        f"/api/v1/lab/people/{yang_row['id']}",
+        json={"name": "万振凯"},
+        headers=yang_headers,
+    )
+    assert r_hijack_name.status_code == 403
+    assert r_hijack_name.json()["error"]["code"] == "forbidden"
+
+    # Member attempting to escalate project_role -> 403 forbidden
+    r_hijack_role = await client.patch(
+        f"/api/v1/lab/people/{yang_row['id']}",
+        json={"project_role": "applicant"},
+        headers=yang_headers,
+    )
+    assert r_hijack_role.status_code == 403
+    assert r_hijack_role.json()["error"]["code"] == "forbidden"
+
+    # Member updating own research_specialty and affiliation succeeds and recomputes entity_fingerprint
+    r_self_ok = await client.patch(
+        f"/api/v1/lab/people/{yang_row['id']}",
+        json={
+            "research_specialty": "可信知识图谱",
+            "affiliation": "天津天狮学院人工智能系",
+        },
+        headers=yang_headers,
+    )
+    assert r_self_ok.status_code == 200, r_self_ok.text
+    updated_yang = r_self_ok.json()["person"]
+    assert updated_yang["research_specialty"] == "可信知识图谱"
+    assert updated_yang["entity_fingerprint"] != orig_yang_fp
+
+    # Member cannot modify Wan Zhenkai's project -> 403 forbidden
+    r_other_proj = await client.patch(
+        f"/api/v1/lab/projects/{man_proj_id}",
+        json={"title": "越权修改他人项目"},
+        headers=yang_headers,
+    )
+    assert r_other_proj.status_code == 403
+
+    # Member creates own project, then tries to reassign pi_name to someone else -> 403 forbidden
+    r_yang_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "杨硕青年基金项目",
+            "grant_no": "YS-2026-01",
+            "funder": "天津市教委科研计划",
+            "pi_name": "杨硕",
+            "status": "ongoing",
+        },
+        headers=yang_headers,
+    )
+    assert r_yang_proj.status_code == 200
+    yang_proj_id = r_yang_proj.json()["project"]["id"]
+    orig_proj_fp = r_yang_proj.json()["project"]["entity_fingerprint"]
+
+    r_reassign_pi = await client.patch(
+        f"/api/v1/lab/projects/{yang_proj_id}",
+        json={"pi_name": "万振凯"},
+        headers=yang_headers,
+    )
+    assert r_reassign_pi.status_code == 403
+
+    # --- Regression 5: Updating project identity fields recomputes `entity_fingerprint`,
+    # and colliding with another existing project raises 409 duplicate_entity ---
+    r_upd_proj = await client.patch(
+        f"/api/v1/lab/projects/{yang_proj_id}",
+        json={"title": "杨硕青年基金项目（升级版）", "grant_no": "YS-2026-02"},
+        headers=yang_headers,
+    )
+    assert r_upd_proj.status_code == 200, r_upd_proj.text
+    new_proj_fp = r_upd_proj.json()["project"]["entity_fingerprint"]
+    assert new_proj_fp != orig_proj_fp
+
+    # Colliding with `man_proj_id` ("手工独立重点项目", "MAN-PROJ-01", "国家自然科学基金") -> 409 duplicate_entity
+    r_dup_proj = await client.patch(
+        f"/api/v1/lab/projects/{yang_proj_id}",
+        json={
+            "title": "手工独立重点项目",
+            "grant_no": "MAN-PROJ-01",
+            "funder": "国家自然科学基金",
+        },
+        headers=admin_headers,
+    )
+    assert r_dup_proj.status_code == 409
+    assert r_dup_proj.json()["error"]["code"] == "duplicate_entity"
+
+    # --- Round 2 Regression A: Unowned project (`pi_name=None`) / achievement (`first_author=None`)
+    # and shared facility (`PATCH/DELETE /lab/facilities/{id}`) cannot be modified/deleted by non-admin ---
+    r_unowned_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={"title": "未填写负责人的公共项目", "grant_no": "UNOWNED-01"},
+        headers=admin_headers,
+    )
+    assert r_unowned_proj.status_code == 200
+    unowned_proj_id = r_unowned_proj.json()["project"]["id"]
+
+    r_claim_unowned = await client.patch(
+        f"/api/v1/lab/projects/{unowned_proj_id}",
+        json={"pi_name": "杨硕"},
+        headers=yang_headers,
+    )
+    assert r_claim_unowned.status_code == 403
+    assert r_claim_unowned.json()["error"]["code"] == "forbidden"
+
+    r_del_unowned = await client.delete(
+        f"/api/v1/lab/projects/{unowned_proj_id}",
+        headers=yang_headers,
+    )
+    assert r_del_unowned.status_code == 403
+
+    r_fac_member_patch = await client.patch(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        json={"name": "非管理员试图修改设备"},
+        headers=yang_headers,
+    )
+    assert r_fac_member_patch.status_code == 403
+
+    r_fac_member_del = await client.delete(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        headers=yang_headers,
+    )
+    assert r_fac_member_del.status_code == 403
+
+    # --- Round 2 Regression B: Duplicate software/patent achievement creation returns 409 duplicate_entity ---
+    r_sw1 = await client.post(
+        "/api/v1/lab/achievements",
+        json={
+            "kind": "software",
+            "title": "智能题库查重软著V1.0",
+            "raw_text": "智能题库查重软著V1.0，登记号：2026SR888999",
+            "first_author": "杨硕",
+            "year": 2026,
+        },
+        headers=yang_headers,
+    )
+    assert r_sw1.status_code == 200
+    r_sw_dup = await client.post(
+        "/api/v1/lab/achievements",
+        json={
+            "kind": "software",
+            "title": "智能题库查重软著V1.0（重复提交）",
+            "raw_text": "智能题库查重软著V1.0，登记号：2026SR888999",
+            "first_author": "杨硕",
+            "year": 2026,
+        },
+        headers=yang_headers,
+    )
+    assert r_sw_dup.status_code == 409
+    assert r_sw_dup.json()["error"]["code"] == "duplicate_entity"
+
+    # --- Round 2 Regression C: Distinct `relationship_note` on a later project is preserved in RAG & export ---
+    distinct_rel = "该青年项目为本课题提供可信知识图谱子图对齐算法原型"
+    r_rel_upd = await client.patch(
+        f"/api/v1/lab/projects/{yang_proj_id}",
+        json={"relationship_note": distinct_rel},
+        headers=yang_headers,
+    )
+    assert r_rel_upd.status_code == 200
+    r_md_export = await client.get(
+        "/api/v1/lab/export?format=md", headers=admin_headers
+    )
+    assert r_md_export.status_code == 200
+    assert distinct_rel in r_md_export.content.decode("utf-8")
+
+    # --- Round 3 & Round 4 Regression A: Member edits, /lab/reindex, and new import replacement
+    # preserve canonical profile document owner_id, visibility, and DocumentACL grants ---
+    async with maker() as session:
+        prof_doc_before = await session.scalar(
+            select(Document).where(Document.doc_key == new_doc_key)
+        )
+        assert prof_doc_before is not None
+        assert prof_doc_before.owner_id == admin_user.id
+        acl_group = Group(slug="profile-readers", name="档案授权阅读组")
+        session.add(acl_group)
+        await session.flush()
+        acl_group_id = acl_group.id
+        prof_doc_before.visibility = "private"
+        session.add_all(
+            [
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="user",
+                    principal_id= str(yang_row["user_id"]),
+                    permission="read",
+                ),
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="group",
+                    principal_id=str(acl_group_id),
+                    permission="read",
+                ),
+                DocumentACL(
+                    document_id=prof_doc_before.id,
+                    principal_type="role",
+                    principal_id="pi",
+                    permission="read",
+                ),
+            ]
+        )
+        await session.commit()
+
+    r_member_reindex = await client.post("/api/v1/lab/reindex", headers=yang_headers)
+    assert r_member_reindex.status_code == 200
+    async with maker() as session:
+        prof_doc_after = await session.scalar(
+            select(Document).where(Document.doc_key == new_doc_key)
+        )
+        assert prof_doc_after is not None
+        assert prof_doc_after.owner_id == admin_user.id
+        assert prof_doc_after.visibility == "private"
+        preserved_acls = list(
+            await session.scalars(
+                select(DocumentACL).where(
+                    DocumentACL.document_id == prof_doc_after.id
+                )
+            )
+        )
+        preserved_pairs = {
+            (row.principal_type, row.principal_id) for row in preserved_acls
+        }
+        assert preserved_pairs == {
+            ("user", str(yang_row["user_id"])),
+            ("group", str(acl_group_id)),
+            ("role", "pi"),
+        }
+        prof_doc_after.visibility = "lab"
+        await session.commit()
+
+    # --- Round 3 Regression B: T1 members retain certificate-based fingerprint across profile updates ---
+    lin_row = next(p for p in people_rows if p["name"] == "林雪莹")
+    wang_row = next(p for p in people_rows if p["name"] == "王诗涵")
+    cao_row = next(p for p in people_rows if p["name"] == "曹梦轩")
+    orig_lin_fp = lin_row["entity_fingerprint"]
+    orig_wang_fp = wang_row["entity_fingerprint"]
+    orig_cao_fp = cao_row["entity_fingerprint"]
+
+    r_lin_upd = await client.patch(
+        f"/api/v1/lab/people/{lin_row['id']}",
+        json={"bio": "深度学习与教育大模型方向硕士生", "research_specialty": "大模型微调"},
+        headers=admin_headers,
+    )
+    assert r_lin_upd.status_code == 200, r_lin_upd.text
+    assert r_lin_upd.json()["person"]["entity_fingerprint"] == orig_lin_fp
+
+    # Two T1 members with the same name and affiliation but distinct student IDs never collide on update
+    r_cao_rename = await client.patch(
+        f"/api/v1/lab/people/{cao_row['id']}",
+        json={"name": "王诗涵", "bio": "同名T1研究生B"},
+        headers=admin_headers,
+    )
+    assert r_cao_rename.status_code == 200, r_cao_rename.text
+    assert r_cao_rename.json()["person"]["entity_fingerprint"] == orig_cao_fp
+
+    r_wang_upd = await client.patch(
+        f"/api/v1/lab/people/{wang_row['id']}",
+        json={"bio": "同名T1研究生A"},
+        headers=admin_headers,
+    )
+    assert r_wang_upd.status_code == 200, r_wang_upd.text
+    assert r_wang_upd.json()["person"]["entity_fingerprint"] == orig_wang_fp
+
+    # --- Round 5 Regression: Grouped profile sections > 800 chars split cleanly on blank paragraphs ---
+    from app.importer.formatters import render_lab_profile_markdown
+    from app.rag.chunker import chunk_markdown
+
+    large_people = [
+        {
+            "name": f"成员{i}",
+            "project_role": "applicant" if i == 0 else "member",
+            "degree": "博士",
+            "affiliation": "天津天狮学院计算机科学与技术学院",
+            "title": "教授",
+            "admin_duty": "院长",
+            "tutor_role": "博士生导师",
+            "research_specialty": "人工智能与大模型安全对齐研究",
+            "bio": "长期从事人工智能、自然语言处理、教育测评大模型与多模态学习研究，主持多项国家级与省部级重点科研课题。",
+        }
+        for i in range(10)
+    ]
+    large_projects = [
+        {
+            "title": f"面向教育测评的大模型可信推理与安全对齐关键技术研究子课题{i}",
+            "grant_no": f"AGE2026-{i:03d}",
+            "funder": "全国教育科学规划重点课题",
+            "pi_name": f"成员{i}",
+            "lab_role": "host",
+            "status": "ongoing" if i < 6 else "completed",
+            "start_date": "2025-01-01",
+            "amount_wan": "25.00",
+        }
+        for i in range(10)
+    ]
+    large_achievements = [
+        {
+            "kind": "paper",
+            "title": f"大规模在线教育考试智能评卷与异常行为检测算法研究第{i}篇",
+            "first_author": f"成员{i}",
+            "venue": "计算机学报",
+            "year": 2025,
+            "support_note": "提出了高可靠试题结构化抽取与评分一致性校验方法",
+        }
+        for i in range(10)
+    ]
+    large_facilities = [
+        {
+            "name": f"高性能计算加速集群节点{i}",
+            "spec": "8xA800-80GB GPU服务器及高速互联存储部件",
+            "value_wan": "68.00",
+            "usage_scenario": "用于课题组搭建教育考试专属大模型轻量化微调与推理验证实验环境",
+        }
+        for i in range(10)
+    ]
+    large_md = render_lab_profile_markdown(
+        project_title="大型课题组档案切分回归测试",
+        as_of_time="2026-06-01",
+        people=large_people,
+        projects=large_projects,
+        achievements=large_achievements,
+        facilities=large_facilities,
+        relationship_note="本课题是在前期系列国家级重点课题基础上的深入拓展。",
+    )
+    assert len(large_md) > 4500
+    large_chunks = chunk_markdown(large_md, max_chars=800)
+    assert len(large_chunks) <= 30
+    for ch in large_chunks:
+        assert len(ch.text) <= 800, (
+            f"Chunk {ch.index} ({ch.heading}) exceeded 800 chars: {len(ch.text)}"
+        )
+        first_para = ch.text.split("\n\n", 1)[0]
+        if first_para.startswith("## "):
+            assert "\n" not in first_para
+    member9_chunks = [c for c in large_chunks if "成员9" in c.heading]
+    assert len(member9_chunks) == 1
+    assert "团队成员" not in member9_chunks[0].heading
+    assert "成员8" not in member9_chunks[0].text
+    proj9_chunks = [c for c in large_chunks if "AGE2026-009" in c.heading]
+    assert len(proj9_chunks) == 1
+    assert "承担项目" not in proj9_chunks[0].heading
+
+    # --- Round 6 Regression A: Recompute inferred project status when end_date changes or is cleared ---
+    r_inf_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "自动推断状态测试课题",
+            "grant_no": "INF-2026-01",
+            "funder": "教育部人文社科项目",
+            "pi_name": "杨硕",
+            "start_date": "2023-01-01",
+            "end_date": "2025-12-31",
+            "amount_wan": "18.50",
+            "status_source": "inferred",
+            "as_of_time": "2026-06-01",
+        },
+        headers=yang_headers,
+    )
+    assert r_inf_proj.status_code == 200, r_inf_proj.text
+    inf_proj = r_inf_proj.json()["project"]
+    inf_proj_id = inf_proj["id"]
+    assert inf_proj["status"] == "completed"
+    assert inf_proj["status_source"] == "inferred"
+
+    # Extending end_date past as_of_time recomputes inferred status to ongoing
+    r_extend_end = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"end_date": "2028-01-01"},
+        headers=yang_headers,
+    )
+    assert r_extend_end.status_code == 200, r_extend_end.text
+    assert r_extend_end.json()["project"]["end_date"] == "2028-01-01"
+    assert r_extend_end.json()["project"]["status"] == "ongoing"
+    assert r_extend_end.json()["project"]["status_source"] == "inferred"
+
+    # Clearing end_date via explicit null sets end_date=None and recomputes inferred status to unknown
+    r_clear_end = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"end_date": None, "amount_wan": None, "start_date": None},
+        headers=yang_headers,
+    )
+    assert r_clear_end.status_code == 200, r_clear_end.text
+    assert r_clear_end.json()["project"]["end_date"] is None
+    assert r_clear_end.json()["project"]["start_date"] is None
+    assert r_clear_end.json()["project"]["amount_wan"] is None
+    assert r_clear_end.json()["project"]["status"] == "unknown"
+
+    # Non-admin member cannot clear pi_name to null -> 403 forbidden
+    r_clear_pi_forbidden = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"pi_name": None},
+        headers=yang_headers,
+    )
+    assert r_clear_pi_forbidden.status_code == 403
+
+    # --- Round 6 Regression B: Explicit null updates clear nullable fields across achievements, people, facilities ---
+    sw1_id = r_sw1.json()["achievement"]["id"]
+    assert r_sw1.json()["achievement"]["year"] == 2026
+
+    # Non-admin member cannot clear first_author to null -> 403 forbidden
+    r_clear_author_forbidden = await client.patch(
+        f"/api/v1/lab/achievements/{sw1_id}",
+        json={"first_author": None},
+        headers=yang_headers,
+    )
+    assert r_clear_author_forbidden.status_code == 403
+
+    # Clearing achievement year via explicit null sets year=None
+    r_clear_year = await client.patch(
+        f"/api/v1/lab/achievements/{sw1_id}",
+        json={"year": None, "venue": None, "support_note": None},
+        headers=yang_headers,
+    )
+    assert r_clear_year.status_code == 200, r_clear_year.text
+    assert r_clear_year.json()["achievement"]["year"] is None
+    assert r_clear_year.json()["achievement"]["venue"] is None
+    assert r_clear_year.json()["achievement"]["support_note"] is None
+
+    # Clearing person nullable fields via explicit null
+    r_clear_person = await client.patch(
+        f"/api/v1/lab/people/{yang_row['id']}",
+        json={"research_specialty": None, "bio": None},
+        headers=yang_headers,
+    )
+    assert r_clear_person.status_code == 200, r_clear_person.text
+    assert r_clear_person.json()["person"]["research_specialty"] is None
+    assert r_clear_person.json()["person"]["bio"] is None
+
+    # Clearing facility nullable fields via explicit null
+    r_clear_fac = await client.patch(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        json={"spec": None, "value_wan": None, "usage_scenario": None},
+        headers=admin_headers,
+    )
+    assert r_clear_fac.status_code == 200, r_clear_fac.text
+    assert r_clear_fac.json()["facility"]["spec"] is None
+    assert r_clear_fac.json()["facility"]["value_wan"] is None
+    assert r_clear_fac.json()["facility"]["usage_scenario"] is None
+
+
+
+
+
+

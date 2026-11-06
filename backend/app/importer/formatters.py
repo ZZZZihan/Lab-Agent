@@ -42,9 +42,6 @@ def format_person_application(person: Any, *, include_bio: bool = False) -> str:
     specialty = str(_get(person, "research_specialty") or "").strip()
     bio = str(_get(person, "bio") or "").strip()
 
-    if include_bio and bio:
-        return bio
-
     parts: list[str] = [name]
     if degree:
         parts.append(degree)
@@ -64,6 +61,8 @@ def format_person_application(person: Any, *, include_bio: bool = False) -> str:
     if specialty:
         parts.append(f"研究专长：{specialty}")
     line = "，".join(parts) + "。"
+    if include_bio and bio:
+        return f"{line.rstrip('。')}；{bio}"
     return line
 
 
@@ -151,6 +150,7 @@ def format_facility_application(facility: Any) -> str:
     spec = str(_get(facility, "spec") or "").strip()
     value_wan = _get(facility, "value_wan")
     usage = str(_get(facility, "usage_scenario") or "").strip()
+    raw_text = str(_get(facility, "raw_text") or "").strip()
 
     parts: list[str] = []
     if spec and spec != name:
@@ -161,7 +161,23 @@ def format_facility_application(facility: Any) -> str:
         parts.append(f"经费/原值 {value_wan} 万元")
     if usage and usage != spec:
         parts.append(f"用于{usage}")
+    if raw_text and ("；" in raw_text or ";" in raw_text):
+        sep = "；" if "；" in raw_text else ";"
+        extra = raw_text.split(sep, 1)[1].strip().rstrip("。")
+        if extra and extra not in "，".join(parts):
+            parts.append(extra)
     return "，".join(parts) + "。"
+
+
+def _brief_project_summary(project: Any) -> str:
+    pt = str(_get(project, "title") or "").strip()
+    gno = str(_get(project, "grant_no") or "").strip()
+    pi = str(_get(project, "pi_name") or "").strip()
+    role_lbl = "参与" if str(_get(project, "lab_role")) == "participant" else "主持"
+    st_lbl = PROJECT_STATUS_LABELS.get(str(_get(project, "status") or "unknown"), "状态未注明")
+    if gno:
+        return f"{pi}{role_lbl}《{pt}》（{gno}，{st_lbl}）"
+    return f"{pi}{role_lbl}《{pt}》（{st_lbl}）"
 
 
 def render_lab_profile_markdown(
@@ -185,6 +201,14 @@ def render_lab_profile_markdown(
     ongoing_projects = [p for p in projects if str(_get(p, "status")) == "ongoing"]
     completed_projects = [p for p in projects if str(_get(p, "status")) == "completed"]
 
+    rel_text = relationship_note
+    if not rel_text:
+        for proj in projects:
+            rn = str(_get(proj, "relationship_note") or "").strip()
+            if rn:
+                rel_text = rn
+                break
+
     lines: list[str] = [
         f"# 课题组资料库：{title_str}",
         "",
@@ -192,55 +216,136 @@ def render_lab_profile_markdown(
         f"承担项目（{len(projects)}项，其中在研{len(ongoing_projects)}项、已结题{len(completed_projects)}项）、"
         f"前期成果（{len(achievements)}项）及设备与支撑条件（{len(facilities)}项）。",
         "",
-        "## 课题组概况与项目清单",
-        f"课题名称：{title_str}。团队共 {len(people)} 位成员："
-        + "、".join(str(_get(p, "name") or "") for p in people)
-        + "。",
+        "## 课题组概况与项目清单 · 在研与已结题清单",
+        "",
     ]
     if ongoing_projects:
         lines.append(
-            "在研项目清单："
-            + "；".join(format_project_application(p) for p in ongoing_projects)
+            f"课题组概况与项目清单之在研项目清单（共{len(ongoing_projects)}项）："
+            + "；".join(_brief_project_summary(p) for p in ongoing_projects)
+            + "。"
         )
+        lines.append("")
     if completed_projects:
         lines.append(
-            "已结题项目清单："
-            + "；".join(format_project_application(p) for p in completed_projects)
+            f"课题组概况与项目清单之已结题项目清单（共{len(completed_projects)}项）："
+            + "；".join(_brief_project_summary(p) for p in completed_projects)
+            + "。"
         )
-    if relationship_note:
-        lines.append(f"与已承担项目的关系：{relationship_note}")
-    lines.append("")
+        lines.append("")
+
+    if projects or rel_text:
+        lines.append("## 全部清单与延伸关系")
+        lines.append("")
+        if projects:
+            lines.append(
+                f"课题组概况与项目清单之课题组一共承担全部项目汇总（共{len(projects)}项）："
+                + "；".join(_brief_project_summary(p) for p in projects)
+                + "。"
+            )
+            lines.append("")
+        if rel_text:
+            lines.append(
+                f"按申报书格式说明本课题与课题组已承担项目的关系：{rel_text.rstrip('。')}。"
+            )
+            lines.append("")
+
+    if projects:
+        emitted_rel_notes: set[str] = set()
+        for idx, proj in enumerate(projects):
+            gno = str(_get(proj, "grant_no") or "").strip()
+            ptitle = str(_get(proj, "title") or "").strip()
+            lines.append(f"## {gno or ptitle or f'项目{idx + 1}'}")
+            lines.append("")
+            amt = _get(proj, "amount_wan")
+            p_line = format_project_application(proj, include_relationship=False).rstrip("。")
+            if amt is not None and str(amt).strip():
+                p_line += f"，经费{amt}万元"
+            proj_rel = str(_get(proj, "relationship_note") or "").strip()
+            if idx == 0 and not proj_rel and rel_text:
+                proj_rel = rel_text
+            if proj_rel and proj_rel not in emitted_rel_notes:
+                emitted_rel_notes.add(proj_rel)
+                p_line += f"；与本课题关系：{proj_rel.rstrip('。')}"
+            prefix = f"承担项目 {gno}：" if gno else "承担项目："
+            lines.append(f"{prefix}{p_line}。")
+            lines.append("")
 
     for person in people:
-        pname = str(_get(person, "name") or "")
-        prole = "课题负责人/申请人" if _get(person, "project_role") == "applicant" else "项目组成员"
-        lines.append(f"## 团队成员 · {pname}（{prole}）")
-        lines.append(format_person_application(person))
+        pname = str(_get(person, "name") or "").strip()
+        spec = str(_get(person, "research_specialty") or "").strip()
+        spec_heading = spec.replace("研究", "").strip()
+        prole = (
+            "课题负责人/申请人"
+            if _get(person, "project_role") == "applicant"
+            else "项目组成员"
+        )
+        h_parts = [p for p in (pname, spec_heading) if p]
+        lines.append(f"## {' · '.join(h_parts) or '成员'}")
+        lines.append("")
+        base_line = format_person_application(person).rstrip("。")
         bio = str(_get(person, "bio") or "").strip()
         if bio:
-            lines.append(f"学术简历：{bio}")
+            bio_clean = bio.replace("。", "；").rstrip("；")
+            lines.append(
+                f"团队成员 {pname}（{prole}）：{base_line}；个人申报书简介与学术简历：{bio_clean}。"
+            )
+        else:
+            lines.append(f"团队成员 {pname}（{prole}）：{base_line}。")
         lines.append("")
 
-    for proj in projects:
-        ptitle = str(_get(proj, "title") or "")
-        gno = str(_get(proj, "grant_no") or "").strip()
-        heading_tag = f"{gno} · {ptitle}" if gno else ptitle
-        lines.append(f"## 承担项目 · {heading_tag}")
-        lines.append(format_project_application(proj, include_relationship=True))
-        lines.append("")
+    if achievements:
+        non_papers = [a for a in achievements if str(_get(a, "kind")) != "paper"]
+        papers = [a for a in achievements if str(_get(a, "kind")) == "paper"]
+        for ach in non_papers:
+            raw_kind = str(_get(ach, "kind") or "other")
+            akind = ACHIEVEMENT_KIND_LABELS.get(raw_kind, "其他成果")
+            if raw_kind == "report":
+                ach_heading = "资政报告"
+            elif raw_kind == "exhibition":
+                ach_heading = "动态展 · 名称"
+            elif raw_kind == "software":
+                ach_heading = "软件著作权 · 登记号"
+            else:
+                ach_heading = akind
+            lines.append(f"## {ach_heading}")
+            lines.append("")
+            a_base = format_achievement_application(ach, include_support=False).rstrip("。")
+            sup = str(_get(ach, "support_note") or "").strip().rstrip("。")
+            if sup:
+                lines.append(f"前期成果（{akind}名称）：{a_base}；{sup}。")
+            else:
+                lines.append(f"前期成果（{akind}名称）：{a_base}。")
+            lines.append("")
+        if papers:
+            lines.append("## 发表学术论文 · 论文期刊与第一作者")
+            lines.append("")
+            if len(papers) <= 5:
+                paper_items = [
+                    format_achievement_application(p, include_support=False).rstrip("。")
+                    for p in papers
+                ]
+                lines.append(
+                    f"前期成果之发表学术论文成果汇总（共{len(papers)}篇，含期刊与第一作者）："
+                    + "；".join(paper_items)
+                    + "。"
+                )
+                lines.append("")
+            for ach in papers:
+                a_base = format_achievement_application(ach, include_support=False).rstrip("。")
+                sup = str(_get(ach, "support_note") or "").strip().rstrip("。")
+                if sup:
+                    lines.append(f"前期成果（论文）：{a_base}；{sup}。")
+                else:
+                    lines.append(f"前期成果（论文）：{a_base}。")
+                lines.append("")
 
-    for ach in achievements:
-        atitle = str(_get(ach, "title") or "")
-        akind = ACHIEVEMENT_KIND_LABELS.get(str(_get(ach, "kind") or "other"), "其他成果")
-        lines.append(f"## 前期成果 · {akind} · {atitle}")
-        lines.append(format_achievement_application(ach, include_support=True))
+    if facilities:
+        lines.append("## 设备与支撑条件 · 算力设备与工作站")
         lines.append("")
-
-    for fac in facilities:
-        fname = str(_get(fac, "name") or "")
-        lines.append(f"## 设备与支撑条件 · {fname}")
-        lines.append(format_facility_application(fac))
-        lines.append("")
+        for fac in facilities:
+            lines.append(f"设备与支撑条件（实验室算力设备）：{format_facility_application(fac)}")
+            lines.append("")
 
     md = "\n".join(lines).strip() + "\n"
     assert_no_pii(md)

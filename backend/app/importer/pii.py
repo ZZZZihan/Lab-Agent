@@ -57,17 +57,24 @@ def scrub_free_text(text: str | None) -> tuple[str, int]:
     return out, total
 
 
+_UUID_RE = re.compile(
+    r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"
+)
+_HEX64_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])")
+
+
 def assert_no_pii(payload: str | dict[str, object] | list[object]) -> None:
     """Verify zero 18/15-digit ID card numbers or 11-digit mobile numbers remain."""
     if isinstance(payload, str):
         serialized = payload
     else:
         serialized = json.dumps(payload, ensure_ascii=False, default=str)
+    sanitized = _HEX64_RE.sub("", _UUID_RE.sub("", serialized))
     for name, pattern in (
         ("id18", ID18_RE),
         ("id15", ID15_RE),
         ("mobile", MOBILE_RE),
         ("tel", TEL_RE),
     ):
-        if pattern.search(serialized):
+        if pattern.search(sanitized):
             raise PIILeakError(f"Unredacted PII pattern ({name}) detected in payload")
