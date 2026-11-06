@@ -62,11 +62,20 @@ function buildInitialOverrides(
   for (const p of job.preview?.people || []) {
     const matchStatus = p.match?.status || "new";
     const mode: PersonMode =
-      matchStatus === "existing" ? "existing" : "new";
+      p.exclude || p.override_mode === "exclude"
+        ? "exclude"
+        : p.override_mode === "existing" || p.override_mode === "new"
+          ? p.override_mode
+          : matchStatus === "existing"
+            ? "existing"
+            : "new";
     init[p.key] = {
       mode,
-      login_name: p.login_name || "",
-      link_user_id: p.match?.user_id || "",
+      login_name: p.override_login_name || p.login_name || "",
+      link_user_id:
+        p.override_link_user_id !== undefined
+          ? p.override_link_user_id
+          : p.match?.user_id || "",
     };
   }
   return init;
@@ -302,9 +311,14 @@ export default function AdminImportsPage() {
       const updatedPeople = (importJob.preview?.people || []).map((p) => {
         const ov = overrides[p.key];
         if (!ov) return p;
+        const trimmedLogin = ov.login_name.trim().toLowerCase();
         return {
           ...p,
-          login_name: ov.login_name.trim().toLowerCase() || p.login_name,
+          exclude: ov.mode === "exclude",
+          override_mode: ov.mode,
+          override_login_name: trimmedLogin || p.login_name,
+          override_link_user_id: ov.mode === "existing" ? ov.link_user_id : "",
+          login_name: trimmedLogin || p.login_name,
           match:
             ov.mode === "existing" && ov.link_user_id
               ? { status: "existing", user_id: ov.link_user_id }

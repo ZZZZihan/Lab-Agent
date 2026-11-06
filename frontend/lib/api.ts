@@ -274,6 +274,10 @@ export type ImportPreviewPerson = {
   affiliation?: string | null;
   match?: { status: "new" | "existing" | "conflict" | string; user_id?: string };
   warnings?: string[];
+  exclude?: boolean;
+  override_mode?: "new" | "existing" | "exclude";
+  override_login_name?: string;
+  override_link_user_id?: string;
 };
 
 export type ImportJobStats = {

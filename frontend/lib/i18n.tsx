@@ -186,7 +186,7 @@ const copy = {
       "汇聚项目申报书中的团队成员、承担项目、前期成果与支撑条件，支持一键复制标准申报书格式。",
     mustChangePasswordTitle: "首次登录安全提醒：请修改初始口令",
     mustChangePasswordDesc:
-      "当前使用的是统一初始口令，请立即设置新口令（至少 10 位，不可包含登录名或弱口令）。无邮箱成员可同时选填绑定本人常用邮箱。",
+      "当前使用的是统一初始口令，请立即设置新口令（至少 12 位，不可包含登录名或弱口令）。无邮箱成员可同时选填绑定本人常用邮箱。",
     oldPassword: "当前口令",
     bindEmailOptional: "绑定本人邮箱（选填）",
     saveNewPassword: "保存新口令",
@@ -412,7 +412,7 @@ const copy = {
       "Centralized lab members, grants, achievements, and facilities with one-click grant proposal formatting.",
     mustChangePasswordTitle: "Security Notice: Please change your initial password",
     mustChangePasswordDesc:
-      "You are using the initial password. Please set a new password (at least 10 characters) and optionally bind your email.",
+      "You are using the initial password. Please set a new password (at least 12 characters) and optionally bind your email.",
     oldPassword: "Current password",
     bindEmailOptional: "Bind email (optional)",
     saveNewPassword: "Save new password",

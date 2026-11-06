@@ -104,7 +104,7 @@ export default function ChangePasswordPage() {
   );
 
   const checklist = useMemo(() => {
-    const ruleLength = newPw.length >= 10;
+    const ruleLength = newPw.length >= 12;
     const charClasses =
       (/[a-z]/.test(newPw) ? 1 : 0) +
       (/[A-Z]/.test(newPw) ? 1 : 0) +
@@ -137,8 +137,8 @@ export default function ChangePasswordPage() {
         passed: ruleLength,
         label:
           locale === "zh"
-            ? "长度至少 10 个字符（推荐 12 位及以上）"
-            : "At least 10 characters (12+ recommended)",
+            ? "长度至少 12 个字符"
+            : "At least 12 characters",
       },
       {
         key: "classes",
