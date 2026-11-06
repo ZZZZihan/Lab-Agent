@@ -528,6 +528,16 @@ async def test_three_in_one_login_password_change_and_expiry(
     # 6. Self password change + optional email binding for T1 student (2431101262)
     t1_token = r_t1.json()["access_token"]
     t1_headers = {"Authorization": f"Bearer {t1_token}"}
+
+    # While must_change_password_by is pending: /auth/me is allowed, but /lab/overview is blocked with 403
+    me_before = await client.get("/api/v1/auth/me", headers=t1_headers)
+    assert me_before.status_code == 200
+    assert me_before.json()["must_change_password"] is True
+
+    blocked_resp = await client.get("/api/v1/lab/overview", headers=t1_headers)
+    assert blocked_resp.status_code == 403
+    assert blocked_resp.json()["error"]["code"] == "password_change_required"
+
     new_student_pw = "SafePass-2026#Student"
     chg_resp = await client.post(
         "/api/v1/auth/change-password",
@@ -542,6 +552,10 @@ async def test_three_in_one_login_password_change_and_expiry(
     updated_user = chg_resp.json()["user"]
     assert updated_user["must_change_password"] is False
     assert updated_user["email"] == STUDENT_BIND_EMAIL
+
+    # After changing password, /lab/overview is allowed
+    allowed_after = await client.get("/api/v1/lab/overview", headers=t1_headers)
+    assert allowed_after.status_code == 200
 
     # Student can now log in with newly bound email and new password
     r_t1_email = await client.post(
@@ -736,6 +750,15 @@ async def test_lab_assets_api_formatters_and_rag_chat_integration(
     )
     assert member_login.status_code == 200
     member_headers = {"Authorization": f"Bearer {member_login.json()['access_token']}"}
+    chg_member = await client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "old_password": INITIAL_PW,
+            "new_password": "MemberSafe-2026#Pw",
+        },
+        headers=member_headers,
+    )
+    assert chg_member.status_code == 200
     member_chat = await client.post(
         "/api/v1/chat/stream",
         json={"message": "课题组有哪些在研项目？"},
@@ -833,3 +856,85 @@ async def test_login_conflict_resolved_by_replacement_login_name(
     )
     assert r_login.status_code == 200
     assert r_login.json()["user"]["display_name"] == "林雪莹"
+
+
+async def test_oidc_mode_provisioning_and_login_name_claim_matching(
+    client: AsyncClient,
+) -> None:
+    import uuid
+    from unittest.mock import patch
+
+    from app.auth import authenticate_oidc
+    from app.main import app as fastapi_app
+
+    await _seed_admin()
+    headers = await _login_headers(client, ADMIN_EMAIL)
+    raw_docx = build_synthetic_proposal_docx()
+
+    parse_resp = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert parse_resp.status_code == 200
+    job_id = parse_resp.json()["job_id"]
+
+    settings = fastapi_app.state.settings
+    orig_issuer = settings.oidc_issuer
+    orig_audience = settings.oidc_audience
+    orig_jwks = settings.oidc_jwks_json
+    try:
+        # Enable OIDC mode only after admin token is obtained, or provision directly via provision_import_job
+        from app.importer.provision import ProvisionRequest, provision_import_job
+
+        settings.oidc_issuer = "https://sso.example.edu.cn"
+        settings.oidc_audience = "lab-agent"
+        settings.oidc_jwks_json = '{"keys": [{"kid": "k1"}]}'
+
+        maker = get_sessionmaker()
+        async with maker() as session:
+            admin_user = await session.scalar(
+                select(User).where(User.email == ADMIN_EMAIL)
+            )
+            assert admin_user is not None
+            res = await provision_import_job(
+                session,
+                job_id=uuid.UUID(job_id),
+                actor_id=admin_user.id,
+                body=ProvisionRequest(),
+                settings=settings,
+                embedder=fastapi_app.state.embedder,
+            )
+            await session.commit()
+
+        assert res["initial_password"] is None
+        assert res["deadline"] is None
+        assert "统一身份认证 (OIDC SSO)" in str(res["roster_text"])
+
+        async with maker() as session:
+            lin = await session.scalar(
+                select(User).where(User.login_name == "2431101262")
+            )
+            assert lin is not None
+            assert lin.must_change_password_by is None
+
+            # Verify _authenticate_oidc matches T1/T2 user by login_name claim when email is absent
+            with (
+                patch("app.auth.jwt.get_unverified_header", return_value={"kid": "k1"}),
+                patch("app.auth.jwt.PyJWK.from_dict") as mock_jwk,
+                patch(
+                    "app.auth.jwt.decode",
+                    return_value={
+                        "sub": "oidc-sub-999",
+                        "student_id": "2431101262",
+                    },
+                ),
+            ):
+                mock_jwk.return_value.key = "dummy-key"
+                actor = await authenticate_oidc(session, "fake.jwt.token", settings)
+                assert actor.id == lin.id
+                assert actor.display_name == "林雪莹"
+    finally:
+        settings.oidc_issuer = orig_issuer
+        settings.oidc_audience = orig_audience
+        settings.oidc_jwks_json = orig_jwks

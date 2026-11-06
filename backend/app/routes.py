@@ -201,11 +201,32 @@ async def _actor(
                     detail={"operation": f"{request.method} {request.url.path}"},
                 )
                 raise APIError(403, "forbidden", "个人访问令牌无权访问此接口")
-            return actor
-        try:
-            return await authenticate_local(session, raw_token, settings)
-        except PermissionError as exc:
-            raise APIError(401, "unauthorized", "登录已失效") from exc
+        else:
+            try:
+                actor = await authenticate_local(session, raw_token, settings)
+            except PermissionError as exc:
+                raise APIError(401, "unauthorized", "登录已失效") from exc
+
+        user = await session.get(User, actor.id)
+        if user is not None and user.must_change_password_by is not None:
+            now_utc = datetime.now(UTC)
+            exp = user.must_change_password_by
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=UTC)
+            if now_utc > exp:
+                raise APIError(
+                    403,
+                    "initial_password_expired",
+                    "初始口令已过期，请联系课题组管理员重置",
+                )
+            path = request.url.path.rstrip("/")
+            if not path.endswith(("/auth/change-password", "/auth/me", "/auth/logout")):
+                raise APIError(
+                    403,
+                    "password_change_required",
+                    "首次登录请先修改初始口令后再访问系统功能",
+                )
+        return actor
 
 
 async def _user(session: AsyncSession, actor: Actor) -> User:

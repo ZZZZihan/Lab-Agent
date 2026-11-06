@@ -13,7 +13,7 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from jwt import PyJWKClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import load_user_group_ids
@@ -163,12 +163,24 @@ async def authenticate_oidc(session: AsyncSession, token: str, settings: Setting
         raise
     except Exception as exc:
         raise PermissionError("oidc_unavailable") from exc
-    subject = str(payload.get("sub") or "")
-    email = str(payload.get("email") or "")
+    subject = str(payload.get("sub") or "").strip()
+    email = str(payload.get("email") or "").strip()
     if not subject:
         raise PermissionError("oidc_unavailable")
+    candidate_login = str(
+        payload.get("preferred_username")
+        or payload.get("employee_number")
+        or payload.get("student_id")
+        or subject
+    ).strip()
     external_email = email or f"{subject}@oidc.local"
-    user = await session.scalar(select(User).where(User.email == external_email))
+    user = await session.scalar(
+        select(User).where(func.lower(User.email) == external_email.lower())
+    )
+    if user is None and candidate_login:
+        user = await session.scalar(
+            select(User).where(func.lower(User.login_name) == candidate_login.lower())
+        )
     if user is None:
         raise PermissionError("oidc_user_not_provisioned")
     if not user.is_active:

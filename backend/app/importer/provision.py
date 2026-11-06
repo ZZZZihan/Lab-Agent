@@ -90,19 +90,28 @@ def render_roster_text(
     deadline_str: str,
     new_accounts: list[dict[str, object]],
     existing_accounts: list[dict[str, object]],
+    oidc_mode: bool = False,
 ) -> str:
-    pw_line = (
-        f"初始口令：{initial_password}"
-        if (include_password and initial_password)
-        else "初始口令：另行私发"
-    )
-    lines = [
-        "【LabAgent 账号已开通】",
-        f"登录地址：{base_url}",
-        pw_line,
-        f"⚠ 请在 {deadline_str} 前登录并修改口令，逾期初始口令失效，需联系管理员重置。",
-        "",
-    ]
+    if oidc_mode:
+        lines = [
+            "【LabAgent 账号已开通】",
+            f"登录地址：{base_url}",
+            "登录方式：统一身份认证 (OIDC SSO)",
+            "",
+        ]
+    else:
+        pw_line = (
+            f"初始口令：{initial_password}"
+            if (include_password and initial_password)
+            else "初始口令：另行私发"
+        )
+        lines = [
+            "【LabAgent 账号已开通】",
+            f"登录地址：{base_url}",
+            pw_line,
+            f"⚠ 请在 {deadline_str} 前登录并修改口令，逾期初始口令失效，需联系管理员重置。",
+            "",
+        ]
     for item in new_accounts:
         name = str(item.get("name") or "")
         login_name = str(item.get("login_name") or "")
@@ -131,12 +140,14 @@ def render_roster_csv(
     deadline_str: str,
     new_accounts: list[dict[str, object]],
     existing_accounts: list[dict[str, object]],
+    oidc_mode: bool = False,
 ) -> str:
     buf = io.StringIO()
     buf.write("﻿")
     writer = csv.writer(buf)
     headers = ["姓名", "登录名", "可用邮箱登录", "单位", "账号状态", "改密截止"]
-    if include_password and initial_password:
+    show_pw = not oidc_mode and include_password and bool(initial_password)
+    if show_pw:
         headers.append("初始口令")
     writer.writerow(headers)
 
@@ -146,10 +157,10 @@ def render_roster_csv(
             _escape_csv(item.get("login_name")),
             "是" if item.get("has_email") else "否",
             _escape_csv(item.get("affiliation") or ""),
-            "新建",
-            _escape_csv(deadline_str),
+            "新建 (OIDC SSO)" if oidc_mode else "新建",
+            "" if oidc_mode else _escape_csv(deadline_str),
         ]
-        if include_password and initial_password:
+        if show_pw:
             row.append(_escape_csv(initial_password))
         writer.writerow(row)
 
@@ -162,7 +173,7 @@ def render_roster_csv(
             "已有",
             "",
         ]
-        if include_password and initial_password:
+        if show_pw:
             row.append("")
         writer.writerow(row)
 
@@ -293,22 +304,24 @@ async def provision_import_job(
                 )
         active_people.append(person)
 
+    oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
     initial_password = (
         body.initial_password.strip()
         if body.initial_password and body.initial_password.strip()
         else settings.import_default_password
     )
 
-    # Validate initial_password for every new account before touching DB
-    for person in active_people:
-        raw_match = person.get("match")
-        match_info = raw_match if isinstance(raw_match, dict) else {}
-        if str(match_info.get("status") or "new") == "new":
-            p_email = str(person.get("email") or "").strip().lower() or None
-            try:
-                validate_password(initial_password, p_email)
-            except ValueError as exc:
-                raise ProvisionError(422, "password_policy_violation", str(exc)) from exc
+    if not oidc_mode:
+        # Validate initial_password for every new account before touching DB
+        for person in active_people:
+            raw_match = person.get("match")
+            match_info = raw_match if isinstance(raw_match, dict) else {}
+            if str(match_info.get("status") or "new") == "new":
+                p_email = str(person.get("email") or "").strip().lower() or None
+                try:
+                    validate_password(initial_password, p_email)
+                except ValueError as exc:
+                    raise ProvisionError(422, "password_policy_violation", str(exc)) from exc
 
     now_utc = datetime.now(UTC)
     deadline_utc = now_utc + timedelta(days=max(1, settings.initial_password_ttl_days))
@@ -334,7 +347,11 @@ async def provision_import_job(
     new_roster_items: list[dict[str, object]] = []
     existing_roster_items: list[dict[str, object]] = []
 
-    pw_hash = hash_password(initial_password)
+    pw_hash = (
+        hash_password(f"OIDC-Only-{uuid.uuid4().hex}#99")
+        if oidc_mode
+        else hash_password(initial_password)
+    )
 
     try:
         for person in active_people:
@@ -376,7 +393,7 @@ async def provision_import_job(
                     password_hash=pw_hash,
                     role="member",
                     is_active=True,
-                    must_change_password_by=deadline_utc,
+                    must_change_password_by=None if oidc_mode else deadline_utc,
                 )
                 session.add(new_user)
                 await session.flush()
@@ -658,25 +675,30 @@ async def provision_import_job(
 
     roster_text = render_roster_text(
         base_url=settings.public_base_url,
-        initial_password=initial_password,
+        initial_password=None if oidc_mode else initial_password,
         include_password=body.include_password,
         deadline_str=deadline_display,
         new_accounts=new_roster_items,
         existing_accounts=existing_roster_items,
+        oidc_mode=oidc_mode,
     )
     roster_csv = render_roster_csv(
-        initial_password=initial_password,
+        initial_password=None if oidc_mode else initial_password,
         include_password=body.include_password,
         deadline_str=deadline_display,
         new_accounts=new_roster_items,
         existing_accounts=existing_roster_items,
+        oidc_mode=oidc_mode,
     )
 
     return {
         "job_id": str(job.id),
         "status": "provisioned",
         "as_of_time": as_of_date.isoformat(),
-        "deadline": deadline_utc.isoformat(),
+        "deadline": None if oidc_mode else deadline_utc.isoformat(),
+        "initial_password": (
+            None if (oidc_mode or not body.include_password) else initial_password
+        ),
         "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
         "rag_doc_key": doc_key,
         "stats": stats_payload,
