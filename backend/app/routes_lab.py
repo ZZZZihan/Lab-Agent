@@ -173,8 +173,11 @@ def _recompute_inferred_projects(
         proj.setdefault("key", f"j{idx}")
         status_source = str(proj.get("status_source") or "explicit")
         end_d = _parse_iso_date(proj.get("end_date"))
-        if status_source == "inferred" and end_d is not None and as_of_date is not None:
-            proj["status"] = "completed" if end_d < as_of_date else "ongoing"
+        if status_source == "inferred":
+            if end_d is not None and as_of_date is not None:
+                proj["status"] = "completed" if end_d < as_of_date else "ongoing"
+            elif end_d is None:
+                proj["status"] = "unknown"
         title = str(proj.get("title") or "").strip()
         funder = str(proj.get("funder") or "").strip() or None
         grant_no = str(proj.get("grant_no") or "").strip() or None
@@ -1200,66 +1203,68 @@ async def update_lab_person(
             if candidate_t1_fp == old_fp:
                 t1_login = linked_user.login_name
 
-    if body.name is not None:
+    fields_set = body.model_fields_set
+    if "name" in fields_set:
         cleaned_name = normalize_person_name(_scrub_str(body.name) or "")
         if not cleaned_name:
             raise APIError(422, "invalid_name", "姓名不能为空")
         if actor.role != "admin" and cleaned_name != normalize_person_name(person.name):
             raise APIError(403, "forbidden", "仅管理员可修改成员姓名或项目角色")
         person.name = cleaned_name
-    if body.email is not None:
+    if "email" in fields_set:
         person.email = clean_email(body.email)
-    if body.title is not None:
+    if "title" in fields_set:
         person.title = _scrub_str(body.title)
-    if body.admin_duty is not None:
+    if "admin_duty" in fields_set:
         person.admin_duty = _scrub_str(body.admin_duty)
-    if body.tutor_role is not None:
+    if "tutor_role" in fields_set:
         person.tutor_role = _scrub_str(body.tutor_role)
-    if body.research_specialty is not None:
+    if "research_specialty" in fields_set:
         person.research_specialty = _scrub_str(body.research_specialty)
-    if body.degree is not None:
+    if "degree" in fields_set:
         person.degree = _scrub_str(body.degree)
-    if body.affiliation is not None:
+    if "affiliation" in fields_set:
         person.affiliation = _scrub_str(body.affiliation)
-    if body.project_role is not None:
+    if "project_role" in fields_set and body.project_role is not None:
         pr = body.project_role.strip().lower()
         if pr not in ("applicant", "member"):
             raise APIError(422, "invalid_project_role", "project_role 仅支持 applicant 或 member")
         if actor.role != "admin" and pr != person.project_role:
             raise APIError(403, "forbidden", "仅管理员可修改成员姓名或项目角色")
         person.project_role = pr
-    if body.bio is not None:
+    if "bio" in fields_set:
         person.bio = _scrub_str(body.bio)
 
-    if is_t1_person:
-        new_person_fp = (
-            person_fp(
-                tier="T1",
-                login_name=t1_login,
+    if any(f in fields_set for f in ("name", "affiliation", "email")):
+        if is_t1_person:
+            new_person_fp = (
+                person_fp(
+                    tier="T1",
+                    login_name=t1_login,
+                    name=person.name,
+                    affiliation=person.affiliation,
+                    email=person.email,
+                )
+                if t1_login
+                else old_fp
+            )
+        else:
+            new_person_fp = person_fp(
+                tier="T3" if person.email else "T2",
+                login_name=None,
                 name=person.name,
                 affiliation=person.affiliation,
                 email=person.email,
             )
-            if t1_login
-            else old_fp
+        dup_person_id = await session.scalar(
+            select(LabPerson.id).where(
+                LabPerson.entity_fingerprint == new_person_fp,
+                LabPerson.id != person.id,
+            )
         )
-    else:
-        new_person_fp = person_fp(
-            tier="T3" if person.email else "T2",
-            login_name=None,
-            name=person.name,
-            affiliation=person.affiliation,
-            email=person.email,
-        )
-    dup_person_id = await session.scalar(
-        select(LabPerson.id).where(
-            LabPerson.entity_fingerprint == new_person_fp,
-            LabPerson.id != person.id,
-        )
-    )
-    if dup_person_id is not None:
-        raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
-    person.entity_fingerprint = new_person_fp
+        if dup_person_id is not None:
+            raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
+        person.entity_fingerprint = new_person_fp
 
     serialized_person = _serialize_person(person)
     assert_no_pii(serialized_person)
@@ -1297,6 +1302,7 @@ async def create_lab_project(
     if not title:
         raise APIError(422, "invalid_title", "项目名称不能为空")
 
+    fields_set = body.model_fields_set
     funder = _scrub_str(body.funder)
     grant_no = _scrub_str(body.grant_no)
     pi_name = _scrub_str(body.pi_name)
@@ -1306,11 +1312,26 @@ async def create_lab_project(
     start_d = _parse_iso_date(body.start_date)
     end_d = _parse_iso_date(body.end_date)
     amt_wan = _parse_decimal(body.amount_wan)
-    status = (body.status or "ongoing").strip().lower()
-    if status not in ("ongoing", "completed", "unknown"):
-        status = "unknown"
-    status_source = (body.status_source or "explicit").strip().lower()
-    if status_source not in ("explicit", "inferred"):
+    explicit_status = (
+        body.status.strip().lower()
+        if "status" in fields_set and body.status is not None and body.status.strip()
+        else None
+    )
+    status = (
+        explicit_status
+        if explicit_status in ("ongoing", "completed", "unknown")
+        else "ongoing"
+    )
+    if (
+        "status_source" in fields_set
+        and body.status_source is not None
+        and body.status_source.strip()
+    ):
+        ss_raw = body.status_source.strip().lower()
+        status_source = ss_raw if ss_raw in ("explicit", "inferred") else "explicit"
+    elif explicit_status is None and end_d is not None:
+        status_source = "inferred"
+    else:
         status_source = "explicit"
     rel_note = _scrub_str(body.relationship_note)
     raw_text = _scrub_str(body.raw_text) or title
@@ -1323,6 +1344,11 @@ async def create_lab_project(
         body.source_import_id,
     )
     as_of_date = _parse_iso_date(body.as_of_time) or resolved_as_of
+    if status_source == "inferred" and explicit_status is None:
+        if end_d is not None and as_of_date is not None:
+            status = "completed" if end_d < as_of_date else "ongoing"
+        else:
+            status = "unknown"
     fp_val = project_fp(grant_no=grant_no, title=title, funder=funder)
     existing_fp = await session.scalar(
         select(LabProject.id).where(LabProject.entity_fingerprint == fp_val)
@@ -1371,48 +1397,69 @@ async def update_lab_project(
     project = await session.get(LabProject, project_id)
     if project is None:
         raise APIError(404, "not_found", "项目记录不存在")
+    fields_set = body.model_fields_set
     user = await _require_lab_editor(
         session,
         actor,
         owner_name=project.pi_name,
         new_owner_name=(_scrub_str(body.pi_name) or "")
-        if body.pi_name is not None
+        if "pi_name" in fields_set
         else None,
         require_owner=True,
     )
 
-    if body.title is not None:
+    if "title" in fields_set:
         t_clean = _scrub_str(body.title)
         if not t_clean:
             raise APIError(422, "invalid_title", "项目名称不能为空")
         project.title = t_clean
-    if body.funder is not None:
+    if "funder" in fields_set:
         project.funder = _scrub_str(body.funder)
-    if body.grant_no is not None:
+    if "grant_no" in fields_set:
         project.grant_no = _scrub_str(body.grant_no)
-    if body.pi_name is not None:
+    if "pi_name" in fields_set:
         project.pi_name = _scrub_str(body.pi_name)
-    if body.lab_role is not None:
+    if "lab_role" in fields_set and body.lab_role is not None:
         lr = body.lab_role.strip().lower()
         if lr in ("host", "participant", "unknown"):
             project.lab_role = lr
-    if body.start_date is not None:
+    if "start_date" in fields_set:
         project.start_date = _parse_iso_date(body.start_date)
-    if body.end_date is not None:
+    if "end_date" in fields_set:
         project.end_date = _parse_iso_date(body.end_date)
-    if body.amount_wan is not None:
+    if "amount_wan" in fields_set:
         project.amount_wan = _parse_decimal(body.amount_wan)
-    if body.status is not None:
-        st = body.status.strip().lower()
-        if st in ("ongoing", "completed", "unknown"):
-            project.status = st
-    if body.status_source is not None:
+    if "as_of_time" in fields_set and body.as_of_time is not None:
+        parsed_as_of = _parse_iso_date(body.as_of_time)
+        if parsed_as_of is not None:
+            project.as_of_time = parsed_as_of
+    explicit_status = (
+        body.status.strip().lower()
+        if "status" in fields_set and body.status is not None and body.status.strip()
+        else None
+    )
+    if explicit_status is not None and explicit_status in (
+        "ongoing",
+        "completed",
+        "unknown",
+    ):
+        project.status = explicit_status
+        if "status_source" not in fields_set or not (body.status_source or "").strip():
+            project.status_source = "explicit"
+    if "status_source" in fields_set and body.status_source is not None:
         ss = body.status_source.strip().lower()
         if ss in ("explicit", "inferred"):
             project.status_source = ss
-    if body.relationship_note is not None:
+    if project.status_source == "inferred" and explicit_status is None:
+        if project.end_date is not None and project.as_of_time is not None:
+            project.status = (
+                "completed" if project.end_date < project.as_of_time else "ongoing"
+            )
+        elif project.end_date is None:
+            project.status = "unknown"
+    if "relationship_note" in fields_set:
         project.relationship_note = _scrub_str(body.relationship_note)
-    if body.raw_text is not None:
+    if "raw_text" in fields_set:
         project.raw_text = _scrub_str(body.raw_text) or project.title
 
     new_proj_fp = project_fp(
@@ -1546,36 +1593,37 @@ async def update_lab_achievement(
     achievement = await session.get(LabAchievement, achievement_id)
     if achievement is None:
         raise APIError(404, "not_found", "成果记录不存在")
+    fields_set = body.model_fields_set
     user = await _require_lab_editor(
         session,
         actor,
         owner_name=achievement.first_author,
         new_owner_name=(_scrub_str(body.first_author) or "")
-        if body.first_author is not None
+        if "first_author" in fields_set
         else None,
         require_owner=True,
     )
 
-    if body.kind is not None:
+    if "kind" in fields_set and body.kind is not None:
         k_clean = body.kind.strip().lower()
         if k_clean in ACHIEVEMENT_KIND_LABELS:
             achievement.kind = k_clean
-    if body.title is not None:
+    if "title" in fields_set:
         t_clean = _scrub_str(body.title)
         if not t_clean:
             raise APIError(422, "invalid_title", "成果名称不能为空")
         achievement.title = t_clean
-    if body.first_author is not None:
+    if "first_author" in fields_set:
         achievement.first_author = _scrub_str(body.first_author)
-    if body.authors_text is not None:
+    if "authors_text" in fields_set:
         achievement.authors_text = _scrub_str(body.authors_text)
-    if body.venue is not None:
+    if "venue" in fields_set:
         achievement.venue = _scrub_str(body.venue)
-    if body.year is not None:
+    if "year" in fields_set:
         achievement.year = body.year
-    if body.support_note is not None:
+    if "support_note" in fields_set:
         achievement.support_note = _scrub_str(body.support_note)
-    if body.raw_text is not None:
+    if "raw_text" in fields_set:
         achievement.raw_text = _scrub_str(body.raw_text) or achievement.title
 
     new_ach_fp = achievement_fp(
@@ -1704,21 +1752,22 @@ async def update_lab_facility(
     if facility is None:
         raise APIError(404, "not_found", "设备记录不存在")
     user = await _require_lab_editor(session, actor, admin_only=True)
+    fields_set = body.model_fields_set
 
-    if body.category is not None:
+    if "category" in fields_set and body.category is not None:
         facility.category = _scrub_str(body.category) or facility.category
-    if body.name is not None:
+    if "name" in fields_set:
         n_clean = _scrub_str(body.name)
         if not n_clean:
             raise APIError(422, "invalid_name", "设备名称不能为空")
         facility.name = n_clean
-    if body.spec is not None:
+    if "spec" in fields_set:
         facility.spec = _scrub_str(body.spec)
-    if body.value_wan is not None:
+    if "value_wan" in fields_set:
         facility.value_wan = _parse_decimal(body.value_wan)
-    if body.usage_scenario is not None:
+    if "usage_scenario" in fields_set:
         facility.usage_scenario = _scrub_str(body.usage_scenario)
-    if body.raw_text is not None:
+    if "raw_text" in fields_set:
         facility.raw_text = _scrub_str(body.raw_text) or facility.name
 
     new_fac_fp = facility_fp(

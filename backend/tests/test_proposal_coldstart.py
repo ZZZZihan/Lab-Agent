@@ -1822,6 +1822,104 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
         if first_para.startswith("## "):
             assert "\n" not in first_para
 
+    # --- Round 6 Regression A: Recompute inferred project status when end_date changes or is cleared ---
+    r_inf_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "自动推断状态测试课题",
+            "grant_no": "INF-2026-01",
+            "funder": "教育部人文社科项目",
+            "pi_name": "杨硕",
+            "start_date": "2023-01-01",
+            "end_date": "2025-12-31",
+            "amount_wan": "18.50",
+            "status_source": "inferred",
+            "as_of_time": "2026-06-01",
+        },
+        headers=yang_headers,
+    )
+    assert r_inf_proj.status_code == 200, r_inf_proj.text
+    inf_proj = r_inf_proj.json()["project"]
+    inf_proj_id = inf_proj["id"]
+    assert inf_proj["status"] == "completed"
+    assert inf_proj["status_source"] == "inferred"
+
+    # Extending end_date past as_of_time recomputes inferred status to ongoing
+    r_extend_end = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"end_date": "2028-01-01"},
+        headers=yang_headers,
+    )
+    assert r_extend_end.status_code == 200, r_extend_end.text
+    assert r_extend_end.json()["project"]["end_date"] == "2028-01-01"
+    assert r_extend_end.json()["project"]["status"] == "ongoing"
+    assert r_extend_end.json()["project"]["status_source"] == "inferred"
+
+    # Clearing end_date via explicit null sets end_date=None and recomputes inferred status to unknown
+    r_clear_end = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"end_date": None, "amount_wan": None, "start_date": None},
+        headers=yang_headers,
+    )
+    assert r_clear_end.status_code == 200, r_clear_end.text
+    assert r_clear_end.json()["project"]["end_date"] is None
+    assert r_clear_end.json()["project"]["start_date"] is None
+    assert r_clear_end.json()["project"]["amount_wan"] is None
+    assert r_clear_end.json()["project"]["status"] == "unknown"
+
+    # Non-admin member cannot clear pi_name to null -> 403 forbidden
+    r_clear_pi_forbidden = await client.patch(
+        f"/api/v1/lab/projects/{inf_proj_id}",
+        json={"pi_name": None},
+        headers=yang_headers,
+    )
+    assert r_clear_pi_forbidden.status_code == 403
+
+    # --- Round 6 Regression B: Explicit null updates clear nullable fields across achievements, people, facilities ---
+    sw1_id = r_sw1.json()["achievement"]["id"]
+    assert r_sw1.json()["achievement"]["year"] == 2026
+
+    # Non-admin member cannot clear first_author to null -> 403 forbidden
+    r_clear_author_forbidden = await client.patch(
+        f"/api/v1/lab/achievements/{sw1_id}",
+        json={"first_author": None},
+        headers=yang_headers,
+    )
+    assert r_clear_author_forbidden.status_code == 403
+
+    # Clearing achievement year via explicit null sets year=None
+    r_clear_year = await client.patch(
+        f"/api/v1/lab/achievements/{sw1_id}",
+        json={"year": None, "venue": None, "support_note": None},
+        headers=yang_headers,
+    )
+    assert r_clear_year.status_code == 200, r_clear_year.text
+    assert r_clear_year.json()["achievement"]["year"] is None
+    assert r_clear_year.json()["achievement"]["venue"] is None
+    assert r_clear_year.json()["achievement"]["support_note"] is None
+
+    # Clearing person nullable fields via explicit null
+    r_clear_person = await client.patch(
+        f"/api/v1/lab/people/{yang_row['id']}",
+        json={"research_specialty": None, "bio": None},
+        headers=yang_headers,
+    )
+    assert r_clear_person.status_code == 200, r_clear_person.text
+    assert r_clear_person.json()["person"]["research_specialty"] is None
+    assert r_clear_person.json()["person"]["bio"] is None
+
+    # Clearing facility nullable fields via explicit null
+    r_clear_fac = await client.patch(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        json={"spec": None, "value_wan": None, "usage_scenario": None},
+        headers=admin_headers,
+    )
+    assert r_clear_fac.status_code == 200, r_clear_fac.text
+    assert r_clear_fac.json()["facility"]["spec"] is None
+    assert r_clear_fac.json()["facility"]["value_wan"] is None
+    assert r_clear_fac.json()["facility"]["usage_scenario"] is None
+
+
 
 
 
