@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from app.rag.bm25 import rare_coverage
-from app.rag.rrf import Hit, decide, order_for_mode
+from app.rag.rrf import Decision, Hit, decide, order_for_mode
+
+MODES = (
+    "dense",
+    "hybrid_rrf",
+    "hybrid_lexical_rerank",
+    "hybrid_lexical_rerank15",
+    "hybrid_rrf_rerank",
+)
 
 PRIMARY_METRICS = (
     "recall_at_5",
@@ -99,20 +108,26 @@ def _gold(row: dict[str, Any]) -> set[str]:
 def _ranked_keys(row: dict[str, Any], mode: str, rrf_k: int) -> list[Hit]:
     hits: list[Hit] = []
     for item in row["hits"]:
-        hits.append(
-            Hit(
-                key=str(item["key"]),
-                cosine=float(item["cosine"]),
-                bm25=float(item["bm25"]),
-                tokens=list(item.get("tokens") or []),
-                content=str(item.get("content") or ""),
-                chunk_id=str(item.get("chunk_id") or item["key"]),
-                document_id=str(item.get("document_id") or ""),
-                heading=str(item.get("heading") or ""),
-                title=str(item.get("title") or ""),
-                chunk_index=int(item.get("chunk_index") or 0),
-            )
+        hit = Hit(
+            key=str(item["key"]),
+            cosine=float(item["cosine"]),
+            bm25=float(item["bm25"]),
+            tokens=list(item.get("tokens") or []),
+            content=str(item.get("content") or ""),
+            chunk_id=str(item.get("chunk_id") or item["key"]),
+            document_id=str(item.get("document_id") or ""),
+            heading=str(item.get("heading") or ""),
+            title=str(item.get("title") or ""),
+            chunk_index=int(item.get("chunk_index") or 0),
         )
+        if mode == "hybrid_rrf_rerank":
+            if item.get("rerank_score") is not None:
+                hit["rerank_score"] = float(item["rerank_score"])
+                hit["rerank"] = float(item["rerank_score"])
+            elif item.get("rerank") is not None:
+                hit["rerank"] = float(item["rerank"])
+                hit["rerank_score"] = float(item["rerank"])
+        hits.append(hit)
     return order_for_mode(
         hits,
         mode,
@@ -195,9 +210,22 @@ def evaluate(
             margin=float(params["cite_margin"]),
             cite_k=int(params["cite_k"]),
         )
+        if mode == "hybrid_rrf_rerank" and bool(row.get("rerank_failed")):
+            decision = Decision(
+                refused=True,
+                reason="rerank_failed",
+                score=decision["score"],
+                cosine=decision["cosine"],
+                coverage=decision["coverage"],
+                citations=[],
+                neighbors=decision["neighbors"],
+            )
         gold = _gold(row)
         cited = {str(hit["key"]) for hit in decision["citations"]}
-        latencies.append(float(row["elapsed_ms"]))
+        row_elapsed = float(row["elapsed_ms"])
+        if mode == "hybrid_rrf_rerank":
+            row_elapsed += float(row.get("rerank_ms") or 0.0)
+        latencies.append(row_elapsed)
         correct_refusal = (row["answerable"] and not decision["refused"]) or (
             not row["answerable"] and decision["refused"]
         )
@@ -269,18 +297,21 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
     from app.rag.rrf import decision_score
 
     scores: list[float] = []
-    precomputed: list[tuple[bool, list[Hit], float, set[str], float]] = []
+    precomputed: list[tuple[bool, list[Hit], float, set[str], float, bool]] = []
     for row in rows:
         ranked = _ranked_keys(row, mode, rrf_k)
-        if ranked:
-            scores.append(decision_score(ranked[0], mode))
+        row_rerank_failed = mode == "hybrid_rrf_rerank" and bool(row.get("rerank_failed"))
+        if ranked and not row_rerank_failed:
+            top_score = decision_score(ranked[0], mode)
+            if math.isfinite(top_score):
+                scores.append(top_score)
         keys = [str(hit["key"]) for hit in ranked]
         cov = coverage_of(row, ranked)
         gold = _gold(row)
         is_ans = bool(row["answerable"])
         r5 = recall_at_k(keys, gold, 5) if is_ans else 0.0
-        precomputed.append((is_ans, ranked, cov, gold, r5))
-    mean_r5 = round(_avg([r5 for is_ans, _, _, _, r5 in precomputed if is_ans]), 6)
+        precomputed.append((is_ans, ranked, cov, gold, r5, row_rerank_failed))
+    mean_r5 = round(_avg([r5 for is_ans, _, _, _, r5, _ in precomputed if is_ans]), 6)
     best_key: tuple[float, ...] | None = None
     best_params: dict[str, Any] | None = None
     for score_min in _thresholds(scores):
@@ -291,7 +322,7 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
                     citation_sum = 0.0
                     false_refusal_sum = 0.0
                     ans_count = 0
-                    for is_ans, ranked, cov, gold, _ in precomputed:
+                    for is_ans, ranked, cov, gold, _, row_rerank_failed in precomputed:
                         decision = decide(
                             ranked,
                             mode=mode,
@@ -301,6 +332,16 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
                             margin=float(margin),
                             cite_k=int(cite_k),
                         )
+                        if row_rerank_failed:
+                            decision = Decision(
+                                refused=True,
+                                reason="rerank_failed",
+                                score=decision["score"],
+                                cosine=decision["cosine"],
+                                coverage=decision["coverage"],
+                                citations=[],
+                                neighbors=decision["neighbors"],
+                            )
                         refused = decision["refused"]
                         if (is_ans and not refused) or (not is_ans and refused):
                             refusal_sum += 1.0
@@ -341,9 +382,10 @@ def tune(rows: list[dict[str, Any]], mode: str, rrf_k: int = 60) -> dict[str, An
 
 
 def _thresholds(scores: list[float]) -> list[float]:
-    if not scores:
-        return [0.0, 0.99]
-    ordered = sorted(scores)
+    finite = [s for s in scores if math.isfinite(s)]
+    if not finite:
+        return [0.99]
+    ordered = sorted(finite)
     picks = {0.0, round(max(ordered) + 0.001, 4)}
     for slot in range(11):
         index = min(len(ordered) - 1, int(slot / 10 * (len(ordered) - 1)))

@@ -267,13 +267,16 @@ async def _featurize(
             group_ids = await load_user_group_ids(session, user.id)
             principal = Principal(id=user.id, role=user.role, group_ids=group_ids)
             for question in questions:
+                featurize_mode = (
+                    "hybrid_rrf_rerank" if settings.reranker == "api" else "dense"
+                )
                 bundle = await search_knowledge(
                     session,
                     settings=settings,
                     embedder=embedder,
                     user=principal,
                     query=str(question["question"]),
-                    mode="dense",
+                    mode=featurize_mode,
                     source="eval",
                     limit=None,
                 )
@@ -295,15 +298,25 @@ async def _featurize(
                         "answerable": bool(question["answerable"]),
                         "gold": gold,
                         "query_tokens": content_tokens(str(question["question"])),
-                        "elapsed_ms": bundle.elapsed_ms,
+                        "elapsed_ms": max(
+                            0.0, float(bundle.elapsed_ms) - float(bundle.rerank_ms)
+                        ),
+                        "rerank_ms": float(bundle.rerank_ms),
                         "embed_ms": embedder.last_query_ms,
                         "df": bundle.df,
                         "n_docs": bundle.n_docs,
+                        "rerank_failed": bool(bundle.rerank_failed),
+                        "featurized_rrf_k": int(settings.rrf_k or 60),
                         "hits": [
                             {
                                 "key": hit["key"],
                                 "cosine": float(hit.get("cosine") or 0.0),
                                 "bm25": float(hit.get("bm25") or 0.0),
+                                "rerank_score": (
+                                    float(hit["rerank_score"])
+                                    if hit.get("rerank_score") is not None
+                                    else None
+                                ),
                                 "tokens": list(hit.get("tokens") or []),
                                 "chunk_id": hit["chunk_id"],
                                 "document_id": hit["document_id"],
@@ -323,6 +336,12 @@ async def _featurize(
 def _choose_rrf(rows: list[dict[str, object]], mode: str) -> int:
     """Pick RRF k on the dev split using retrieval metrics only."""
     if mode == "dense":
+        return 60
+    if mode == "hybrid_rrf_rerank":
+        if rows:
+            val = rows[0].get("featurized_rrf_k")
+            if isinstance(val, int):
+                return val
         return 60
     best_k = 60
     best = (-1.0, -1.0)
@@ -527,7 +546,10 @@ async def _run(
     selected_mode = "dense"
     selected_params: dict[str, object] = {}
     best_recall = (-1.0, -1.0)
-    for mode in MODES:
+    eval_modes: tuple[str, ...] = (
+        (*MODES, "hybrid_rrf_rerank") if settings.reranker == "api" else MODES
+    )
+    for mode in eval_modes:
         dev_rows = [row for row in features if row["split"] == "dev"]
         test_rows = [row for row in features if row["split"] == "test"]
         if tune_dev:

@@ -21,6 +21,7 @@ from app.llm import (
 from app.models import User
 from app.rag.embedder import Embedder
 from app.rag.redact import redact_text
+from app.rag.rerank import RerankClient
 from app.rag.rrf import Decision, Hit, decide
 from app.tools import (
     fetch_document,
@@ -63,6 +64,7 @@ class LoopState(TypedDict, total=False):
     redactions: int
     llm_error: str | None
     embedding_error: str | None
+    rerank_failed: bool
 
 
 class Runtime(TypedDict):
@@ -74,6 +76,7 @@ class Runtime(TypedDict):
     llm: LLM
     emit: Emit
     request_id: str | None
+    rerank_client: RerankClient | None
 
 
 _runtime: ContextVar[Runtime] = ContextVar("lab_agent_runtime")
@@ -128,6 +131,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
     mode = str(state.get("mode") or runtime["settings"].retrieval_mode)
     paper_status = state.get("paper_status")
     fetched_id = state.get("fetched_id")
+    rerank_failed = bool(state.get("rerank_failed"))
     status = "ok"
     try:
         if name == "search_knowledge_base":
@@ -140,12 +144,14 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
                 group_ids=runtime["group_ids"],
+                rerank_client=runtime.get("rerank_client"),
             )
             hits = found
             if found:
                 coverage = float(found[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
                 elapsed = float(found[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
                 mode = str(found[0].get("_mode") or mode)
+                rerank_failed = rerank_failed or bool(found[0].get("_rerank_failed"))
         elif name == "query_lab_projects":
             result = await query_lab_projects(
                 runtime["session"],
@@ -156,6 +162,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
                 group_ids=runtime["group_ids"],
+                rerank_client=runtime.get("rerank_client"),
             )
             raw_hits = result["hits"]
             hits = list(raw_hits) if isinstance(raw_hits, list) else []
@@ -163,6 +170,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
                 elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
                 mode = str(hits[0].get("_mode") or mode)
+                rerank_failed = rerank_failed or bool(hits[0].get("_rerank_failed"))
         elif name == "query_meetings":
             result = await query_meetings(
                 runtime["session"],
@@ -173,6 +181,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 k=int(args.get("k") or 12),
                 request_id=runtime["request_id"],
                 group_ids=runtime["group_ids"],
+                rerank_client=runtime.get("rerank_client"),
             )
             raw_hits = result["hits"]
             hits = list(raw_hits) if isinstance(raw_hits, list) else []
@@ -180,6 +189,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
                 elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
                 mode = str(hits[0].get("_mode") or mode)
+                rerank_failed = rerank_failed or bool(hits[0].get("_rerank_failed"))
         elif name == "search_papers":
             result = await search_papers(
                 settings=runtime["settings"],
@@ -244,6 +254,7 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
         "mode": mode,
         "paper_status": paper_status,
         "fetched_id": fetched_id,
+        "rerank_failed": rerank_failed,
     }
 
 
@@ -269,8 +280,9 @@ def _route_after_grade(state: LoopState) -> str:
 async def _grade_node(state: LoopState) -> dict[str, object]:
     runtime = _runtime.get()
     settings = runtime["settings"]
+    hits_list = list(state.get("hits") or [])
     decision = decide(
-        list(state.get("hits") or []),
+        hits_list,
         mode=str(state.get("mode") or settings.retrieval_mode),
         score_min=(
             0.99 if settings.evidence_score_min is None else float(settings.evidence_score_min)
@@ -280,7 +292,18 @@ async def _grade_node(state: LoopState) -> dict[str, object]:
         margin=float(settings.cite_margin or 0.15),
         cite_k=int(settings.cite_k or 3),
     )
-    public_hits = [_public_hit(hit) for hit in (state.get("hits") or [])[:8]]
+    if state.get("rerank_failed"):
+        top_cosine = float(hits_list[0].get("cosine") or 0.0) if hits_list else 0.0
+        decision = Decision(
+            refused=True,
+            reason="rerank_failed",
+            score=top_cosine,
+            cosine=top_cosine,
+            coverage=float(state.get("coverage") or 0.0),
+            citations=[],
+            neighbors=hits_list[:3],
+        )
+    public_hits = [_public_hit(hit) for hit in hits_list[:8]]
     await runtime["emit"](
         {
             "type": "retrieval",
@@ -554,6 +577,7 @@ async def run_agent(
     emit: Emit,
     request_id: str | None,
     group_ids: frozenset[str] | None = None,
+    rerank_client: RerankClient | None = None,
 ) -> dict[str, object]:
     token = _runtime.set(
         {
@@ -565,6 +589,7 @@ async def run_agent(
             "llm": llm,
             "emit": emit,
             "request_id": request_id,
+            "rerank_client": rerank_client,
         }
     )
     try:
@@ -577,6 +602,7 @@ async def run_agent(
     return {
         "answer": result.get("answer") or "",
         "refused": bool(decision.get("refused")),
+        "reason": decision.get("reason"),
         "decision": decision,
         "citations": result.get("citations") or [],
         "usage": result.get("usage") or {},

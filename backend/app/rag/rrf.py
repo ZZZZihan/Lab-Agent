@@ -7,6 +7,7 @@ reranking is the active mode).
 
 from __future__ import annotations
 
+import math
 from typing import TypedDict, cast
 
 
@@ -24,6 +25,7 @@ class Hit(TypedDict, total=False):
     bm25: float
     rrf: float
     rerank: float
+    rerank_score: float
     dense_rank: int | None
     bm25_rank: int | None
     key: str
@@ -87,6 +89,36 @@ def order_for_mode(
     working.sort(key=lambda hit: (-_num(hit.get("rrf")), -_num(hit.get("cosine"))))
     if mode == "hybrid_rrf":
         return working
+    if mode == "hybrid_rrf_rerank":
+        reranked = [
+            hit
+            for hit in working
+            if hit.get("rerank_score") is not None or hit.get("rerank") is not None
+        ]
+        if not reranked:
+            return working
+        unreranked = [
+            hit
+            for hit in working
+            if hit.get("rerank_score") is None and hit.get("rerank") is None
+        ]
+        for hit in reranked:
+            score_val = (
+                _num(hit.get("rerank_score"))
+                if hit.get("rerank_score") is not None
+                else _num(hit.get("rerank"))
+            )
+            hit["rerank_score"] = score_val
+            hit["rerank"] = score_val
+        reranked.sort(
+            key=lambda hit: (
+                -_num(hit.get("rerank_score")),
+                -_num(hit.get("rrf")),
+                -_num(hit.get("cosine")),
+                str(hit["key"]),
+            )
+        )
+        return reranked + unreranked
     pool = 15 if mode.endswith("15") else 40
     head = working[:pool]
     tail = working[pool:]
@@ -99,6 +131,12 @@ def order_for_mode(
 
 
 def decision_score(hit: Hit, mode: str) -> float:
+    if mode == "hybrid_rrf_rerank":
+        if hit.get("rerank_score") is not None:
+            return float(hit["rerank_score"])
+        if hit.get("rerank") is not None:
+            return float(hit["rerank"])
+        return float("-inf")
     if "rerank" in mode:
         return float(hit.get("rerank") or 0.0)
     return float(hit.get("cosine") or 0.0)
@@ -128,6 +166,16 @@ def decide(
     top = ranked[0]
     score = decision_score(top, mode)
     cosine = float(top.get("cosine") or 0.0)
+    if not math.isfinite(score):
+        return Decision(
+            refused=True,
+            reason="low_score",
+            score=0.0,
+            cosine=cosine,
+            coverage=rare_coverage,
+            citations=[],
+            neighbors=neighbors,
+        )
     if score < score_min or rare_coverage < rare_min:
         reason = "low_coverage" if rare_coverage < rare_min and score >= score_min else "low_score"
         return Decision(
@@ -142,7 +190,7 @@ def decide(
     citations: list[Hit] = []
     for hit in ranked:
         value = decision_score(hit, mode)
-        if value < score_min:
+        if not math.isfinite(value) or value < score_min:
             continue
         if citations and value < score - margin:
             continue
