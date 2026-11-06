@@ -58,6 +58,12 @@ export LLM_MODEL=claude-sonnet-5-5  # 任选一个 Magpie 上可用的对话模�
 
 - 容器内默认通过 `http://host.docker.internal:3425/v1` 访问本机 Magpie 网关（宿主机直连为 `http://127.0.0.1:3425/v1`）。如果容器连不上默认地址，请在本地 `.env` 里设置 `LLM_BASE_URL`，改成你的网关所在主机的地址。
 - `demo.sh` 会依次预检 Magpie 与 Ollama、构建并启动容器、执行 `python -m app.llm_check` 与 `python -m app.embed_check`、在当前嵌入指纹未校准时自动在 dev 集上完成阈值校准，最后跑通 `python -m app.smoke` 端到端冒烟检查。
+- **Linux 容器化 Ollama 模式（`--profile linux-embed`）**：在没有宿主机 Ollama 或在 Linux 服务器上部署时，可使用 Compose 的 `linux-embed` profile 在容器内运行 `ollama/ollama:0.32.14` 并自动拉取 `qwen3-embedding:8b`、构建 `lab-agent-qwen3-embed`（详见 [`docs/deploy.md`](docs/deploy.md)）：
+  ```bash
+  export LLM_MODEL=claude-sonnet-5-5
+  ./scripts/init-env.sh --linux-embed && docker compose --profile linux-embed up -d --build --wait
+  # 或直接运行端到端冒烟：./scripts/demo.sh --linux-embed
+  ```
 
 #### 2. 离线模式（无需密钥与模型权重，CI 默认模式）
 

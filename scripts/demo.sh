@@ -3,15 +3,20 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OFFLINE=false
+LINUX_EMBED=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --offline)
       OFFLINE=true
       shift
       ;;
+    --linux-embed)
+      LINUX_EMBED=true
+      shift
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--offline]" >&2
+      echo "Usage: $0 [--offline] [--linux-embed]" >&2
       exit 1
       ;;
   esac
@@ -22,6 +27,8 @@ export LAB_AGENT_MAGPIE_KEY_FILE="${LAB_AGENT_MAGPIE_KEY_FILE:-$HOME/.config/lab
 COMPOSE_FILES=(-f docker-compose.yml)
 if [[ "$OFFLINE" == "true" ]]; then
   COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.offline.yml)
+elif [[ "$LINUX_EMBED" == "true" ]]; then
+  COMPOSE_FILES=(--profile linux-embed -f docker-compose.yml)
 fi
 
 COMPOSE_STARTED=false
@@ -106,10 +113,18 @@ fi
 if [[ ! -f .env ]]; then
   if [[ "$OFFLINE" == "true" ]]; then
     ./scripts/init-env.sh --offline
+  elif [[ "$LINUX_EMBED" == "true" ]]; then
+    ./scripts/init-env.sh --linux-embed
   else
     ./scripts/init-env.sh
   fi
 else
+  if [[ "$LINUX_EMBED" == "true" ]]; then
+    set_env_val EMBEDDING_BASE_URL "http://embedder:11434/v1"
+  elif [[ "$OFFLINE" != "true" && "$(env_val EMBEDDING_BASE_URL)" == "http://embedder:11434/v1" ]]; then
+    LINUX_EMBED=true
+    COMPOSE_FILES=(--profile linux-embed -f docker-compose.yml)
+  fi
   if [[ -n "$(env_val LLM_API_KEY)" ]]; then
     echo "Warning: LLM_API_KEY is set in .env; 建议改用密钥文件 (${LAB_AGENT_MAGPIE_KEY_FILE})." >&2
   fi
@@ -154,51 +169,80 @@ EOF
     exit 1
   fi
 
-  # 3a. Pre-check Ollama on host
-  echo "==> Checking host Ollama service (http://127.0.0.1:11434)..."
-  if ! curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:11434/api/version; then
-    echo "Error: Ollama is not reachable at http://127.0.0.1:11434. Start it first:" >&2
-    echo "  brew services start ollama" >&2
-    exit 1
-  fi
+  # 3a. Pre-check Ollama (containerized linux-embed or host)
+  if [[ "$LINUX_EMBED" == "true" ]]; then
+    echo "==> Starting containerized Ollama (profile: linux-embed) and ensuring lab-agent-qwen3-embed..."
+    COMPOSE_STARTED=true
+    docker compose "${COMPOSE_FILES[@]}" up -d --wait --wait-timeout 600 embedder
+    docker compose "${COMPOSE_FILES[@]}" run --rm embedder-init
+    model_id="$(docker compose "${COMPOSE_FILES[@]}" exec -T embedder ollama list | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" {print $2; exit}')"
+    if [[ -z "$model_id" ]]; then
+      echo "Error: Failed to read digest for lab-agent-qwen3-embed from containerized 'ollama list'." >&2
+      exit 1
+    fi
 
-  ollama_bin="$(command -v ollama || true)"
-  if [[ -z "$ollama_bin" && -x /opt/homebrew/bin/ollama ]]; then
-    ollama_bin="/opt/homebrew/bin/ollama"
-  fi
-  if [[ -z "$ollama_bin" ]]; then
-    echo "Error: 'ollama' CLI not found in PATH or /opt/homebrew/bin/ollama." >&2
-    exit 1
-  fi
+    current_ver="$(env_val EMBEDDING_MODEL_VERSION)"
+    current_model="$(env_val EMBEDDING_MODEL)"
+    if [[ "$current_model" != "lab-agent-qwen3-embed" ]]; then
+      set_env_val EMBEDDING_MODEL "lab-agent-qwen3-embed"
+    fi
+    if [[ "$current_ver" != "$model_id" ]]; then
+      echo "Notice: Updating EMBEDDING_MODEL_VERSION in .env (${current_ver:-none} -> ${model_id}); index rebuild and recalibration will run if needed."
+      set_env_val EMBEDDING_MODEL_VERSION "$model_id"
+    fi
 
-  if ! "$ollama_bin" list | awk 'NR>1 {print $1}' | grep -Eq '^qwen3-embedding:8b$'; then
-    echo "Error: qwen3-embedding:8b is not pulled in Ollama. Pull it first:" >&2
-    echo "  ollama pull qwen3-embedding:8b" >&2
-    exit 1
-  fi
+    echo "==> Warming up lab-agent-qwen3-embed on containerized Ollama..."
+    ollama_port="${OLLAMA_CONTAINER_PORT:-$(env_val OLLAMA_CONTAINER_PORT)}"
+    ollama_port="${ollama_port:-11435}"
+    curl -fsS -o /dev/null --max-time 120 "http://127.0.0.1:${ollama_port}/v1/embeddings" \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"lab-agent-qwen3-embed","input":["预热"]}'
+  else
+    echo "==> Checking host Ollama service (http://127.0.0.1:11434)..."
+    if ! curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:11434/api/version; then
+      echo "Error: Ollama is not reachable at http://127.0.0.1:11434. Start it first:" >&2
+      echo "  brew services start ollama" >&2
+      exit 1
+    fi
 
-  echo "==> Ensuring derived Ollama model lab-agent-qwen3-embed (num_ctx=8192)..."
-  "$ollama_bin" create lab-agent-qwen3-embed -f docker/ollama/Modelfile.qwen3-embedding >/dev/null
-  model_id="$("$ollama_bin" list | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" {print $2; exit}')"
-  if [[ -z "$model_id" ]]; then
-    echo "Error: Failed to read digest for lab-agent-qwen3-embed from 'ollama list'." >&2
-    exit 1
-  fi
+    ollama_bin="$(command -v ollama || true)"
+    if [[ -z "$ollama_bin" && -x /opt/homebrew/bin/ollama ]]; then
+      ollama_bin="/opt/homebrew/bin/ollama"
+    fi
+    if [[ -z "$ollama_bin" ]]; then
+      echo "Error: 'ollama' CLI not found in PATH or /opt/homebrew/bin/ollama." >&2
+      exit 1
+    fi
 
-  current_ver="$(env_val EMBEDDING_MODEL_VERSION)"
-  current_model="$(env_val EMBEDDING_MODEL)"
-  if [[ "$current_model" != "lab-agent-qwen3-embed" ]]; then
-    set_env_val EMBEDDING_MODEL "lab-agent-qwen3-embed"
-  fi
-  if [[ "$current_ver" != "$model_id" ]]; then
-    echo "Notice: Updating EMBEDDING_MODEL_VERSION in .env (${current_ver:-none} -> ${model_id}); index rebuild and recalibration will run if needed."
-    set_env_val EMBEDDING_MODEL_VERSION "$model_id"
-  fi
+    if ! "$ollama_bin" list | awk 'NR>1 {print $1}' | grep -Eq '^qwen3-embedding:8b$'; then
+      echo "Error: qwen3-embedding:8b is not pulled in Ollama. Pull it first:" >&2
+      echo "  ollama pull qwen3-embedding:8b" >&2
+      exit 1
+    fi
 
-  echo "==> Warming up lab-agent-qwen3-embed on host Ollama..."
-  curl -fsS -o /dev/null --max-time 120 http://127.0.0.1:11434/v1/embeddings \
-    -H 'Content-Type: application/json' \
-    -d '{"model":"lab-agent-qwen3-embed","input":["预热"]}'
+    echo "==> Ensuring derived Ollama model lab-agent-qwen3-embed (num_ctx=8192)..."
+    "$ollama_bin" create lab-agent-qwen3-embed -f docker/ollama/Modelfile.qwen3-embedding >/dev/null
+    model_id="$("$ollama_bin" list | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" {print $2; exit}')"
+    if [[ -z "$model_id" ]]; then
+      echo "Error: Failed to read digest for lab-agent-qwen3-embed from 'ollama list'." >&2
+      exit 1
+    fi
+
+    current_ver="$(env_val EMBEDDING_MODEL_VERSION)"
+    current_model="$(env_val EMBEDDING_MODEL)"
+    if [[ "$current_model" != "lab-agent-qwen3-embed" ]]; then
+      set_env_val EMBEDDING_MODEL "lab-agent-qwen3-embed"
+    fi
+    if [[ "$current_ver" != "$model_id" ]]; then
+      echo "Notice: Updating EMBEDDING_MODEL_VERSION in .env (${current_ver:-none} -> ${model_id}); index rebuild and recalibration will run if needed."
+      set_env_val EMBEDDING_MODEL_VERSION "$model_id"
+    fi
+
+    echo "==> Warming up lab-agent-qwen3-embed on host Ollama..."
+    curl -fsS -o /dev/null --max-time 120 http://127.0.0.1:11434/v1/embeddings \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"lab-agent-qwen3-embed","input":["预热"]}'
+  fi
 fi
 
 # 4. Build and start containers

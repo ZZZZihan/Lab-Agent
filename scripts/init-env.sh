@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$PWD" == "$SCRIPT_DIR" ]]; then
+  cd "$SCRIPT_DIR/.."
+fi
 
 OFFLINE=false
+LINUX_EMBED=false
 FORCE=false
 
 while [[ $# -gt 0 ]]; do
@@ -11,13 +15,17 @@ while [[ $# -gt 0 ]]; do
       OFFLINE=true
       shift
       ;;
+    --linux-embed)
+      LINUX_EMBED=true
+      shift
+      ;;
     --force)
       FORCE=true
       shift
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--offline] [--force]" >&2
+      echo "Usage: $0 [--offline] [--linux-embed] [--force]" >&2
       exit 1
       ;;
   esac
@@ -36,7 +44,11 @@ fi
 
 if [[ "$OFFLINE" != "true" ]]; then
   if [[ -z "${LLM_MODEL:-}" ]]; then
-    cat >&2 <<'EOF'
+    if [[ "$LINUX_EMBED" == "true" ]]; then
+      LLM_MODEL="claude-sonnet-5-5"
+      echo "Warning: LLM_MODEL not set; defaulting to ${LLM_MODEL} in .env." >&2
+    else
+      cat >&2 <<'EOF'
 Error: LLM_MODEL must be set in real mode.
 Choose an available chat model on your Magpie gateway, for example:
   export LLM_MODEL=claude-sonnet-5-5
@@ -44,23 +56,28 @@ Choose an available chat model on your Magpie gateway, for example:
 Or run with --offline for zero-dependency offline mode:
   ./scripts/init-env.sh --offline
 EOF
-    exit 1
+      exit 1
+    fi
   fi
 
   key_file="${LAB_AGENT_MAGPIE_KEY_FILE:-$HOME/.config/lab-agent/magpie.key}"
   if [[ ! -f "$key_file" || ! -s "$key_file" ]]; then
-    cat >&2 <<EOF
+    if [[ "$LINUX_EMBED" == "true" ]]; then
+      echo "Warning: Magpie gateway key file not found at ${key_file}; create it before starting api." >&2
+    else
+      cat >&2 <<EOF
 Error: Magpie gateway key file not found or empty: ${key_file}
 Create a dedicated Lab Agent key file first (never put the key in .env):
   mkdir -p ~/.config/lab-agent && chmod 700 ~/.config/lab-agent
   pbpaste > ~/.config/lab-agent/magpie.key && chmod 600 ~/.config/lab-agent/magpie.key
 EOF
-    exit 1
-  fi
-
-  key_mode="$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$key_file")"
-  if [[ "$key_mode" != "600" ]]; then
-    echo "Warning: ${key_file} permissions are ${key_mode} (recommended: 600). Run: chmod 600 \"${key_file}\"" >&2
+      exit 1
+    fi
+  else
+    key_mode="$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$key_file")"
+    if [[ "$key_mode" != "600" ]]; then
+      echo "Warning: ${key_file} permissions are ${key_mode} (recommended: 600). Run: chmod 600 \"${key_file}\"" >&2
+    fi
   fi
 fi
 
@@ -110,8 +127,12 @@ else
     ollama_bin="/opt/homebrew/bin/ollama"
   fi
   embed_version="${EMBEDDING_MODEL_VERSION:-}"
-  if [[ -z "$embed_version" && -n "$ollama_bin" ]]; then
+  if [[ -z "$embed_version" && "$LINUX_EMBED" != "true" && -n "$ollama_bin" ]]; then
     embed_version="$("$ollama_bin" list 2>/dev/null | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" || $1 == "qwen3-embedding:8b" {print $2; exit}' || true)"
+  fi
+  embed_base_url="${EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}"
+  if [[ "$LINUX_EMBED" == "true" ]]; then
+    embed_base_url="http://embedder:11434/v1"
   fi
 
   {
@@ -135,6 +156,7 @@ EOF
     cat <<EOF
 LLM_REDACT=true
 EMBEDDER=openai_compatible
+EMBEDDING_BASE_URL=${embed_base_url}
 EMBEDDING_MODEL=lab-agent-qwen3-embed
 EMBEDDING_MODEL_VERSION=${embed_version}
 EMBEDDING_DIM=4096
