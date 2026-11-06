@@ -279,6 +279,25 @@ async def test_parse_proposal_docx_and_zero_pii_residue(client: AsyncClient) -> 
         assert secret_pii not in raw_json_str
     assert_no_pii(preview)
 
+    # Verify _dedup_people preserves two people with the same (name, affiliation) when their student IDs differ
+    from app.importer.formatters import format_project_application
+    from app.importer.parser import _dedup_people
+
+    distinct_pair = _dedup_people(
+        [
+            {"name": "张伟", "affiliation": "天津师范大学", "cert": "2431101262"},
+            {"name": "张伟", "affiliation": "天津师范大学", "cert": "2431101226"},
+        ]
+    )
+    assert len(distinct_pair) == 2
+
+    # Verify unknown project status does not claim "进行中"
+    unk_text = format_project_application(
+        {"title": "未注明状态项目", "pi_name": "万振凯", "lab_role": "host", "status": "unknown"}
+    )
+    assert "进行中" not in unk_text
+    assert "状态未注明" in unk_text
+
 
 async def test_malicious_or_invalid_docx_rejected(client: AsyncClient) -> None:
     await _seed_admin()
@@ -526,6 +545,13 @@ async def test_three_in_one_login_password_change_and_expiry(
     assert r_t3_em.status_code == 200
 
     # 6. Self password change + optional email binding for T1 student (2431101262)
+    r_attacker = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "2431101262", "password": INITIAL_PW},
+    )
+    assert r_attacker.status_code == 200
+    attacker_headers = {"Authorization": f"Bearer {r_attacker.json()['access_token']}"}
+
     t1_token = r_t1.json()["access_token"]
     t1_headers = {"Authorization": f"Bearer {t1_token}"}
 
@@ -552,10 +578,16 @@ async def test_three_in_one_login_password_change_and_expiry(
     updated_user = chg_resp.json()["user"]
     assert updated_user["must_change_password"] is False
     assert updated_user["email"] == STUDENT_BIND_EMAIL
+    assert chg_resp.json().get("access_token")
 
-    # After changing password, /lab/overview is allowed
+    # After changing password, owner session (and new token) is allowed, while other pre-existing session is invalidated (401)
     allowed_after = await client.get("/api/v1/lab/overview", headers=t1_headers)
     assert allowed_after.status_code == 200
+
+    attacker_after = await client.get("/api/v1/lab/overview", headers=attacker_headers)
+    assert attacker_after.status_code == 401
+    attacker_me = await client.get("/api/v1/auth/me", headers=attacker_headers)
+    assert attacker_me.status_code == 401
 
     # Student can now log in with newly bound email and new password
     r_t1_email = await client.post(

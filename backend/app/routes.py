@@ -34,6 +34,7 @@ from app.auth import (
     generate_pat,
     hash_password,
     issue_token,
+    password_fingerprint,
     revoke_token,
     validate_password,
     verify_password,
@@ -43,7 +44,16 @@ from app.db import get_session, get_sessionmaker
 from app.importer.people import clean_email, name_to_pinyin, normalize_person_name
 from app.llm import LLM
 from app.maintenance import purge_document, scrub_missing_document_citations
-from app.models import ApiToken, Conversation, Document, DocumentACL, Group, Message, User
+from app.models import (
+    ApiToken,
+    Conversation,
+    Document,
+    DocumentACL,
+    Group,
+    Message,
+    RevokedToken,
+    User,
+)
 from app.rag.embedder import Embedder
 from app.rag.extract import UploadRejected, detect_pasted_format, extract_upload
 from app.rag.index_meta import check_index
@@ -496,6 +506,7 @@ async def me(
 async def change_password(
     body: ChangePasswordBody,
     request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, object]:
@@ -529,8 +540,21 @@ async def change_password(
         user.email = target_email
     user.password_hash = hash_password(body.new_password)
     user.must_change_password_by = None
+    if credentials is not None and not settings.oidc_issuer:
+        decoded = decode_unverified_for_logout(credentials.credentials)
+        if decoded is not None:
+            cur_jti, cur_exp = decoded
+            allow_key = f"allow:{cur_jti[:24]}:{password_fingerprint(user.password_hash)}"
+            if await session.get(RevokedToken, allow_key) is None:
+                session.add(
+                    RevokedToken(
+                        jti=allow_key,
+                        expires_at=datetime.fromtimestamp(cur_exp, UTC),
+                    )
+                )
     await session.commit()
     await session.refresh(user)
+    new_token, _new_jti, ttl = issue_token(user, settings)
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -541,7 +565,13 @@ async def change_password(
         ip=_client_ip(request),
         detail={"email_bound": email_bound},
     )
-    return {"status": "ok", "user": _serialize_auth_user(user)}
+    return {
+        "status": "ok",
+        "access_token": new_token,
+        "token_type": "bearer",
+        "expires_in": ttl,
+        "user": _serialize_auth_user(user),
+    }
 
 
 def _serialize_api_token(tok: ApiToken) -> dict[str, object]:

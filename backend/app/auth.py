@@ -76,6 +76,10 @@ def verify_password(password_hash: str, password: str) -> bool:
         return False
 
 
+def password_fingerprint(password_hash: str) -> str:
+    return hashlib.sha256((password_hash or "").encode("utf-8")).hexdigest()[:16]
+
+
 def issue_token(user: User, settings: Settings) -> tuple[str, str, int]:
     now = datetime.now(UTC)
     ttl = settings.jwt_ttl_minutes * 60
@@ -84,6 +88,7 @@ def issue_token(user: User, settings: Settings) -> tuple[str, str, int]:
         "sub": str(user.id),
         "role": user.role,
         "jti": jti,
+        "pwd": password_fingerprint(user.password_hash),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl)).timestamp()),
     }
@@ -113,6 +118,12 @@ async def authenticate_local(session: AsyncSession, token: str, settings: Settin
     user = await session.get(User, uuid.UUID(str(payload["sub"])))
     if user is None or not user.is_active:
         raise PermissionError("invalid_token")
+    token_pwd = payload.get("pwd")
+    cur_pwd = password_fingerprint(user.password_hash)
+    if token_pwd is not None and token_pwd != cur_pwd:
+        allow_key = f"allow:{jti[:24]}:{cur_pwd}"
+        if await session.get(RevokedToken, allow_key) is None:
+            raise PermissionError("invalid_token")
     group_ids = await load_user_group_ids(session, user.id)
     return Actor(
         id=user.id,

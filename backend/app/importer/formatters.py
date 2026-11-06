@@ -21,7 +21,7 @@ ACHIEVEMENT_KIND_LABELS: dict[str, str] = {
 PROJECT_STATUS_LABELS: dict[str, str] = {
     "ongoing": "在研",
     "completed": "已结题",
-    "unknown": "进行中",
+    "unknown": "状态未注明",
 }
 
 
@@ -101,7 +101,7 @@ def format_project_application(project: Any, *, include_relationship: bool = Fal
     if start_str:
         segments.append(f"{start_str}立项")
 
-    status_cn = PROJECT_STATUS_LABELS.get(status, "进行中")
+    status_cn = PROJECT_STATUS_LABELS.get(status, "状态未注明")
     segments.append(status_cn)
 
     line = "，".join(segments) + "。"

@@ -503,15 +503,45 @@ def _extract_people(
                 member["warnings"] = mem_warnings
                 people.append(member)
 
-    # Deduplicate by (normalized name, normalized affiliation), keeping applicant role
+    return _dedup_people(people), pii_count
+
+
+def _people_identifiers_conflict(
+    a: dict[str, object], b: dict[str, object]
+) -> bool:
+    c_a = norm(
+        str(a.get("cert") or a.get("student_or_staff_id") or a.get("student_id") or "")
+    )
+    c_b = norm(
+        str(b.get("cert") or b.get("student_or_staff_id") or b.get("student_id") or "")
+    )
+    if c_a and c_b and c_a != c_b:
+        return True
+    e_a = str(a.get("email") or "").strip().lower()
+    e_b = str(b.get("email") or "").strip().lower()
+    if e_a and e_b and e_a != e_b:
+        return True
+    by_a = str(a.get("birth_year") or "").strip()
+    by_b = str(b.get("birth_year") or "").strip()
+    if by_a and by_b and by_a != by_b:
+        return True
+    return False
+
+
+def _dedup_people(people: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Deduplicate by (normalized name, normalized affiliation), preserving distinct identifiers."""
     deduped: list[dict[str, object]] = []
-    by_key: dict[tuple[str, str], dict[str, object]] = {}
+    by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
     for person in people:
         pname = str(person.get("name") or "")
         paff = norm(str(person.get("affiliation") or ""))
         key = (norm(pname), paff)
-        if key in by_key:
-            existing = by_key[key]
+        matched_existing: dict[str, object] | None = None
+        for cand in by_key.get(key, []):
+            if not _people_identifiers_conflict(cand, person):
+                matched_existing = cand
+                break
+        if matched_existing is not None:
             for field in (
                 "title",
                 "admin_duty",
@@ -521,17 +551,19 @@ def _extract_people(
                 "affiliation",
                 "email",
                 "cert",
+                "student_or_staff_id",
+                "student_id",
+                "birth_year",
                 "bio",
             ):
-                if not existing.get(field) and person.get(field):
-                    existing[field] = person[field]
+                if not matched_existing.get(field) and person.get(field):
+                    matched_existing[field] = person[field]
             if person.get("project_role") == "applicant":
-                existing["project_role"] = "applicant"
+                matched_existing["project_role"] = "applicant"
         else:
-            by_key[key] = person
+            by_key.setdefault(key, []).append(person)
             deduped.append(person)
-
-    return deduped, pii_count
+    return deduped
 
 
 def _extract_t4_foundation(

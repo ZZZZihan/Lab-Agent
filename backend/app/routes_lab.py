@@ -101,7 +101,7 @@ def _serialize_project(project: LabProject) -> dict[str, object]:
         "end_date": project.end_date.isoformat() if project.end_date else None,
         "amount_wan": str(project.amount_wan) if project.amount_wan is not None else None,
         "status": project.status,
-        "status_label": PROJECT_STATUS_LABELS.get(project.status, "进行中"),
+        "status_label": PROJECT_STATUS_LABELS.get(project.status, "状态未注明"),
         "status_source": project.status_source,
         "relationship_note": project.relationship_note,
         "raw_text": project.raw_text,
