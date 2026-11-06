@@ -18,9 +18,9 @@ from app.logging_conf import configure_logging, get_logger
 from app.rag.embedder import Embedder, build_embedder
 from app.rag.index_meta import (
     HASHING_DEFAULT_FINGERPRINT,
+    actual_index_kind,
     check_index,
     column_type,
-    has_hnsw_index,
     read_meta,
 )
 from app.rag.ingest import ALLOWED_STORAGES
@@ -64,6 +64,7 @@ async def apply_reindex(
     cur_storage, cur_dim = await column_type(session)
 
     await session.execute(text("DROP INDEX IF EXISTS chunks_embedding_hnsw"))
+    await session.execute(text("DROP INDEX IF EXISTS chunks_embedding_prefix_hnsw"))
     await session.execute(text("DELETE FROM chunks"))
 
     if cur_storage != storage or cur_dim != dim:
@@ -75,6 +76,27 @@ async def apply_reindex(
         await session.execute(
             text(
                 f"CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding {storage}_cosine_ops)"
+            )
+        )
+    elif index_kind == "hnsw_prefix":
+        prefix_dim = int(settings.embedding_prefix_dim)
+        await session.execute(
+            text(
+                f"CREATE INDEX chunks_embedding_prefix_hnsw ON chunks USING hnsw "
+                f"((subvector(embedding, 1, {prefix_dim})::halfvec({prefix_dim})) halfvec_cosine_ops)"
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE embedding_index_meta "
+                "DROP CONSTRAINT IF EXISTS embedding_index_meta_index_kind"
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE embedding_index_meta "
+                "ADD CONSTRAINT embedding_index_meta_index_kind "
+                "CHECK (index_kind IN ('hnsw', 'hnsw_prefix', 'none'))"
             )
         )
     else:
@@ -154,11 +176,11 @@ async def _run(check_only: bool, apply: bool, if_needed: bool, force: bool) -> i
             async with maker() as session:
                 state = await check_index(session, settings)
                 col_storage, col_dim = await column_type(session)
-                hnsw = await has_hnsw_index(session)
+                idx_kind = await actual_index_kind(session)
                 meta = await read_meta(session)
                 print(
                     f"state={state} fingerprint={settings.embedding_fingerprint} "
-                    f"column={col_storage}({col_dim}) index={'hnsw' if hnsw else 'none'} "
+                    f"column={col_storage}({col_dim}) index={idx_kind} "
                     f"meta_fingerprint={meta.fingerprint if meta else 'none'}"
                 )
             return 0 if state == "ok" else 2

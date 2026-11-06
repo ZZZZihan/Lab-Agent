@@ -34,7 +34,7 @@ def upgrade() -> None:
             name="embedding_index_meta_storage",
         ),
         sa.CheckConstraint(
-            "index_kind IN ('hnsw', 'none')",
+            "index_kind IN ('hnsw', 'hnsw_prefix', 'none')",
             name="embedding_index_meta_index_kind",
         ),
     )

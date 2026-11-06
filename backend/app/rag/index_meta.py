@@ -62,22 +62,35 @@ async def column_type(session: AsyncSession) -> tuple[str, int]:
     return match.group(1), int(match.group(2))
 
 
-async def has_hnsw_index(session: AsyncSession) -> bool:
-    """Return True if chunks_embedding_hnsw exists in the current schema."""
-    row = await session.execute(
+async def actual_index_kind(session: AsyncSession) -> Literal["hnsw", "hnsw_prefix", "none"]:
+    """Return the active HNSW index kind on chunks ('hnsw', 'hnsw_prefix', or 'none')."""
+    rows = await session.execute(
         text(
             """
-            SELECT EXISTS (
-                SELECT 1
-                FROM pg_indexes
-                WHERE schemaname = current_schema()
-                  AND tablename = 'chunks'
-                  AND indexname = 'chunks_embedding_hnsw'
-            )
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND tablename = 'chunks'
+              AND indexname IN ('chunks_embedding_hnsw', 'chunks_embedding_prefix_hnsw')
             """
         )
     )
-    return bool(row.scalar_one())
+    names = {str(r[0]) for r in rows}
+    if "chunks_embedding_prefix_hnsw" in names:
+        return "hnsw_prefix"
+    if "chunks_embedding_hnsw" in names:
+        return "hnsw"
+    return "none"
+
+
+async def has_prefix_hnsw_index(session: AsyncSession) -> bool:
+    """Return True if chunks_embedding_prefix_hnsw exists in the current schema."""
+    return (await actual_index_kind(session)) == "hnsw_prefix"
+
+
+async def has_hnsw_index(session: AsyncSession) -> bool:
+    """Return True if chunks_embedding_hnsw or chunks_embedding_prefix_hnsw exists."""
+    return (await actual_index_kind(session)) in {"hnsw", "hnsw_prefix"}
 
 
 async def read_meta(session: AsyncSession) -> IndexMeta | None:
@@ -108,8 +121,7 @@ async def read_meta(session: AsyncSession) -> IndexMeta | None:
 async def check_index(session: AsyncSession, settings: Settings) -> IndexState:
     """Compare database column, HNSW index, and metadata against active Settings."""
     storage, dim = await column_type(session)
-    hnsw_exists = await has_hnsw_index(session)
-    actual_index_kind = "hnsw" if hnsw_exists else "none"
+    actual_kind = await actual_index_kind(session)
     expected_index_kind = settings.resolved_embedding_index
     expected_fp = settings.embedding_fingerprint
 
@@ -121,7 +133,7 @@ async def check_index(session: AsyncSession, settings: Settings) -> IndexState:
             if (
                 storage == settings.embedding_storage
                 and dim == settings.embedding_dim
-                and actual_index_kind == expected_index_kind
+                and actual_kind == expected_index_kind
             ):
                 return "missing_meta"
             return "mismatch"
@@ -130,7 +142,7 @@ async def check_index(session: AsyncSession, settings: Settings) -> IndexState:
             inferred_fp == expected_fp
             and storage == settings.embedding_storage
             and dim == settings.embedding_dim
-            and actual_index_kind == expected_index_kind
+            and actual_kind == expected_index_kind
         ):
             return "ok"
         return "mismatch"
@@ -142,7 +154,7 @@ async def check_index(session: AsyncSession, settings: Settings) -> IndexState:
         or meta.index_kind != expected_index_kind
         or storage != settings.embedding_storage
         or dim != settings.embedding_dim
-        or actual_index_kind != expected_index_kind
+        or actual_kind != expected_index_kind
     ):
         return "mismatch"
     return "ok"
@@ -152,8 +164,10 @@ __all__ = [
     "HASHING_DEFAULT_FINGERPRINT",
     "IndexMeta",
     "IndexState",
+    "actual_index_kind",
     "check_index",
     "column_type",
     "has_hnsw_index",
+    "has_prefix_hnsw_index",
     "read_meta",
 ]

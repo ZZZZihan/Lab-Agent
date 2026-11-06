@@ -29,6 +29,7 @@ coverage/
 .cache/
 .huggingface/
 models/
+*.npy
 *.safetensors
 *.gguf
 *.pt
