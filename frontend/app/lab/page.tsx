@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
@@ -21,9 +21,24 @@ import {
   ApiError,
   api,
   currentUser,
+  deletePersonSignature,
+  downloadSignaturesZip,
+  exportSelectedLabAssets,
+  formatLabBatch,
+  getPersonDossier,
+  getPersonSignatureUrl,
+  mapLabErrorCode,
+  parseFilenameFromDisposition,
   reindexLabAssets,
   restoreImportedField,
-  updateLabEntity,
+   updateLabEntity,
+  uploadPersonSignature,
+  type BasketEntityKind,
+  type BasketItem,
+  type BasketOptions,
+  type BasketState,
+  type DossierAchievementItem,
+  type DossierProjectItem,
   type FieldProvenanceSummary,
   type ImportJobResponse,
   type LabAchievementItem,
@@ -31,12 +46,44 @@ import {
   type LabOverview,
   type LabPersonItem,
   type LabProjectItem,
+  type PersonDossierResponse,
   type ProvisionResult,
   type User,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type TabKey = "people" | "projects" | "achievements" | "facilities";
+
+const TAB_TO_BASKET_KIND: Record<TabKey, BasketEntityKind> = {
+  people: "person",
+  projects: "project",
+  achievements: "achievement",
+  facilities: "facility",
+};
+
+const BASKET_KIND_LABELS: Record<BasketEntityKind, string> = {
+  person: "团队成员",
+  project: "承担项目",
+  achievement: "前期成果",
+  facility: "支撑条件",
+};
+
+const BASKET_MAX_ITEMS = 200;
+const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024;
+const ALLOWED_SIGNATURE_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+]);
+
+const DEFAULT_BASKET_OPTIONS: BasketOptions = {
+  with_support: true,
+  with_relation: false,
+  numbering: "bracket",
+  group_by_kind: true,
+  include_signatures: true,
+  naming: "seq_name",
+};
 
 type EditableFieldConfig = {
   key: string;
@@ -145,6 +192,104 @@ function formatProvValue(val: unknown): string {
   }
 }
 
+function normalizeNameKey(raw?: string | null): string {
+  if (!raw) return "";
+  return raw
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .replace(/([*#†]+|（通讯作者）|\(通讯作者\)|\(correspondingauthor\))$/gi, "")
+    .toLowerCase();
+}
+
+function extFromMime(mime?: string | null): string {
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/webp") return "webp";
+  return "png";
+}
+
+function basketKey(kind: BasketEntityKind | string, id: string): string {
+  return `${kind}:${id}`;
+}
+
+function getBasketStorageKey(userId?: string | null): string {
+  return `labagent.reuseBasket.v1:${userId || "anonymous"}`;
+}
+
+function parseBasketStorage(raw: string | null): BasketState | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<BasketState>;
+    if (parsed.version !== 1 || !Array.isArray(parsed.items)) return null;
+    const seen = new Set<string>();
+    const validKinds = new Set<string>([
+      "person",
+      "project",
+      "achievement",
+      "facility",
+    ]);
+    const cleanItems: BasketItem[] = [];
+    for (const item of parsed.items) {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.kind !== "string" ||
+        !validKinds.has(item.kind) ||
+        (typeof item.id !== "string" && typeof item.id !== "number")
+      ) {
+        continue;
+      }
+      const idStr = String(item.id);
+      const k = basketKey(item.kind, idStr);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      cleanItems.push({
+        kind: item.kind as BasketEntityKind,
+        id: idStr,
+        label: typeof item.label === "string" ? item.label : idStr,
+      });
+      if (cleanItems.length >= BASKET_MAX_ITEMS) break;
+    }
+    const opts = parsed.options;
+    const cleanOptions: BasketOptions = {
+      with_support:
+        typeof opts?.with_support === "boolean"
+          ? opts.with_support
+          : DEFAULT_BASKET_OPTIONS.with_support,
+      with_relation:
+        typeof opts?.with_relation === "boolean"
+          ? opts.with_relation
+          : DEFAULT_BASKET_OPTIONS.with_relation,
+      numbering:
+        opts?.numbering === "none" ||
+        opts?.numbering === "arabic" ||
+        opts?.numbering === "bracket"
+          ? opts.numbering
+          : DEFAULT_BASKET_OPTIONS.numbering,
+      group_by_kind:
+        typeof opts?.group_by_kind === "boolean"
+          ? opts.group_by_kind
+          : DEFAULT_BASKET_OPTIONS.group_by_kind,
+      include_signatures:
+        typeof opts?.include_signatures === "boolean"
+          ? opts.include_signatures
+          : DEFAULT_BASKET_OPTIONS.include_signatures,
+      naming:
+        opts?.naming === "seq_name" ||
+        opts?.naming === "name" ||
+        opts?.naming === "name_id"
+          ? opts.naming
+          : DEFAULT_BASKET_OPTIONS.naming,
+    };
+    return {
+      version: 1,
+      items: cleanItems,
+      options: cleanOptions,
+    };
+  } catch {
+    return null;
+  }
+}
+
 type PersonOverrideState = {
   exclude: boolean;
   login_name: string;
@@ -169,6 +314,20 @@ function extractProjectYear(proj: LabProjectItem): number | null {
   const mGrant = (proj.grant_no || "").match(/^[A-Za-z]+(\d{2})\d{3,}$/);
   if (mGrant) return 2000 + Number(mGrant[1]);
   return null;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export default function LabAssetsPage() {
@@ -198,6 +357,13 @@ export default function LabAssetsPage() {
   const [withSupportNote, setWithSupportNote] = useState(true);
 
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
+  const lastClickedIndexRef = useRef<Record<TabKey, number | null>>({
+    people: null,
+    projects: null,
+    achievements: null,
+    facilities: null,
+  });
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedBioId, setExpandedBioId] = useState<string | null>(null);
   const [expandedProvId, setExpandedProvId] = useState<string | null>(null);
@@ -206,6 +372,49 @@ export default function LabAssetsPage() {
     null,
   );
   const [reindexing, setReindexing] = useState(false);
+
+  // ==========================================================================
+  // Feature 1: Person-Centric Dossier Drawer & Signature Management State
+  // ==========================================================================
+  const [dossierOpen, setDossierOpen] = useState(false);
+  const [dossierPersonId, setDossierPersonId] = useState<string | null>(null);
+  const [dossier, setDossier] = useState<PersonDossierResponse | null>(null);
+  const [dossierLoading, setDossierLoading] = useState(false);
+  const [dossierError, setDossierError] = useState("");
+  const [dossierNotFound, setDossierNotFound] = useState(false);
+  const [dossierCheckedProjects, setDossierCheckedProjects] = useState<
+    Record<string, boolean>
+  >({});
+  const [dossierCheckedAchievements, setDossierCheckedAchievements] = useState<
+    Record<string, boolean>
+  >({});
+  const [sigUploading, setSigUploading] = useState(false);
+  const [sigDeleting, setSigDeleting] = useState(false);
+  const [sigConfirmDelete, setSigConfirmDelete] = useState(false);
+  const [sigError, setSigError] = useState("");
+  const [sigStatusMsg, setSigStatusMsg] = useState("");
+  const dossierAbortRef = useRef<AbortController | null>(null);
+  const sigFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ==========================================================================
+  // Feature 2: Multi-Select Proposal Reuse Basket ("写本子素材篮") State
+  // ==========================================================================
+  const [basketItems, setBasketItems] = useState<BasketItem[]>([]);
+  const [basketOptions, setBasketOptions] = useState<BasketOptions>(
+    DEFAULT_BASKET_OPTIONS,
+  );
+  const [basketHydratedForUser, setBasketHydratedForUser] = useState<
+    string | null
+  >(null);
+  const [basketPanelOpen, setBasketPanelOpen] = useState(false);
+  const [basketConfirmClear, setBasketConfirmClear] = useState(false);
+  const [basketActionLoading, setBasketActionLoading] = useState<
+    "copy" | "zip" | "docx" | null
+  >(null);
+  const [basketMissingIds, setBasketMissingIds] = useState<string[]>([]);
+  const [clipboardFallbackText, setClipboardFallbackText] = useState<
+    string | null
+  >(null);
 
   // Phase 2 Online Edit & Field Provenance Restore state
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -238,13 +447,156 @@ export default function LabAssetsPage() {
   const [overrides, setOverrides] = useState<
     Record<string, PersonOverrideState>
   >({});
+  const [skipSignatureIds, setSkipSignatureIds] = useState<
+    Record<string, boolean>
+  >({});
   const [provisioning, setProvisioning] = useState(false);
   const [provisionResult, setProvisionResult] =
     useState<ProvisionResult | null>(null);
   const [rosterCopied, setRosterCopied] = useState(false);
   const [hasSavedCredentials, setHasSavedCredentials] = useState(false);
 
-  const loadAll = useCallback(async () => {
+  function hydrateBasketFromStorage(userId: string) {
+    if (typeof window === "undefined") return;
+    const storageKey = getBasketStorageKey(userId);
+    const parsed = parseBasketStorage(window.localStorage.getItem(storageKey));
+    if (parsed) {
+      setBasketItems(parsed.items);
+      setBasketOptions(parsed.options);
+      const nextSelected: Record<string, boolean> = {};
+      for (const it of parsed.items) {
+        nextSelected[it.id] = true;
+      }
+      setSelectedIds(nextSelected);
+    } else {
+      setBasketItems([]);
+      setBasketOptions(DEFAULT_BASKET_OPTIONS);
+    }
+    setBasketHydratedForUser(userId);
+  }
+
+  function persistBasketToStorage(
+    nextItems: BasketItem[],
+    nextOptions: BasketOptions,
+    userIdOverride?: string | null,
+  ) {
+    if (typeof window === "undefined") return;
+    const uid = userIdOverride ?? me?.id ?? "anonymous";
+    const storageKey = getBasketStorageKey(uid);
+    const payload: BasketState = {
+      version: 1,
+      items: nextItems.map(({ kind, id, label }) => ({ kind, id, label })),
+      options: nextOptions,
+    };
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  // Listen for cross-tab storage changes on the user's reuseBasket key
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const uid = me?.id || "anonymous";
+    const storageKey = getBasketStorageKey(uid);
+    function handleStorage(e: StorageEvent) {
+      if (e.key !== storageKey) return;
+      const parsed = parseBasketStorage(e.newValue);
+      if (parsed) {
+        setBasketItems(parsed.items);
+        setBasketOptions(parsed.options);
+      } else {
+        setBasketItems([]);
+      }
+    }
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [me?.id]);
+
+  async function fetchDossierById(personId: string) {
+    if (dossierAbortRef.current) {
+      dossierAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    dossierAbortRef.current = controller;
+
+    setDossierOpen(true);
+    setDossierPersonId(personId);
+    setDossierLoading(true);
+    setDossierError("");
+    setDossierNotFound(false);
+    setSigError("");
+    setSigStatusMsg("");
+    setSigConfirmDelete(false);
+
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("person", personId);
+      window.history.replaceState(null, "", url.toString());
+    }
+
+    try {
+      const data = await getPersonDossier(personId, controller.signal);
+      if (controller.signal.aborted) return;
+      setDossier(data);
+      const initProjChecks: Record<string, boolean> = {};
+      for (const proj of data.projects || []) {
+        initProjChecks[proj.id] = proj.match !== "ambiguous";
+      }
+      setDossierCheckedProjects(initProjChecks);
+      const achList = data.achievements || data.outputs || [];
+      const initAchChecks: Record<string, boolean> = {};
+      for (const ach of achList) {
+        initAchChecks[ach.id] = ach.match !== "ambiguous";
+      }
+      setDossierCheckedAchievements(initAchChecks);
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (
+        err instanceof ApiError &&
+        (err.status === 404 ||
+          err.code.toUpperCase() === "PERSON_NOT_FOUND" ||
+          err.code === "not_found")
+      ) {
+        setDossierNotFound(true);
+        setDossier(null);
+      } else {
+        const msg =
+          err instanceof ApiError
+            ? mapLabErrorCode(err.code, err.message)
+            : "无法加载成员全息档案袋，请稍后重试";
+        setDossierError(msg);
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setDossierLoading(false);
+      }
+    }
+  }
+
+  function closePersonDossier() {
+    if (dossierAbortRef.current) {
+      dossierAbortRef.current.abort();
+      dossierAbortRef.current = null;
+    }
+    setDossierOpen(false);
+    setDossierPersonId(null);
+    setSigConfirmDelete(false);
+    setSigError("");
+    setSigStatusMsg("");
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("person")) {
+        url.searchParams.delete("person");
+        window.history.replaceState(null, "", url.toString());
+      }
+    }
+  }
+
+  async function loadAll() {
     setError("");
     setLoading(true);
     try {
@@ -262,12 +614,15 @@ export default function LabAssetsPage() {
       setProjects(projs.projects);
       setAchievements(achs.achievements);
       setFacilities(facs.facilities);
+      if (actor?.id && basketHydratedForUser !== actor.id) {
+        hydrateBasketFromStorage(actor.id);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t.error);
     } finally {
       setLoading(false);
     }
-  }, [t.error]);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -287,6 +642,72 @@ export default function LabAssetsPage() {
         setProjects(projs.projects);
         setAchievements(achs.achievements);
         setFacilities(facs.facilities);
+        const uid = actor?.id || "anonymous";
+        if (typeof window !== "undefined") {
+          const parsed = parseBasketStorage(
+            window.localStorage.getItem(getBasketStorageKey(uid)),
+          );
+          if (parsed) {
+            setBasketItems(parsed.items);
+            setBasketOptions(parsed.options);
+            const nextSelected: Record<string, boolean> = {};
+            for (const it of parsed.items) {
+              nextSelected[it.id] = true;
+            }
+            setSelectedIds(nextSelected);
+          } else {
+            setBasketItems([]);
+            setBasketOptions(DEFAULT_BASKET_OPTIONS);
+          }
+          setBasketHydratedForUser(uid);
+
+          const initialPerson = new URLSearchParams(
+            window.location.search,
+          ).get("person");
+          if (initialPerson && initialPerson.trim()) {
+            const pid = initialPerson.trim();
+            setDossierOpen(true);
+            setDossierPersonId(pid);
+            setDossierLoading(true);
+            getPersonDossier(pid)
+              .then((data) => {
+                if (cancelled) return;
+                setDossier(data);
+                const initProjChecks: Record<string, boolean> = {};
+                for (const proj of data.projects || []) {
+                  initProjChecks[proj.id] = proj.match !== "ambiguous";
+                }
+                setDossierCheckedProjects(initProjChecks);
+                const achList = data.achievements || data.outputs || [];
+                const initAchChecks: Record<string, boolean> = {};
+                for (const ach of achList) {
+                  initAchChecks[ach.id] = ach.match !== "ambiguous";
+                }
+                setDossierCheckedAchievements(initAchChecks);
+              })
+              .catch((err: unknown) => {
+                if (cancelled) return;
+                if (
+                  err instanceof ApiError &&
+                  (err.status === 404 ||
+                    err.code.toUpperCase() === "PERSON_NOT_FOUND" ||
+                    err.code === "not_found")
+                ) {
+                  setDossierNotFound(true);
+                  setDossier(null);
+                } else {
+                  setDossierError(
+                    err instanceof ApiError
+                      ? mapLabErrorCode(err.code, err.message)
+                      : "无法加载成员全息档案袋，请稍后重试",
+                  );
+                }
+              })
+              .finally(() => {
+                if (!cancelled) setDossierLoading(false);
+              });
+          }
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -341,13 +762,170 @@ export default function LabAssetsPage() {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedId(tag);
+      setStatusBanner("已复制到剪贴板");
       setTimeout(() => {
         setCopiedId((prev) => (prev === tag ? null : prev));
       }, 1800);
     } catch {
-      setError("复制到剪贴板失败，请检查浏览器剪贴板权限或手动复制");
+      setClipboardFallbackText(text);
     }
   }
+
+  // ==========================================================================
+  // Reuse Basket Helpers
+  // ==========================================================================
+  const basketKeySet = useMemo(() => {
+    const s = new Set<string>();
+    for (const it of basketItems) {
+      s.add(basketKey(it.kind, it.id));
+    }
+    return s;
+  }, [basketItems]);
+
+  const basketCounts = useMemo(() => {
+    const counts: Record<BasketEntityKind, number> = {
+      person: 0,
+      project: 0,
+      achievement: 0,
+      facility: 0,
+    };
+    for (const it of basketItems) {
+      if (it.kind in counts) {
+        counts[it.kind] += 1;
+      }
+    }
+    return counts;
+  }, [basketItems]);
+
+  function isItemSelected(kind: BasketEntityKind, id: string): boolean {
+    return basketKeySet.has(basketKey(kind, id)) || Boolean(selectedIds[id]);
+  }
+
+  function updateBasketItems(
+    nextItems: BasketItem[],
+    nextOptions: BasketOptions = basketOptions,
+  ) {
+    setBasketItems(nextItems);
+    const nextSelected: Record<string, boolean> = {};
+    for (const it of nextItems) {
+      nextSelected[it.id] = true;
+    }
+    setSelectedIds(nextSelected);
+    persistBasketToStorage(nextItems, nextOptions);
+  }
+
+  function updateBasketOption<K extends keyof BasketOptions>(
+    key: K,
+    value: BasketOptions[K],
+  ) {
+    const nextOptions: BasketOptions = {
+      ...basketOptions,
+      [key]: value,
+    };
+    setBasketOptions(nextOptions);
+    persistBasketToStorage(basketItems, nextOptions);
+  }
+
+  function addBatchToBasket(
+    candidates: BasketItem[],
+    announceToast: boolean = true,
+  ): boolean {
+    setError("");
+    const existingKeys = new Set(
+      basketItems.map((it) => basketKey(it.kind, it.id)),
+    );
+    const toAdd: BasketItem[] = [];
+    let duplicateCount = 0;
+    for (const cand of candidates) {
+      const k = basketKey(cand.kind, cand.id);
+      if (existingKeys.has(k)) {
+        duplicateCount += 1;
+        continue;
+      }
+      existingKeys.add(k);
+      toAdd.push({
+        kind: cand.kind,
+        id: String(cand.id),
+        label: cand.label,
+      });
+    }
+    if (basketItems.length + toAdd.length > BASKET_MAX_ITEMS) {
+      setError(`素材篮最多 ${BASKET_MAX_ITEMS} 项，当前 ${basketItems.length} 项`);
+      return false;
+    }
+    const nextItems = [...basketItems, ...toAdd];
+    updateBasketItems(nextItems);
+    if (announceToast) {
+      if (toAdd.length > 0 && duplicateCount > 0) {
+        setStatusBanner(
+          `已加入素材篮 ${toAdd.length} 项（${duplicateCount} 项已存在）`,
+        );
+      } else if (toAdd.length > 0) {
+        setStatusBanner(`已加入素材篮 ${toAdd.length} 项`);
+      } else if (duplicateCount > 0) {
+        setStatusBanner(`所选 ${duplicateCount} 项已在写本子素材篮中`);
+      }
+    }
+    return true;
+  }
+
+  function removeItemsFromBasket(keysToRemove: Set<string>) {
+    const nextItems = basketItems.filter(
+      (it) => !keysToRemove.has(basketKey(it.kind, it.id)),
+    );
+    updateBasketItems(nextItems);
+  }
+
+  function moveBasketItem(index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= basketItems.length) return;
+    const nextItems = [...basketItems];
+    const [moved] = nextItems.splice(index, 1);
+    nextItems.splice(targetIndex, 0, moved);
+    updateBasketItems(nextItems);
+  }
+
+  function handleRowCheckboxClick(
+    tab: TabKey,
+    indexInList: number,
+    listItems: BasketItem[],
+    checked: boolean,
+    shiftKey: boolean,
+  ) {
+    const prevIndex = lastClickedIndexRef.current[tab];
+    lastClickedIndexRef.current[tab] = indexInList;
+
+    let targetSlice: BasketItem[] = [listItems[indexInList]];
+    if (
+      shiftKey &&
+      prevIndex !== null &&
+      prevIndex >= 0 &&
+      prevIndex < listItems.length
+    ) {
+      const start = Math.min(prevIndex, indexInList);
+      const end = Math.max(prevIndex, indexInList);
+      targetSlice = listItems.slice(start, end + 1);
+    }
+
+    if (checked) {
+      addBatchToBasket(targetSlice, false);
+    } else {
+      const keys = new Set(targetSlice.map((it) => basketKey(it.kind, it.id)));
+      removeItemsFromBasket(keys);
+    }
+  }
+
+  // Name-to-person lookup map for clicking PI / first_author chips in Projects & Achievements tabs
+  const personByNormalizedName = useMemo(() => {
+    const map = new Map<string, LabPersonItem>();
+    for (const p of people) {
+      const norm = normalizeNameKey(p.name);
+      if (norm && !map.has(norm)) {
+        map.set(norm, p);
+      }
+    }
+    return map;
+  }, [people]);
 
   const baseYear = useMemo(() => {
     const asOf = overview ? overview.as_of_time : null;
@@ -429,6 +1007,41 @@ export default function LabAssetsPage() {
     });
   }, [facilities, searchQuery]);
 
+  const currentTabBasketCandidates = useMemo<BasketItem[]>(() => {
+    if (activeTab === "people") {
+      return filteredPeople.map((p) => ({
+        kind: "person",
+        id: p.id,
+        label: `${p.name}${p.title && p.title !== "无" ? `（${p.title}）` : ""}`,
+      }));
+    }
+    if (activeTab === "projects") {
+      return filteredProjects.map((j) => ({
+        kind: "project",
+        id: j.id,
+        label: `《${j.title}》`,
+      }));
+    }
+    if (activeTab === "achievements") {
+      return filteredAchievements.map((a) => ({
+        kind: "achievement",
+        id: a.id,
+        label: `《${a.title}》`,
+      }));
+    }
+    return filteredFacilities.map((f) => ({
+      kind: "facility",
+      id: f.id,
+      label: f.name,
+    }));
+  }, [
+    activeTab,
+    filteredPeople,
+    filteredProjects,
+    filteredAchievements,
+    filteredFacilities,
+  ]);
+
   function getProjectText(proj: LabProjectItem): string {
     return includeProjectRel
       ? proj.application_text_with_rel
@@ -452,24 +1065,26 @@ export default function LabAssetsPage() {
   function collectTabLines(onlySelected: boolean): string[] {
     if (activeTab === "people") {
       const items = onlySelected
-        ? filteredPeople.filter((item) => selectedIds[item.id])
+        ? filteredPeople.filter((item) => isItemSelected("person", item.id))
         : filteredPeople;
       return items.map((item) => item.application_text);
     }
     if (activeTab === "projects") {
       const items = onlySelected
-        ? filteredProjects.filter((item) => selectedIds[item.id])
+        ? filteredProjects.filter((item) => isItemSelected("project", item.id))
         : filteredProjects;
       return items.map((item) => getProjectText(item));
     }
     if (activeTab === "achievements") {
       const items = onlySelected
-        ? filteredAchievements.filter((item) => selectedIds[item.id])
+        ? filteredAchievements.filter((item) =>
+            isItemSelected("achievement", item.id),
+          )
         : filteredAchievements;
       return items.map((item) => getAchievementText(item));
     }
     const items = onlySelected
-      ? filteredFacilities.filter((item) => selectedIds[item.id])
+      ? filteredFacilities.filter((item) => isItemSelected("facility", item.id))
       : filteredFacilities;
     return items.map((item) => item.application_text);
   }
@@ -477,64 +1092,492 @@ export default function LabAssetsPage() {
   function handleBatchCopySelected() {
     const lines = collectTabLines(true);
     if (lines.length === 0) return;
-    copyToClipboard(formatBatchLines(lines), "batch-selected");
+    void copyToClipboard(formatBatchLines(lines), "batch-selected");
   }
 
   function handleBatchCopyAllTab() {
     const lines = collectTabLines(false);
     if (lines.length === 0) return;
-    copyToClipboard(formatBatchLines(lines), "batch-all");
+    void copyToClipboard(formatBatchLines(lines), "batch-all");
   }
 
-  const currentTabListLength = useMemo(() => {
-    if (activeTab === "people") return filteredPeople.length;
-    if (activeTab === "projects") return filteredProjects.length;
-    if (activeTab === "achievements") return filteredAchievements.length;
-    return filteredFacilities.length;
-  }, [
-    activeTab,
-    filteredPeople.length,
-    filteredProjects.length,
-    filteredAchievements.length,
-    filteredFacilities.length,
-  ]);
+  const currentTabListLength = currentTabBasketCandidates.length;
 
   const selectedCount = useMemo(() => {
-    const currentList =
-      activeTab === "people"
-        ? filteredPeople
-        : activeTab === "projects"
-          ? filteredProjects
-          : activeTab === "achievements"
-            ? filteredAchievements
-            : filteredFacilities;
-    return currentList.filter((item) => selectedIds[item.id]).length;
-  }, [
-    activeTab,
-    filteredPeople,
-    filteredProjects,
-    filteredAchievements,
-    filteredFacilities,
-    selectedIds,
-  ]);
+    const kind = TAB_TO_BASKET_KIND[activeTab];
+    return currentTabBasketCandidates.filter((item) =>
+      isItemSelected(kind, item.id),
+    ).length;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentTabBasketCandidates, basketKeySet, selectedIds]);
 
-  function toggleSelectAll() {
-    const currentList =
-      activeTab === "people"
-        ? filteredPeople
-        : activeTab === "projects"
-          ? filteredProjects
-          : activeTab === "achievements"
-            ? filteredAchievements
-            : filteredFacilities;
-    const allChecked =
-      currentList.length > 0 &&
-      currentList.every((item) => selectedIds[item.id]);
-    const next = { ...selectedIds };
-    for (const item of currentList) {
-      next[item.id] = !allChecked;
+  function toggleSelectAllCurrentList() {
+    if (currentTabBasketCandidates.length === 0) return;
+    const allSelected = currentTabBasketCandidates.every((it) =>
+      basketKeySet.has(basketKey(it.kind, it.id)),
+    );
+    if (allSelected) {
+      const keys = new Set(
+        currentTabBasketCandidates.map((it) => basketKey(it.kind, it.id)),
+      );
+      removeItemsFromBasket(keys);
+      setStatusBanner("已取消当前列表的选择");
+    } else {
+      addBatchToBasket(currentTabBasketCandidates, true);
     }
-    setSelectedIds(next);
+  }
+
+  function handleQuickSelectOngoingProjects() {
+    const ongoing = projects
+      .filter((j) => j.status === "ongoing")
+      .map<BasketItem>((j) => ({
+        kind: "project",
+        id: j.id,
+        label: `《${j.title}》`,
+      }));
+    if (ongoing.length === 0) {
+      setStatusBanner("当前暂无在研项目可加入素材篮");
+      return;
+    }
+    addBatchToBasket(ongoing, true);
+  }
+
+  function handleQuickSelectRecentAchievements() {
+    const minYear = baseYear - 5;
+    const recent = achievements
+      .filter((a) => !a.year || a.year >= minYear)
+      .map<BasketItem>((a) => ({
+        kind: "achievement",
+        id: a.id,
+        label: `《${a.title}》`,
+      }));
+    if (recent.length === 0) {
+      setStatusBanner("当前暂无近 5 年成果可加入素材篮");
+      return;
+    }
+    addBatchToBasket(recent, true);
+  }
+
+  // ==========================================================================
+  // Person Signature Download / Upload / Delete Handlers
+  // ==========================================================================
+  async function handleDownloadPersonSignature(
+    personId: string,
+    personName: string,
+    mime?: string | null,
+    sha256?: string | null,
+  ) {
+    setError("");
+    setSigError("");
+    try {
+      const url = getPersonSignatureUrl(personId, "attachment", sha256);
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) {
+        let code = "SIGNATURE_NOT_FOUND";
+        let msg = "该成员暂无签名";
+        try {
+          const errBody = (await response.json()) as {
+            error?: { code?: string; message?: string };
+            detail?: { code?: string; message?: string };
+          };
+          code =
+            errBody.error?.code ||
+            errBody.detail?.code ||
+            "SIGNATURE_NOT_FOUND";
+          msg =
+            errBody.error?.message ||
+            errBody.detail?.message ||
+            msg;
+        } catch {
+          // ignore JSON parse failure
+        }
+        throw new ApiError(response.status, code, msg);
+      }
+      const blob = await response.blob();
+      const ext = extFromMime(response.headers.get("content-type") || mime);
+      const fallbackName = `${personName}-电子签名.${ext}`;
+      const filename = parseFilenameFromDisposition(
+        response.headers.get("content-disposition"),
+        fallbackName,
+      );
+      triggerBlobDownload(blob, filename);
+      setStatusBanner(`已下载 ${personName} 的电子签名`);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? mapLabErrorCode(err.code, err.message)
+          : "下载签名失败，请稍后重试";
+      if (dossierOpen) {
+        setSigError(msg);
+      } else {
+        setError(msg);
+      }
+    }
+  }
+
+  async function handleSignatureFileSelect(
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = e.target.files?.[0] || null;
+    e.target.value = "";
+    if (!file || !dossier) return;
+
+    setSigError("");
+    setSigStatusMsg("");
+
+    // Client-side precheck (§6.2): size <= 2 MiB & PNG/JPEG/WebP
+    if (file.size <= 0 || file.size > MAX_SIGNATURE_BYTES) {
+      setSigError(mapLabErrorCode("SIGNATURE_TOO_LARGE"));
+      return;
+    }
+    const lowerName = file.name.toLowerCase();
+    const validExt =
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg") ||
+      lowerName.endsWith(".webp");
+    if (
+      (file.type && !ALLOWED_SIGNATURE_MIMES.has(file.type)) ||
+      (!file.type && !validExt)
+    ) {
+      setSigError(mapLabErrorCode("SIGNATURE_REJECTED_FORMAT"));
+      return;
+    }
+
+    const currentSha =
+      dossier.signature?.signature_sha256 ??
+      dossier.signature?.sha256 ??
+      dossier.person.signature_sha256 ??
+      null;
+
+    setSigUploading(true);
+    try {
+      await uploadPersonSignature(dossier.person.id, file, currentSha);
+      setSigStatusMsg("电子签名已上传更新");
+      setStatusBanner(`已更新 ${dossier.person.name} 的电子签名`);
+      await Promise.all([fetchDossierById(dossier.person.id), loadAll()]);
+    } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.status === 412 ||
+          err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
+      ) {
+        setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
+        await fetchDossierById(dossier.person.id);
+      } else {
+        setSigError(
+          err instanceof ApiError
+            ? mapLabErrorCode(err.code, err.message)
+            : "上传电子签名失败，请稍后重试",
+        );
+      }
+    } finally {
+      setSigUploading(false);
+    }
+  }
+
+  async function handleConfirmDeleteSignature() {
+    if (!dossier) return;
+    setSigError("");
+    setSigStatusMsg("");
+    setSigDeleting(true);
+    const currentSha =
+      dossier.signature?.signature_sha256 ??
+      dossier.signature?.sha256 ??
+      dossier.person.signature_sha256 ??
+      null;
+    try {
+      await deletePersonSignature(dossier.person.id, currentSha);
+      setSigConfirmDelete(false);
+      setSigStatusMsg("电子签名已删除");
+      setStatusBanner(`已删除 ${dossier.person.name} 的电子签名`);
+      await Promise.all([fetchDossierById(dossier.person.id), loadAll()]);
+    } catch (err) {
+      if (
+        err instanceof ApiError &&
+        (err.status === 412 ||
+          err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
+      ) {
+        setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
+        await fetchDossierById(dossier.person.id);
+      } else {
+        setSigError(
+          err instanceof ApiError
+            ? mapLabErrorCode(err.code, err.message)
+            : "删除电子签名失败，请稍后重试",
+        );
+      }
+    } finally {
+      setSigDeleting(false);
+    }
+  }
+
+  // ==========================================================================
+  // Dossier Basket Actions
+  // ==========================================================================
+  function handleAddPersonOnlyFromDossier() {
+    if (!dossier) return;
+    const p = dossier.person;
+    addBatchToBasket(
+      [
+        {
+          kind: "person",
+          id: p.id,
+          label: `${p.name}${p.title && p.title !== "无" ? `（${p.title}）` : ""}`,
+        },
+      ],
+      true,
+    );
+  }
+
+  function handleAddCheckedDossierToBasket(selectAllNonAmbiguous: boolean) {
+    if (!dossier) return;
+    const p = dossier.person;
+    const batch: BasketItem[] = [
+      {
+        kind: "person",
+        id: p.id,
+        label: `${p.name}${p.title && p.title !== "无" ? `（${p.title}）` : ""}`,
+      },
+    ];
+    const projList = dossier.projects || [];
+    const achList = dossier.achievements || dossier.outputs || [];
+
+    if (selectAllNonAmbiguous) {
+      const nextProjChecks: Record<string, boolean> = {
+        ...dossierCheckedProjects,
+      };
+      for (const proj of projList) {
+        if (proj.match !== "ambiguous") {
+          nextProjChecks[proj.id] = true;
+          batch.push({
+            kind: "project",
+            id: proj.id,
+            label: `《${proj.title}》`,
+          });
+        }
+      }
+      setDossierCheckedProjects(nextProjChecks);
+
+      const nextAchChecks: Record<string, boolean> = {
+        ...dossierCheckedAchievements,
+      };
+      for (const ach of achList) {
+        if (ach.match !== "ambiguous") {
+          nextAchChecks[ach.id] = true;
+          batch.push({
+            kind: "achievement",
+            id: ach.id,
+            label: `《${ach.title}》`,
+          });
+        }
+      }
+      setDossierCheckedAchievements(nextAchChecks);
+    } else {
+      for (const proj of projList) {
+        if (dossierCheckedProjects[proj.id]) {
+          batch.push({
+            kind: "project",
+            id: proj.id,
+            label: `《${proj.title}》`,
+          });
+        }
+      }
+      for (const ach of achList) {
+        if (dossierCheckedAchievements[ach.id]) {
+          batch.push({
+            kind: "achievement",
+            id: ach.id,
+            label: `《${ach.title}》`,
+          });
+        }
+      }
+    }
+    addBatchToBasket(batch, true);
+  }
+
+  // ==========================================================================
+  // Reuse Basket 3 Batch Actions (§6.4)
+  // ==========================================================================
+  function buildLocalFallbackBatchText(): string {
+    const peopleMap = new Map(people.map((p) => [p.id, p]));
+    const projectMap = new Map(projects.map((p) => [p.id, p]));
+    const achievementMap = new Map(achievements.map((a) => [a.id, a]));
+    const facilityMap = new Map(facilities.map((f) => [f.id, f]));
+
+    const orderedItems = basketOptions.group_by_kind
+      ? ([
+          ...basketItems.filter((i) => i.kind === "person"),
+          ...basketItems.filter((i) => i.kind === "project"),
+          ...basketItems.filter((i) => i.kind === "achievement"),
+          ...basketItems.filter((i) => i.kind === "facility"),
+        ] as BasketItem[])
+      : basketItems;
+
+    const blocks: string[] = [];
+    let seq = 0;
+    let currentKind: BasketEntityKind | null = null;
+
+    for (const item of orderedItems) {
+      let rawText = "";
+      if (item.kind === "person") {
+        const p = peopleMap.get(item.id);
+        rawText = p?.copy_text || p?.application_text || item.label;
+      } else if (item.kind === "project") {
+        const j = projectMap.get(item.id);
+        rawText = j
+          ? basketOptions.with_relation
+            ? j.application_text_with_rel
+            : j.application_text
+          : item.label;
+      } else if (item.kind === "achievement") {
+        const a = achievementMap.get(item.id);
+        rawText = a
+          ? basketOptions.with_support
+            ? a.application_text
+            : a.application_text_plain
+          : item.label;
+      } else {
+        const f = facilityMap.get(item.id);
+        rawText = f?.application_text || item.label;
+      }
+      if (!rawText) continue;
+      if (basketOptions.group_by_kind && item.kind !== currentKind) {
+        currentKind = item.kind;
+        blocks.push(`【${BASKET_KIND_LABELS[item.kind]}】`);
+      }
+      seq += 1;
+      const prefix =
+        basketOptions.numbering === "bracket"
+          ? `[${seq}] `
+          : basketOptions.numbering === "arabic"
+            ? `${seq}. `
+            : "";
+      blocks.push(`${prefix}${rawText}`);
+    }
+    return blocks.join("\n\n");
+  }
+
+  async function handleBasketBatchCopy() {
+    if (basketItems.length === 0) return;
+    setError("");
+    setStatusBanner("");
+    setBasketMissingIds([]);
+    setBasketActionLoading("copy");
+    try {
+      const res = await formatLabBatch(
+        basketItems.map((it) => ({ kind: it.kind, id: it.id })),
+        {
+          with_support: basketOptions.with_support,
+          with_relation: basketOptions.with_relation,
+          numbering: basketOptions.numbering,
+          separator: "blank_line",
+          group_by_kind: basketOptions.group_by_kind,
+        },
+      );
+      const finalText = res.text || buildLocalFallbackBatchText();
+      try {
+        await navigator.clipboard.writeText(finalText);
+      } catch {
+        setClipboardFallbackText(finalText);
+      }
+      const okCount = res.stats?.ok ?? res.count ?? basketItems.length;
+      const missingCount = res.stats?.missing ?? 0;
+      if (missingCount > 0) {
+        const missingKeys = (res.items || [])
+          .filter((it) => !it.ok)
+          .map((it) => basketKey(it.kind, String(it.id)));
+        setBasketMissingIds(missingKeys);
+        setStatusBanner(
+          `已复制 ${okCount} 项（${missingCount} 项已不存在，可从素材篮移除）`,
+        );
+      } else {
+        setStatusBanner(`已复制 ${okCount} 项标准申报书格式文本`);
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? mapLabErrorCode(err.code, err.message)
+          : t.error,
+      );
+    } finally {
+      setBasketActionLoading(null);
+    }
+  }
+
+  async function handleBasketDownloadSignaturesZip() {
+    const personIds = basketItems
+      .filter((it) => it.kind === "person")
+      .map((it) => it.id);
+    if (personIds.length === 0) return;
+    setError("");
+    setStatusBanner("");
+    setBasketActionLoading("zip");
+    try {
+      const res = await downloadSignaturesZip(
+        personIds,
+        basketOptions.naming,
+        true,
+      );
+      triggerBlobDownload(res.blob, res.filename);
+      const inc = res.includedCount ?? personIds.length;
+      const miss = res.missingCount ?? 0;
+      if (miss > 0) {
+        setStatusBanner(
+          `已打包 ${inc} 个签名（${miss} 人无签名，详见 manifest.csv）`,
+        );
+      } else {
+        setStatusBanner(`已打包 ${inc} 个签名`);
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? mapLabErrorCode(err.code, err.message)
+          : "打包下载电子签名失败，请稍后重试",
+      );
+    } finally {
+      setBasketActionLoading(null);
+    }
+  }
+
+  async function handleBasketExportSelectedDocx() {
+    if (basketItems.length === 0) return;
+    setError("");
+    setStatusBanner("");
+    setBasketActionLoading("docx");
+    try {
+      const res = await exportSelectedLabAssets(
+        basketItems.map((it) => ({ kind: it.kind, id: it.id })),
+        {
+          with_support: basketOptions.with_support,
+          with_relation: basketOptions.with_relation,
+          numbering: basketOptions.numbering,
+          group_by_kind: basketOptions.group_by_kind,
+          include_signatures: basketOptions.include_signatures,
+          signature_width_cm: 3.0,
+          title: "写本子素材汇总",
+        },
+      );
+      triggerBlobDownload(res.blob, res.filename);
+      if (res.warnings.length > 0) {
+        const warnTexts = res.warnings.map((w) => mapLabErrorCode(w));
+        setStatusBanner(
+          `已导出所选素材 Word 文档（提示：${warnTexts.join("；")}）`,
+        );
+      } else {
+        setStatusBanner(
+          `已导出所选素材 Word 文档（共 ${basketItems.length} 项）`,
+        );
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? mapLabErrorCode(err.code, err.message)
+          : "导出所选素材失败，请稍后重试",
+      );
+    } finally {
+      setBasketActionLoading(null);
+    }
   }
 
   async function handleExportAll(format: "md" | "docx") {
@@ -562,12 +1605,10 @@ export default function LabAssetsPage() {
         throw new Error(msg);
       }
       const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = format === "docx" ? "lab-assets.docx" : "lab-assets.md";
-      a.click();
-      URL.revokeObjectURL(url);
+      triggerBlobDownload(
+        blob,
+        format === "docx" ? "lab-assets.docx" : "lab-assets.md",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : t.error);
     } finally {
@@ -596,8 +1637,14 @@ export default function LabAssetsPage() {
       return;
     }
     const lower = file.name.toLowerCase();
-    if (!lower.endsWith(".docx") || lower.endsWith(".docm") || lower.endsWith(".doc")) {
-      setWizardError("仅支持上传 .docx 格式的申报书文件（不支持 .doc 或 .docm）");
+    if (
+      !lower.endsWith(".docx") ||
+      lower.endsWith(".docm") ||
+      lower.endsWith(".doc")
+    ) {
+      setWizardError(
+        "仅支持上传 .docx 格式的申报书文件（不支持 .doc 或 .docm）",
+      );
       setUploadFile(null);
       return;
     }
@@ -645,6 +1692,7 @@ export default function LabAssetsPage() {
         };
       }
       setOverrides(initOv);
+      setSkipSignatureIds({});
       setWizardStep(2);
     } catch (err) {
       setWizardError(err instanceof ApiError ? err.message : t.error);
@@ -672,6 +1720,9 @@ export default function LabAssetsPage() {
             : {}),
         };
       });
+      const skippedSigs = Object.entries(skipSignatureIds)
+        .filter(([, skipped]) => skipped)
+        .map(([sigId]) => sigId);
       const res = await api<ProvisionResult>(
         `admin/imports/${importJob.job_id}/provision`,
         {
@@ -681,6 +1732,9 @@ export default function LabAssetsPage() {
             initial_password: initialPassword.trim() || undefined,
             include_password: includePassword,
             people: peoplePayload,
+            ...(skippedSigs.length > 0
+              ? { skip_signature_ids: skippedSigs }
+              : {}),
           }),
         },
       );
@@ -700,12 +1754,10 @@ export default function LabAssetsPage() {
     const blob = new Blob([provisionResult.roster_csv], {
       type: "text/csv;charset=utf-8;",
     });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `labagent-accounts-${provisionResult.as_of_time}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(
+      blob,
+      `labagent-accounts-${provisionResult.as_of_time}.csv`,
+    );
     setHasSavedCredentials(true);
   }
 
@@ -1083,9 +2135,46 @@ export default function LabAssetsPage() {
     );
   }
 
+  // Resolved Dossier values
+  const dossierHasSig = Boolean(
+    dossier?.signature?.has_signature ?? dossier?.person?.has_signature,
+  );
+  const dossierSigSha =
+    dossier?.signature?.signature_sha256 ??
+    dossier?.signature?.sha256 ??
+    dossier?.person?.signature_sha256 ??
+    null;
+  const dossierSigMime =
+    dossier?.signature?.signature_mime ??
+    dossier?.signature?.mime ??
+    dossier?.person?.signature_mime ??
+    "image/png";
+  const dossierSigSource =
+    dossier?.signature?.signature_source ??
+    dossier?.signature?.source ??
+    dossier?.person?.signature_source ??
+    null;
+  const dossierSigUpdatedAt =
+    dossier?.signature?.signature_updated_at ??
+    dossier?.signature?.updated_at ??
+    dossier?.person?.signature_updated_at ??
+    null;
+  const dossierCanEditSig = Boolean(
+    dossier?.signature?.can_edit ??
+      dossier?.can_edit ??
+      dossier?.person?.can_edit ??
+      (me &&
+        dossier?.person &&
+        (me.role === "admin" ||
+          (me.role === "member" && dossier.person.user_id === me.id))),
+  );
+  const dossierProjects: DossierProjectItem[] = dossier?.projects || [];
+  const dossierAchievements: DossierAchievementItem[] =
+    dossier?.achievements || dossier?.outputs || [];
+
   return (
     <Shell>
-      <div className="space-y-6">
+      <div className="space-y-6 pb-36">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="font-display text-[20px] font-medium leading-snug tracking-tight text-foreground">
@@ -1158,9 +2247,28 @@ export default function LabAssetsPage() {
         ) : null}
 
         {statusBanner ? (
-          <p role="status" className="text-[13px] font-medium text-emerald-600">
-            {statusBanner}
-          </p>
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[13px] font-medium text-emerald-700 dark:text-emerald-300"
+          >
+            <span>{statusBanner}</span>
+            {basketMissingIds.length > 0 ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => {
+                  removeItemsFromBasket(new Set(basketMissingIds));
+                  setBasketMissingIds([]);
+                  setStatusBanner("已从写本子素材篮移除不存在的条目");
+                }}
+              >
+                从素材篮移除缺失项 ({basketMissingIds.length})
+              </Button>
+            ) : null}
+          </div>
         ) : null}
 
         {overview ? (
@@ -1295,9 +2403,25 @@ export default function LabAssetsPage() {
                 size="sm"
                 variant="outline"
                 className="h-8 px-2.5 text-[12px]"
-                onClick={toggleSelectAll}
+                onClick={toggleSelectAllCurrentList}
               >
-                全选/反选
+                {t.selectAllCurrentListBtn}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2.5 text-[12px]"
+                onClick={handleQuickSelectOngoingProjects}
+              >
+                {t.selectOnlyOngoingProjectsBtn}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2.5 text-[12px]"
+                onClick={handleQuickSelectRecentAchievements}
+              >
+                {t.selectOnlyRecentAchievementsBtn}
               </Button>
               <Button
                 size="sm"
@@ -1324,75 +2448,99 @@ export default function LabAssetsPage() {
           </div>
 
           {/* Spec §7A.3 Quick filter & formatting switches bar */}
-          <div className="flex flex-wrap items-center gap-4 text-[12px] text-muted-foreground">
-            <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-              <input
-                type="checkbox"
-                checked={autoNumber}
-                onChange={(e) => setAutoNumber(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-border"
-              />
-              批量复制自动编号{" "}
-              <span className="font-mono text-[11px] text-muted-foreground">
-                [1] [2] …
-              </span>
-            </label>
+          <div className="flex flex-wrap items-center justify-between gap-4 text-[12px] text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                <input
+                  type="checkbox"
+                  checked={autoNumber}
+                  onChange={(e) => setAutoNumber(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-border"
+                />
+                批量复制自动编号{" "}
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  [1] [2] …
+                </span>
+              </label>
 
-            {activeTab === "projects" ? (
-              <>
-                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={onlyOngoingProjects}
-                    onChange={(e) => setOnlyOngoingProjects(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-border"
-                  />
-                  仅在研
-                </label>
-                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={onlyRecentProjects}
-                    onChange={(e) => setOnlyRecentProjects(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-border"
-                  />
-                  仅近 5 年
-                </label>
-                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={includeProjectRel}
-                    onChange={(e) => setIncludeProjectRel(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-border"
-                  />
-                  附带与本课题关系说明
-                </label>
-              </>
-            ) : null}
+              {activeTab === "projects" ? (
+                <>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={onlyOngoingProjects}
+                      onChange={(e) =>
+                        setOnlyOngoingProjects(e.target.checked)
+                      }
+                      className="h-3.5 w-3.5 rounded border-border"
+                    />
+                    仅在研
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={onlyRecentProjects}
+                      onChange={(e) => setOnlyRecentProjects(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-border"
+                    />
+                    仅近 5 年
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={includeProjectRel}
+                      onChange={(e) => setIncludeProjectRel(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-border"
+                    />
+                    附带与本课题关系说明
+                  </label>
+                </>
+              ) : null}
 
-            {activeTab === "achievements" ? (
-              <>
-                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={onlyRecentAchievements}
-                    onChange={(e) =>
-                      setOnlyRecentAchievements(e.target.checked)
-                    }
-                    className="h-3.5 w-3.5 rounded border-border"
-                  />
-                  仅近 5 年
-                </label>
-                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={withSupportNote}
-                    onChange={(e) => setWithSupportNote(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-border"
-                  />
-                  附带支撑价值说明 (?with_support=1)
-                </label>
-              </>
+              {activeTab === "achievements" ? (
+                <>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={onlyRecentAchievements}
+                      onChange={(e) =>
+                        setOnlyRecentAchievements(e.target.checked)
+                      }
+                      className="h-3.5 w-3.5 rounded border-border"
+                    />
+                    仅近 5 年
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={withSupportNote}
+                      onChange={(e) => setWithSupportNote(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-border"
+                    />
+                    附带支撑价值说明 (?with_support=1)
+                  </label>
+                </>
+              ) : null}
+            </div>
+
+            {selectedCount > 0 ? (
+              <div className="flex items-center gap-2 text-[12px] text-foreground">
+                <span>当前列表已勾选 {selectedCount} 项</span>
+                <button
+                  type="button"
+                  className="text-muted-foreground underline hover:text-foreground"
+                  onClick={() => {
+                    const keys = new Set(
+                      currentTabBasketCandidates.map((it) =>
+                        basketKey(it.kind, it.id),
+                      ),
+                    );
+                    removeItemsFromBasket(keys);
+                  }}
+                >
+                  取消当前列表选择
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -1406,139 +2554,207 @@ export default function LabAssetsPage() {
                 暂无匹配的团队成员记录。
               </p>
             ) : (
-              filteredPeople.map((person) => (
-                <div
-                  key={person.id}
-                  className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="flex items-start gap-2.5">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selectedIds[person.id])}
-                        onChange={(e) =>
-                          setSelectedIds((prev) => ({
-                            ...prev,
-                            [person.id]: e.target.checked,
-                          }))
-                        }
-                        className="mt-1 h-4 w-4 rounded border-border"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-[15px] text-foreground">
-                            {person.name}
-                          </span>
-                          <Badge
-                            variant={
-                              person.project_role === "applicant"
-                                ? "secondary"
-                                : "outline"
-                            }
-                          >
-                            {person.project_role === "applicant"
-                              ? "课题负责人"
-                              : "项目组成员"}
-                          </Badge>
-                          {person.degree ? (
-                            <Badge variant="outline">{person.degree}</Badge>
-                          ) : null}
-                          {person.title && person.title !== "无" ? (
-                            <Badge variant="outline">{person.title}</Badge>
-                          ) : null}
-                          {person.tutor_role && person.tutor_role !== "无" ? (
-                            <Badge variant="outline">{person.tutor_role}</Badge>
-                          ) : null}
-                          {renderEntitySourceBadges(
-                            person.as_of_time,
-                            person.provenance,
-                          )}
-                        </div>
-                        <p className="mt-1 text-[13px] text-muted-foreground">
-                          {[
-                            person.affiliation,
-                            person.admin_duty && person.admin_duty !== "无"
-                              ? person.admin_duty
-                              : null,
-                            person.research_specialty
-                              ? `研究专长：${person.research_specialty}`
-                              : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </p>
-                        <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
-                          {person.application_text}
-                        </p>
-                        {renderCardProvenanceSection("people", person)}
-                        {person.bio ? (
-                          <div className="mt-2">
+              filteredPeople.map((person, idx) => {
+                const checked = isItemSelected("person", person.id);
+                const hasSig = Boolean(person.has_signature);
+                return (
+                  <div
+                    key={person.id}
+                    className={cn(
+                      "rounded-lg border bg-card p-4 transition-colors hover:bg-muted/10",
+                      checked
+                        ? "border-foreground/40 bg-muted/5"
+                        : "border-border",
+                    )}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择成员 ${person.name}`}
+                          checked={checked}
+                          onChange={(e) => {
+                            const ev = e.nativeEvent as MouseEvent;
+                            handleRowCheckboxClick(
+                              "people",
+                              idx,
+                              currentTabBasketCandidates,
+                              e.target.checked,
+                              Boolean(ev?.shiftKey),
+                            );
+                          }}
+                          className="mt-1 h-4 w-4 rounded border-border"
+                        />
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
-                              className="text-[12px] font-medium text-muted-foreground underline hover:text-foreground"
-                              onClick={() =>
-                                setExpandedBioId((prev) =>
-                                  prev === person.id ? null : person.id,
-                                )
+                              onClick={() => void fetchDossierById(person.id)}
+                              className="text-left font-medium text-[15px] text-foreground underline-offset-4 hover:underline"
+                              title="点击打开个人全息档案袋"
+                            >
+                              {person.name}
+                            </button>
+                            <Badge
+                              variant={
+                                person.project_role === "applicant"
+                                  ? "secondary"
+                                  : "outline"
                               }
                             >
-                              {expandedBioId === person.id
-                                ? "收起学术简历"
-                                : "展开学术简历"}
-                            </button>
-                            {expandedBioId === person.id ? (
-                              <p className="mt-1.5 rounded-md bg-muted/40 p-2.5 font-serif text-[13px] leading-[1.6] text-foreground">
-                                {person.bio}
-                              </p>
+                              {person.project_role === "applicant"
+                                ? "课题负责人"
+                                : "项目组成员"}
+                            </Badge>
+                            {hasSig ? (
+                              <Badge
+                                variant="secondary"
+                                className="border-emerald-500/40 bg-emerald-500/15 text-[11px] font-normal text-emerald-800 dark:text-emerald-300"
+                              >
+                                {t.signatureExtractedBadge}
+                              </Badge>
+                            ) : (
+                              <Badge
+                                variant="outline"
+                                className="border-border bg-muted/20 text-[11px] font-normal text-muted-foreground"
+                              >
+                                {t.signatureMissingBadge}
+                              </Badge>
+                            )}
+                            {person.degree ? (
+                              <Badge variant="outline">{person.degree}</Badge>
                             ) : null}
+                            {person.title && person.title !== "无" ? (
+                              <Badge variant="outline">{person.title}</Badge>
+                            ) : null}
+                            {person.tutor_role && person.tutor_role !== "无" ? (
+                              <Badge variant="outline">
+                                {person.tutor_role}
+                              </Badge>
+                            ) : null}
+                            {renderEntitySourceBadges(
+                              person.as_of_time,
+                              person.provenance,
+                            )}
                           </div>
-                        ) : null}
+                          <p className="mt-1 text-[13px] text-muted-foreground">
+                            {[
+                              person.affiliation,
+                              person.admin_duty && person.admin_duty !== "无"
+                                ? person.admin_duty
+                                : null,
+                              person.research_specialty
+                                ? `研究专长：${person.research_specialty}`
+                                : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                          <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
+                            {person.application_text}
+                          </p>
+                          {renderCardProvenanceSection("people", person)}
+                          {person.bio ? (
+                            <div className="mt-2">
+                              <button
+                                type="button"
+                                className="text-[12px] font-medium text-muted-foreground underline hover:text-foreground"
+                                onClick={() =>
+                                  setExpandedBioId((prev) =>
+                                    prev === person.id ? null : person.id,
+                                  )
+                                }
+                              >
+                                {expandedBioId === person.id
+                                  ? "收起学术简历"
+                                  : "展开学术简历"}
+                              </button>
+                              {expandedBioId === person.id ? (
+                                <p className="mt-1.5 rounded-md bg-muted/40 p-2.5 font-serif text-[13px] leading-[1.6] text-foreground">
+                                  {person.bio}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {canEditEntity("people", person) ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() => void fetchDossierById(person.id)}
+                        >
+                          {t.dossierTitle}
+                        </Button>
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-7 px-2.5 text-[12px]"
-                          onClick={() => openEditModal("people", person)}
+                          disabled={!hasSig}
+                          title={
+                            hasSig
+                              ? `下载 ${person.name} 的电子签名`
+                              : "该成员尚未上传或提取电子签名"
+                          }
+                          onClick={() =>
+                            void handleDownloadPersonSignature(
+                              person.id,
+                              person.name,
+                              person.signature_mime,
+                              person.signature_sha256,
+                            )
+                          }
                         >
-                          {t.editAssetBtn}
+                          {t.downloadSignatureBtn}
                         </Button>
-                      ) : null}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2.5 text-[12px]"
-                        onClick={() =>
-                          copyToClipboard(person.application_text, person.id)
-                        }
-                      >
-                        {copiedId === person.id
-                          ? t.copiedGrantFormat
-                          : t.copyGrantFormat}
-                      </Button>
-                      {person.bio ? (
+                        {canEditEntity("people", person) ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            onClick={() => openEditModal("people", person)}
+                          >
+                            {t.editAssetBtn}
+                          </Button>
+                        ) : null}
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-7 px-2.5 text-[12px]"
                           onClick={() =>
-                            copyToClipboard(
-                              person.application_text_with_bio,
-                              `${person.id}-bio`,
+                            void copyToClipboard(
+                              person.application_text,
+                              person.id,
                             )
                           }
                         >
-                          {copiedId === `${person.id}-bio`
+                          {copiedId === person.id
                             ? t.copiedGrantFormat
-                            : "复制学术简历"}
+                            : t.copyGrantFormat}
                         </Button>
-                      ) : null}
+                        {person.bio ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            onClick={() =>
+                              void copyToClipboard(
+                                person.application_text_with_bio,
+                                `${person.id}-bio`,
+                              )
+                            }
+                          >
+                            {copiedId === `${person.id}-bio`
+                              ? t.copiedGrantFormat
+                              : "复制学术简历"}
+                          </Button>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         ) : activeTab === "projects" ? (
@@ -1548,24 +2764,38 @@ export default function LabAssetsPage() {
                 暂无匹配的承担项目记录。
               </p>
             ) : (
-              filteredProjects.map((proj) => {
+              filteredProjects.map((proj, idx) => {
                 const displayAppText = getProjectText(proj);
+                const checked = isItemSelected("project", proj.id);
+                const matchedPi = proj.pi_name
+                  ? personByNormalizedName.get(normalizeNameKey(proj.pi_name))
+                  : undefined;
                 return (
                   <div
                     key={proj.id}
-                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
+                    className={cn(
+                      "rounded-lg border bg-card p-4 transition-colors hover:bg-muted/10",
+                      checked
+                        ? "border-foreground/40 bg-muted/5"
+                        : "border-border",
+                    )}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="flex items-start gap-2.5">
                         <input
                           type="checkbox"
-                          checked={Boolean(selectedIds[proj.id])}
-                          onChange={(e) =>
-                            setSelectedIds((prev) => ({
-                              ...prev,
-                              [proj.id]: e.target.checked,
-                            }))
-                          }
+                          aria-label={`选择项目 ${proj.title}`}
+                          checked={checked}
+                          onChange={(e) => {
+                            const ev = e.nativeEvent as MouseEvent;
+                            handleRowCheckboxClick(
+                              "projects",
+                              idx,
+                              currentTabBasketCandidates,
+                              e.target.checked,
+                              Boolean(ev?.shiftKey),
+                            );
+                          }}
                           className="mt-1 h-4 w-4 rounded border-border"
                         />
                         <div>
@@ -1595,17 +2825,30 @@ export default function LabAssetsPage() {
                               proj.provenance,
                             )}
                           </div>
-                          <p className="mt-1 text-[13px] text-muted-foreground">
-                            {[
-                              proj.pi_name ? `负责人：${proj.pi_name}` : null,
-                              proj.funder,
-                              proj.start_date
-                                ? `立项：${proj.start_date.slice(0, 7)}`
-                                : null,
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[13px] text-muted-foreground">
+                            {proj.pi_name ? (
+                              matchedPi ? (
+                                <span>
+                                  负责人：
+                                  <button
+                                    type="button"
+                                    className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+                                    onClick={() =>
+                                      void fetchDossierById(matchedPi.id)
+                                    }
+                                  >
+                                    {proj.pi_name}
+                                  </button>
+                                </span>
+                              ) : (
+                                <span>负责人：{proj.pi_name}</span>
+                              )
+                            ) : null}
+                            {proj.funder ? <span>· {proj.funder}</span> : null}
+                            {proj.start_date ? (
+                              <span>· 立项：{proj.start_date.slice(0, 7)}</span>
+                            ) : null}
+                          </div>
                           <p className="mt-1.5 whitespace-pre-wrap font-serif text-[13px] text-foreground/90">
                             {displayAppText}
                           </p>
@@ -1628,7 +2871,7 @@ export default function LabAssetsPage() {
                           variant="outline"
                           className="h-7 px-2.5 text-[12px]"
                           onClick={() =>
-                            copyToClipboard(displayAppText, proj.id)
+                            void copyToClipboard(displayAppText, proj.id)
                           }
                         >
                           {copiedId === proj.id
@@ -1649,24 +2892,40 @@ export default function LabAssetsPage() {
                 暂无匹配的前期成果记录。
               </p>
             ) : (
-              filteredAchievements.map((ach) => {
+              filteredAchievements.map((ach, idx) => {
                 const displayAchText = getAchievementText(ach);
+                const checked = isItemSelected("achievement", ach.id);
+                const matchedAuthor = ach.first_author
+                  ? personByNormalizedName.get(
+                      normalizeNameKey(ach.first_author),
+                    )
+                  : undefined;
                 return (
                   <div
                     key={ach.id}
-                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
+                    className={cn(
+                      "rounded-lg border bg-card p-4 transition-colors hover:bg-muted/10",
+                      checked
+                        ? "border-foreground/40 bg-muted/5"
+                        : "border-border",
+                    )}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="flex items-start gap-2.5">
                         <input
                           type="checkbox"
-                          checked={Boolean(selectedIds[ach.id])}
-                          onChange={(e) =>
-                            setSelectedIds((prev) => ({
-                              ...prev,
-                              [ach.id]: e.target.checked,
-                            }))
-                          }
+                          aria-label={`选择成果 ${ach.title}`}
+                          checked={checked}
+                          onChange={(e) => {
+                            const ev = e.nativeEvent as MouseEvent;
+                            handleRowCheckboxClick(
+                              "achievements",
+                              idx,
+                              currentTabBasketCandidates,
+                              e.target.checked,
+                              Boolean(ev?.shiftKey),
+                            );
+                          }}
                           className="mt-1 h-4 w-4 rounded border-border"
                         />
                         <div>
@@ -1685,16 +2944,27 @@ export default function LabAssetsPage() {
                               ach.provenance,
                             )}
                           </div>
-                          <p className="mt-1 text-[13px] text-muted-foreground">
-                            {[
-                              ach.first_author
-                                ? `第一作者：${ach.first_author}`
-                                : null,
-                              ach.venue,
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[13px] text-muted-foreground">
+                            {ach.first_author ? (
+                              matchedAuthor ? (
+                                <span>
+                                  第一作者：
+                                  <button
+                                    type="button"
+                                    className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+                                    onClick={() =>
+                                      void fetchDossierById(matchedAuthor.id)
+                                    }
+                                  >
+                                    {ach.first_author}
+                                  </button>
+                                </span>
+                              ) : (
+                                <span>第一作者：{ach.first_author}</span>
+                              )
+                            ) : null}
+                            {ach.venue ? <span>· {ach.venue}</span> : null}
+                          </div>
                           <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
                             {displayAchText}
                           </p>
@@ -1717,7 +2987,7 @@ export default function LabAssetsPage() {
                           variant="outline"
                           className="h-7 px-2.5 text-[12px]"
                           onClick={() =>
-                            copyToClipboard(displayAchText, ach.id)
+                            void copyToClipboard(displayAchText, ach.id)
                           }
                         >
                           {copiedId === ach.id
@@ -1738,80 +3008,1115 @@ export default function LabAssetsPage() {
                 暂无匹配的设备与支撑条件记录。
               </p>
             ) : (
-              filteredFacilities.map((fac) => (
-                <div
-                  key={fac.id}
-                  className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="flex items-start gap-2.5">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selectedIds[fac.id])}
-                        onChange={(e) =>
-                          setSelectedIds((prev) => ({
-                            ...prev,
-                            [fac.id]: e.target.checked,
-                          }))
-                        }
-                        className="mt-1 h-4 w-4 rounded border-border"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">
-                            {fac.category === "compute"
-                              ? "算力设备"
-                              : "科研设备"}
-                          </Badge>
-                          <span className="font-medium text-[15px] text-foreground">
-                            {fac.name}
-                          </span>
-                          {fac.value_wan ? (
-                            <Badge variant="outline" className="font-mono">
-                              {fac.value_wan} 万元
+              filteredFacilities.map((fac, idx) => {
+                const checked = isItemSelected("facility", fac.id);
+                return (
+                  <div
+                    key={fac.id}
+                    className={cn(
+                      "rounded-lg border bg-card p-4 transition-colors hover:bg-muted/10",
+                      checked
+                        ? "border-foreground/40 bg-muted/5"
+                        : "border-border",
+                    )}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择设备 ${fac.name}`}
+                          checked={checked}
+                          onChange={(e) => {
+                            const ev = e.nativeEvent as MouseEvent;
+                            handleRowCheckboxClick(
+                              "facilities",
+                              idx,
+                              currentTabBasketCandidates,
+                              e.target.checked,
+                              Boolean(ev?.shiftKey),
+                            );
+                          }}
+                          className="mt-1 h-4 w-4 rounded border-border"
+                        />
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="secondary">
+                              {fac.category === "compute"
+                                ? "算力设备"
+                                : "科研设备"}
                             </Badge>
-                          ) : null}
-                          {renderEntitySourceBadges(
-                            fac.as_of_time,
-                            fac.provenance,
-                          )}
+                            <span className="font-medium text-[15px] text-foreground">
+                              {fac.name}
+                            </span>
+                            {fac.value_wan ? (
+                              <Badge variant="outline" className="font-mono">
+                                {fac.value_wan} 万元
+                              </Badge>
+                            ) : null}
+                            {renderEntitySourceBadges(
+                              fac.as_of_time,
+                              fac.provenance,
+                            )}
+                          </div>
+                          <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
+                            {fac.application_text}
+                          </p>
+                          {renderCardProvenanceSection("facilities", fac)}
                         </div>
-                        <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
-                          {fac.application_text}
-                        </p>
-                        {renderCardProvenanceSection("facilities", fac)}
                       </div>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {canEditEntity("facilities", fac) ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {canEditEntity("facilities", fac) ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            onClick={() => openEditModal("facilities", fac)}
+                          >
+                            {t.editAssetBtn}
+                          </Button>
+                        ) : null}
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-7 px-2.5 text-[12px]"
-                          onClick={() => openEditModal("facilities", fac)}
+                          onClick={() =>
+                            void copyToClipboard(fac.application_text, fac.id)
+                          }
                         >
-                          {t.editAssetBtn}
+                          {copiedId === fac.id
+                            ? t.copiedGrantFormat
+                            : t.copyGrantFormat}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* ===================================================================
+            Feature 1: Person-Centric Dossier Modal / Drawer ("个人全息档案袋")
+            =================================================================== */}
+        <Dialog
+          open={dossierOpen}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              closePersonDossier();
+            }
+          }}
+        >
+          <DialogContent
+            aria-labelledby="person-dossier-title"
+            className="max-w-3xl max-h-[90vh] overflow-y-auto"
+          >
+            <DialogHeader>
+              <div className="flex flex-wrap items-center justify-between gap-2 pr-6">
+                <DialogTitle id="person-dossier-title" className="text-[18px]">
+                  {dossier?.person
+                    ? `${dossier.person.name} · ${t.dossierTitle}`
+                    : t.dossierTitle}
+                </DialogTitle>
+                {people.length > 1 ? (
+                  <select
+                    aria-label="切换查看团队成员"
+                    value={dossierPersonId || ""}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        void fetchDossierById(e.target.value);
+                      }
+                    }}
+                    className="h-7 rounded-md border border-input bg-background px-2 text-[12px] text-foreground"
+                  >
+                    {people.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        切换成员：{p.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </div>
+              <DialogDescription>
+                汇聚成员个人电子签名、申报书标准简历以及按姓名确定性匹配的承担项目与前期成果。
+              </DialogDescription>
+            </DialogHeader>
+
+            {dossierLoading ? (
+              <div className="space-y-3 py-6 text-[13px] text-muted-foreground">
+                <p>正在读取个人全息档案袋…</p>
+                <div className="h-20 animate-pulse rounded-md bg-muted/40" />
+                <div className="h-28 animate-pulse rounded-md bg-muted/40" />
+              </div>
+            ) : dossierNotFound ? (
+              <div className="space-y-4 py-6 text-center text-[13px]">
+                <p role="alert" className="text-destructive font-medium">
+                  成员不存在或已删除
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={closePersonDossier}
+                >
+                  关闭
+                </Button>
+              </div>
+            ) : dossierError ? (
+              <div className="space-y-3 py-4 text-[13px]">
+                <p role="alert" className="text-destructive">
+                  {dossierError}
+                </p>
+                <div className="flex gap-2">
+                  {dossierPersonId ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void fetchDossierById(dossierPersonId)}
+                    >
+                      重试
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={closePersonDossier}
+                  >
+                    关闭
+                  </Button>
+                </div>
+              </div>
+            ) : dossier ? (
+              <div className="space-y-5 text-[13px]">
+                {/* 1. Header Metadata */}
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/20 px-3.5 py-2.5">
+                  <span className="font-semibold text-[15px] text-foreground">
+                    {dossier.person.name}
+                  </span>
+                  <Badge
+                    variant={
+                      dossier.person.project_role === "applicant"
+                        ? "secondary"
+                        : "outline"
+                    }
+                  >
+                    {dossier.person.project_role === "applicant"
+                      ? "课题负责人"
+                      : "项目组成员"}
+                  </Badge>
+                  {dossier.person.title && dossier.person.title !== "无" ? (
+                    <Badge variant="outline">{dossier.person.title}</Badge>
+                  ) : null}
+                  {dossier.person.degree ? (
+                    <Badge variant="outline">{dossier.person.degree}</Badge>
+                  ) : null}
+                  {dossier.person.affiliation || dossier.person.org ? (
+                    <span className="text-[12px] text-muted-foreground">
+                      {dossier.person.affiliation || dossier.person.org}
+                    </span>
+                  ) : null}
+                  {dossier.person.name_ambiguous ? (
+                    <Badge
+                      variant="outline"
+                      title="关联结果可能包含同名者"
+                      className="border-amber-500/50 bg-amber-500/15 text-[11px] text-amber-900 dark:text-amber-200"
+                    >
+                      存在同名成员（关联结果可能包含同名者）
+                    </Badge>
+                  ) : null}
+                </div>
+
+                {/* 2. Signature Card ("电子签名卡片") */}
+                <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-medium text-[14px] text-foreground">
+                        电子签名卡片
+                      </h3>
+                      {dossierHasSig ? (
+                        <>
+                          <Badge
+                            variant="secondary"
+                            className="border-emerald-500/40 bg-emerald-500/15 text-[11px] font-normal text-emerald-800 dark:text-emerald-300"
+                          >
+                            {t.signatureExtractedBadge}
+                          </Badge>
+                          <Badge
+                            variant="outline"
+                            className="text-[11px] font-normal text-muted-foreground"
+                          >
+                            {dossierSigSource === "upload"
+                              ? "来源：手动上传"
+                              : "来源：申报书导入"}
+                          </Badge>
+                          {dossierSigUpdatedAt ? (
+                            <span className="font-mono text-[11px] text-muted-foreground">
+                              更新于 {dossierSigUpdatedAt.slice(0, 10)}
+                            </span>
+                          ) : null}
+                        </>
+                      ) : (
+                        <Badge
+                          variant="outline"
+                          className="text-[11px] font-normal text-muted-foreground"
+                        >
+                          {t.signatureMissingBadge}
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {dossierHasSig ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() =>
+                            void handleDownloadPersonSignature(
+                              dossier.person.id,
+                              dossier.person.name,
+                              dossierSigMime,
+                              dossierSigSha,
+                            )
+                          }
+                        >
+                          {t.downloadSignatureBtn} (
+                          {dossier.person.name}-电子签名.
+                          {extFromMime(dossierSigMime)})
                         </Button>
                       ) : null}
+
+                      {/* Strictly omit edit buttons from DOM when can_edit is false (§6.2) */}
+                      {dossierCanEditSig ? (
+                        <>
+                          <input
+                            ref={sigFileInputRef}
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            className="hidden"
+                            onChange={(e) => void handleSignatureFileSelect(e)}
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            disabled={sigUploading}
+                            onClick={() => sigFileInputRef.current?.click()}
+                          >
+                            {sigUploading
+                              ? "正在上传…"
+                              : dossierHasSig
+                                ? t.replaceSignatureBtn
+                                : t.uploadSignatureBtn}
+                          </Button>
+                          {dossierHasSig ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2.5 text-[12px] text-destructive hover:text-destructive"
+                              disabled={sigDeleting}
+                              onClick={() => setSigConfirmDelete(true)}
+                            >
+                              {t.deleteSignatureBtn}
+                            </Button>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {sigError ? (
+                    <p role="alert" className="text-[12px] text-destructive">
+                      {sigError}
+                    </p>
+                  ) : null}
+
+                  {sigStatusMsg ? (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className="text-[12px] text-emerald-600"
+                    >
+                      {sigStatusMsg}
+                    </p>
+                  ) : null}
+
+                  {dossierCanEditSig && sigConfirmDelete ? (
+                    <div
+                      role="alert"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px]"
+                    >
+                      <span className="font-medium text-destructive">
+                        {t.deleteSignatureConfirm}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          onClick={() => setSigConfirmDelete(false)}
+                        >
+                          {t.cancel}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={sigDeleting}
+                          onClick={() => void handleConfirmDeleteSignature()}
+                        >
+                          {sigDeleting ? "正在删除…" : "确认删除签名"}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {dossierHasSig ? (
+                    <div className="flex items-center justify-center rounded-md border border-dashed border-border bg-white p-3">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={getPersonSignatureUrl(
+                          dossier.person.id,
+                          "inline",
+                          dossierSigSha,
+                        )}
+                        alt={`${dossier.person.name}的签名`}
+                        className="max-h-24 w-auto object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex h-20 items-center justify-center rounded-md border border-dashed border-border bg-muted/20 text-[12px] text-muted-foreground">
+                      暂无签名（支持 PNG / JPEG / WebP，≤ 2 MB）
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. Profile & Bio ("简介与学术简历") */}
+                <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-medium text-[14px] text-foreground">
+                        一行式申报书标准简介
+                      </h3>
                       <Button
+                        type="button"
                         size="sm"
                         variant="outline"
                         className="h-7 px-2.5 text-[12px]"
                         onClick={() =>
-                          copyToClipboard(fac.application_text, fac.id)
+                          void copyToClipboard(
+                            dossier.person.copy_text ||
+                              dossier.person.application_text,
+                            `dossier-copy-${dossier.person.id}`,
+                          )
                         }
                       >
-                        {copiedId === fac.id
-                          ? t.copiedGrantFormat
-                          : t.copyGrantFormat}
+                        {copiedId === `dossier-copy-${dossier.person.id}`
+                          ? "已复制"
+                          : "复制简介"}
                       </Button>
                     </div>
+                    <p className="rounded-md bg-muted/30 p-2.5 font-serif text-[13px] text-foreground">
+                      {dossier.person.copy_text ||
+                        dossier.person.application_text}
+                    </p>
+                  </div>
+
+                  {dossier.person.bio_text ||
+                  dossier.person.bio ||
+                  dossier.person.application_text_with_bio ? (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="font-medium text-[13px] text-foreground">
+                          个人学术简历全文
+                        </h4>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() =>
+                            void copyToClipboard(
+                              dossier.person.bio_text ||
+                                dossier.person.application_text_with_bio ||
+                                dossier.person.bio ||
+                                "",
+                              `dossier-bio-${dossier.person.id}`,
+                            )
+                          }
+                        >
+                          {copiedId === `dossier-bio-${dossier.person.id}`
+                            ? "已复制"
+                            : "复制学术简历"}
+                        </Button>
+                      </div>
+                      <p className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-muted/30 p-2.5 font-serif text-[12px] leading-relaxed text-foreground">
+                        {dossier.person.bio_text ||
+                          dossier.person.bio ||
+                          dossier.person.application_text_with_bio}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* 4. Associated Projects ("自动关联承担项目") */}
+                <div className="rounded-lg border border-border bg-card p-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-medium text-[14px] text-foreground">
+                      关联承担项目 (
+                      {dossier.counts?.projects ?? dossierProjects.length})
+                    </h3>
+                    {dossierProjects.length > 0 ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2.5 text-[12px]"
+                        onClick={() => {
+                          const nonAmbiguous = dossierProjects.filter(
+                            (p) => p.match !== "ambiguous",
+                          );
+                          const allChecked =
+                            nonAmbiguous.length > 0 &&
+                            nonAmbiguous.every(
+                              (p) => dossierCheckedProjects[p.id],
+                            );
+                          const next: Record<string, boolean> = {
+                            ...dossierCheckedProjects,
+                          };
+                          for (const p of nonAmbiguous) {
+                            next[p.id] = !allChecked;
+                          }
+                          setDossierCheckedProjects(next);
+                        }}
+                      >
+                        全选非同名项目
+                      </Button>
+                    ) : null}
+                  </div>
+
+                  {dossierProjects.length === 0 ? (
+                    <p className="text-[12px] text-muted-foreground">
+                      暂无自动关联的承担项目记录。
+                    </p>
+                  ) : (
+                    <div className="divide-y divide-border rounded-md border border-border">
+                      {dossierProjects.map((proj) => {
+                        const projCopy =
+                          proj.copy_text ||
+                          proj.application_text ||
+                          `《${proj.title}》`;
+                        return (
+                          <div
+                            key={proj.id}
+                            className="flex flex-wrap items-start justify-between gap-2 p-2.5"
+                          >
+                            <label className="flex flex-1 cursor-pointer items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(
+                                  dossierCheckedProjects[proj.id],
+                                )}
+                                onChange={(e) =>
+                                  setDossierCheckedProjects((prev) => ({
+                                    ...prev,
+                                    [proj.id]: e.target.checked,
+                                  }))
+                                }
+                                className="mt-1 h-4 w-4 rounded border-border"
+                              />
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <Badge
+                                    variant={
+                                      proj.relation === "pi" ||
+                                      proj.relation === "host"
+                                        ? "secondary"
+                                        : "outline"
+                                    }
+                                    className="text-[11px]"
+                                  >
+                                    {proj.relation === "pi" ||
+                                    proj.relation === "host"
+                                      ? "负责人"
+                                      : "参与"}
+                                  </Badge>
+                                  <span className="font-medium text-foreground">
+                                    《{proj.title}》
+                                  </span>
+                                  {proj.year ? (
+                                    <span className="font-mono text-[11px] text-muted-foreground">
+                                      ({proj.year})
+                                    </span>
+                                  ) : null}
+                                  {proj.match === "ambiguous" ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="border-amber-500/50 bg-amber-500/15 text-[10px] text-amber-900 dark:text-amber-200"
+                                    >
+                                      同名待核实
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                                <p className="font-serif text-[12px] text-muted-foreground">
+                                  {projCopy}
+                                </p>
+                              </div>
+                            </label>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[11px]"
+                              onClick={() =>
+                                void copyToClipboard(
+                                  projCopy,
+                                  `dossier-proj-${proj.id}`,
+                                )
+                              }
+                            >
+                              {copiedId === `dossier-proj-${proj.id}`
+                                ? "已复制"
+                                : "复制"}
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {dossier.truncated?.projects ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      仅显示最近 200 条，共 {dossier.counts?.projects ?? 200} 条
+                    </p>
+                  ) : null}
+                </div>
+
+                {/* 5. Associated Achievements ("自动关联前期成果") */}
+                <div className="rounded-lg border border-border bg-card p-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-medium text-[14px] text-foreground">
+                      关联前期成果 (
+                      {dossier.counts?.achievements ??
+                        dossier.counts?.outputs ??
+                        dossierAchievements.length}
+                      )
+                    </h3>
+                    {dossierAchievements.length > 0 ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2.5 text-[12px]"
+                        onClick={() => {
+                          const nonAmbiguous = dossierAchievements.filter(
+                            (a) => a.match !== "ambiguous",
+                          );
+                          const allChecked =
+                            nonAmbiguous.length > 0 &&
+                            nonAmbiguous.every(
+                              (a) => dossierCheckedAchievements[a.id],
+                            );
+                          const next: Record<string, boolean> = {
+                            ...dossierCheckedAchievements,
+                          };
+                          for (const a of nonAmbiguous) {
+                            next[a.id] = !allChecked;
+                          }
+                          setDossierCheckedAchievements(next);
+                        }}
+                      >
+                        全选非同名成果
+                      </Button>
+                    ) : null}
+                  </div>
+
+                  {dossierAchievements.length === 0 ? (
+                    <p className="text-[12px] text-muted-foreground">
+                      暂无自动关联的前期成果记录。
+                    </p>
+                  ) : (
+                    <div className="divide-y divide-border rounded-md border border-border">
+                      {dossierAchievements.map((ach) => {
+                        const achCopy =
+                          ach.copy_text ||
+                          ach.application_text ||
+                          `《${ach.title}》`;
+                        const relLabel =
+                          ach.relation === "first_author"
+                            ? "第一作者"
+                            : ach.author_position && ach.author_position > 1
+                              ? `第 ${ach.author_position} 作者`
+                              : "共同作者";
+                        return (
+                          <div
+                            key={ach.id}
+                            className="flex flex-wrap items-start justify-between gap-2 p-2.5"
+                          >
+                            <label className="flex flex-1 cursor-pointer items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(
+                                  dossierCheckedAchievements[ach.id],
+                                )}
+                                onChange={(e) =>
+                                  setDossierCheckedAchievements((prev) => ({
+                                    ...prev,
+                                    [ach.id]: e.target.checked,
+                                  }))
+                                }
+                                className="mt-1 h-4 w-4 rounded border-border"
+                              />
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <Badge
+                                    variant={
+                                      ach.relation === "first_author"
+                                        ? "secondary"
+                                        : "outline"
+                                    }
+                                    className="text-[11px]"
+                                  >
+                                    {relLabel}
+                                  </Badge>
+                                  <span className="font-medium text-foreground">
+                                    《{ach.title}》
+                                  </span>
+                                  {ach.year ? (
+                                    <span className="font-mono text-[11px] text-muted-foreground">
+                                      ({ach.year})
+                                    </span>
+                                  ) : null}
+                                  {ach.match === "ambiguous" ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="border-amber-500/50 bg-amber-500/15 text-[10px] text-amber-900 dark:text-amber-200"
+                                    >
+                                      同名待核实
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                                <p className="font-serif text-[12px] text-muted-foreground">
+                                  {achCopy}
+                                </p>
+                              </div>
+                            </label>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[11px]"
+                              onClick={() =>
+                                void copyToClipboard(
+                                  achCopy,
+                                  `dossier-ach-${ach.id}`,
+                                )
+                              }
+                            >
+                              {copiedId === `dossier-ach-${ach.id}`
+                                ? "已复制"
+                                : "复制"}
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {dossier.truncated?.achievements ||
+                  dossier.truncated?.outputs ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      仅显示最近 200 条，共{" "}
+                      {dossier.counts?.achievements ??
+                        dossier.counts?.outputs ??
+                        200}{" "}
+                      条
+                    </p>
+                  ) : null}
+                </div>
+
+                {/* 6. Dossier Footer Action Bar */}
+                <DialogFooter className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={handleAddPersonOnlyFromDossier}
+                    >
+                      将此人加入素材篮
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleAddCheckedDossierToBasket(false)}
+                    >
+                      将勾选加入素材篮
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => handleAddCheckedDossierToBasket(true)}
+                    >
+                      {t.addAllToBasketBtn}
+                    </Button>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={closePersonDossier}
+                  >
+                    关闭
+                  </Button>
+                </DialogFooter>
+              </div>
+            ) : null}
+          </DialogContent>
+        </Dialog>
+
+        {/* ===================================================================
+            Feature 2: Floating Bottom Proposal Reuse Basket ("写本子素材篮")
+            =================================================================== */}
+        <div
+          role="region"
+          aria-label={`写本子素材篮，${basketItems.length} 项`}
+          className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/85 shadow-lg"
+        >
+          <div className="mx-auto max-w-6xl px-4 py-2.5 space-y-2">
+            {/* Expandable Basket Item Ordering & Removal Panel */}
+            {basketPanelOpen ? (
+              <div className="rounded-lg border border-border bg-background p-3 space-y-2.5 max-h-64 overflow-y-auto">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-[13px] text-foreground">
+                      {t.reuseBasketTitle}清单 ({basketItems.length} /{" "}
+                      {BASKET_MAX_ITEMS})
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">
+                      支持上下调整导出顺序或单条移除
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                      签名包命名：
+                      <select
+                        value={basketOptions.naming}
+                        onChange={(e) =>
+                          updateBasketOption(
+                            "naming",
+                            e.target.value as BasketOptions["naming"],
+                          )
+                        }
+                        className="h-6 rounded border border-input bg-card px-1.5 text-[11px] text-foreground"
+                      >
+                        <option value="seq_name">01_姓名.ext (seq_name)</option>
+                        <option value="name">姓名.ext (name)</option>
+                        <option value="name_id">姓名_ID.ext (name_id)</option>
+                      </select>
+                    </label>
+                    {basketItems.length > 0 ? (
+                      basketConfirmClear ? (
+                        <div className="inline-flex items-center gap-1">
+                          <span className="text-[11px] text-destructive">
+                            确认清空？
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            className="h-6 px-2 text-[11px]"
+                            onClick={() => {
+                              updateBasketItems([]);
+                              setBasketConfirmClear(false);
+                              setStatusBanner("已清空写本子素材篮");
+                            }}
+                          >
+                            确定清空
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-[11px]"
+                            onClick={() => setBasketConfirmClear(false)}
+                          >
+                            {t.cancel}
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px] text-destructive"
+                          onClick={() => setBasketConfirmClear(true)}
+                        >
+                          清空素材篮
+                        </Button>
+                      )
+                    ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setBasketPanelOpen(false)}
+                    >
+                      收起清单
+                    </Button>
                   </div>
                 </div>
-              ))
-            )}
+
+                {basketItems.length === 0 ? (
+                  <p className="py-3 text-center text-[12px] text-muted-foreground">
+                    素材篮为空。请在上方 4 个标签页或个人全息档案袋中勾选需要复用的成员、项目、成果或设备。
+                  </p>
+                ) : (
+                  <div className="divide-y divide-border rounded border border-border text-[12px]">
+                    {basketItems.map((it, idx) => (
+                      <div
+                        key={basketKey(it.kind, it.id)}
+                        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <span className="font-mono text-[11px] text-muted-foreground">
+                            #{idx + 1}
+                          </span>
+                          <Badge variant="outline" className="text-[10px]">
+                            {BASKET_KIND_LABELS[it.kind]}
+                          </Badge>
+                          <span className="truncate font-medium text-foreground">
+                            {it.label}
+                          </span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1.5 text-[11px]"
+                            disabled={idx === 0}
+                            aria-label={`上移 ${it.label}`}
+                            onClick={() => moveBasketItem(idx, -1)}
+                          >
+                            ↑
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1.5 text-[11px]"
+                            disabled={idx === basketItems.length - 1}
+                            aria-label={`下移 ${it.label}`}
+                            onClick={() => moveBasketItem(idx, 1)}
+                          >
+                            ↓
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1.5 text-[11px] text-destructive"
+                            aria-label={`移除 ${it.label}`}
+                            onClick={() =>
+                              removeItemsFromBasket(
+                                new Set([basketKey(it.kind, it.id)]),
+                              )
+                            }
+                          >
+                            ✕
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/* Main Bottom Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              {/* Left: Summary & Toggle Drawer Button */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={basketItems.length > 0 ? "secondary" : "outline"}
+                  aria-label={`写本子素材篮，${basketItems.length} 项`}
+                  className="h-8 px-2.5 text-[12px] font-medium"
+                  onClick={() => setBasketPanelOpen((prev) => !prev)}
+                >
+                  🧺 {t.reuseBasketTitle} ({basketItems.length})
+                  <span className="ml-1 text-[11px] opacity-80">
+                    {basketPanelOpen ? "▾" : "▴"}
+                  </span>
+                </Button>
+                <span className="text-[12px] font-medium text-foreground">
+                  已选 {basketCounts.person} 人 · {basketCounts.project} 项项目
+                  · {basketCounts.achievement} 篇成果 · {basketCounts.facility}{" "}
+                  项条件
+                </span>
+              </div>
+
+              {/* Center: Formatting Options */}
+              <div className="flex flex-wrap items-center gap-3 text-[12px]">
+                <label className="flex items-center gap-1 text-foreground">
+                  <span className="text-muted-foreground">编号样式:</span>
+                  <select
+                    aria-label="编号样式"
+                    value={basketOptions.numbering}
+                    onChange={(e) =>
+                      updateBasketOption(
+                        "numbering",
+                        e.target.value as BasketOptions["numbering"],
+                      )
+                    }
+                    className="h-7 rounded border border-input bg-background px-1.5 text-[12px] text-foreground"
+                  >
+                    <option value="bracket">[1]</option>
+                    <option value="arabic">1.</option>
+                    <option value="none">无</option>
+                  </select>
+                </label>
+
+                <label className="flex cursor-pointer items-center gap-1 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={basketOptions.group_by_kind}
+                    onChange={(e) =>
+                      updateBasketOption("group_by_kind", e.target.checked)
+                    }
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  按类别分组
+                </label>
+
+                <label className="flex cursor-pointer items-center gap-1 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={
+                      basketOptions.with_support || basketOptions.with_relation
+                    }
+                    onChange={(e) => {
+                      const nextOpts: BasketOptions = {
+                        ...basketOptions,
+                        with_support: e.target.checked,
+                        with_relation: e.target.checked,
+                      };
+                      setBasketOptions(nextOpts);
+                      persistBasketToStorage(basketItems, nextOpts);
+                    }}
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  附带支撑/关系说明
+                </label>
+
+                <label className="flex cursor-pointer items-center gap-1 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={basketOptions.include_signatures}
+                    onChange={(e) =>
+                      updateBasketOption("include_signatures", e.target.checked)
+                    }
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  Word 附带成员签名表
+                </label>
+              </div>
+
+              {/* Right: 3 Action Buttons */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-3 text-[12px]"
+                  disabled={
+                    basketItems.length === 0 || basketActionLoading !== null
+                  }
+                  onClick={() => void handleBasketBatchCopy()}
+                >
+                  {basketActionLoading === "copy"
+                    ? "正在复制…"
+                    : t.batchCopyBasketBtn}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-3 text-[12px]"
+                  disabled={
+                    basketCounts.person === 0 || basketActionLoading !== null
+                  }
+                  title={
+                    basketCounts.person === 0
+                      ? "素材篮中没有成员"
+                      : `打包下载所选 ${basketCounts.person} 名成员的电子签名 ZIP`
+                  }
+                  onClick={() => void handleBasketDownloadSignaturesZip()}
+                >
+                  {basketActionLoading === "zip"
+                    ? "正在打包…"
+                    : t.downloadSignaturesZipBtn}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-8 px-3 text-[12px]"
+                  disabled={
+                    basketItems.length === 0 || basketActionLoading !== null
+                  }
+                  onClick={() => void handleBasketExportSelectedDocx()}
+                >
+                  {basketActionLoading === "docx"
+                    ? "正在导出…"
+                    : t.exportSelectedDocxBtn}
+                </Button>
+              </div>
+            </div>
           </div>
-        )}
+        </div>
+
+        {/* Clipboard Fallback Dialog (§6.4) */}
+        <Dialog
+          open={clipboardFallbackText !== null}
+          onOpenChange={(next) => {
+            if (!next) setClipboardFallbackText(null);
+          }}
+        >
+          <DialogContent className="max-w-xl">
+            <DialogHeader>
+              <DialogTitle>手动复制格式文本（请按 Ctrl/⌘+C）</DialogTitle>
+              <DialogDescription>
+                当前浏览器环境未授予剪贴板直接写入权限，已为您全选以下文本，请按
+                Ctrl+C 或 ⌘+C 复制。
+              </DialogDescription>
+            </DialogHeader>
+            <textarea
+              readOnly
+              rows={10}
+              value={clipboardFallbackText || ""}
+              onFocus={(e) => e.currentTarget.select()}
+              className="w-full rounded-md border border-input bg-muted/30 p-3 font-mono text-[12px] text-foreground"
+            />
+            <DialogFooter>
+              <Button
+                type="button"
+                onClick={() => setClipboardFallbackText(null)}
+              >
+                完成并关闭
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Phase 2 Online Edit & Field Provenance Restore Dialog */}
         <Dialog
@@ -1843,7 +4148,10 @@ export default function LabAssetsPage() {
             ) : null}
 
             {editItem ? (
-              <form onSubmit={handleSaveEdit} className="space-y-3.5 text-[13px]">
+              <form
+                onSubmit={handleSaveEdit}
+                className="space-y-3.5 text-[13px]"
+              >
                 {EDITABLE_FIELDS[editType].map((fieldCfg) => {
                   if (fieldCfg.adminOnly && me?.role !== "admin") return null;
                   const prov = editItem.provenance?.[fieldCfg.key];
@@ -1980,9 +4288,9 @@ export default function LabAssetsPage() {
               </DialogTitle>
               <DialogDescription>
                 {wizardStep === 1
-                  ? "上传既往项目申报书（仅支持 .docx）。系统会自动剥离全部身份证号与手机号，提取成员、项目、成果与设备。"
+                  ? "上传既往项目申报书（仅支持 .docx）。系统会自动剥离全部身份证号与手机号，提取成员、电子签名、项目、成果与设备。"
                   : wizardStep === 2
-                    ? "核对三级登录标识（T1 学工号 / T2 姓名全拼 / T3 姓名全拼+邮箱）。所有新建账号角色固定为普通成员 (member)。"
+                    ? "核对三级登录标识（T1 学工号 / T2 姓名全拼 / T3 姓名全拼+邮箱）与提取到的电子签名。所有新建账号角色固定为普通成员 (member)。"
                     : "全组账号与课题组资料库已落盘，并已同步写入 RAG 知识库。"}
               </DialogDescription>
             </DialogHeader>
@@ -2064,7 +4372,17 @@ export default function LabAssetsPage() {
                   <span className="font-mono font-semibold">
                     {importJob.preview.facilities?.length ?? 0}
                   </span>{" "}
-                  项。
+                  项
+                  {importJob.preview.signatures?.summary ? (
+                    <>
+                      、提取绑定电子签名{" "}
+                      <span className="font-mono font-semibold">
+                        {importJob.preview.signatures.summary.bound ?? 0}
+                      </span>{" "}
+                      枚
+                    </>
+                  ) : null}
+                  。
                 </div>
 
                 {/* Spec §2.4 & §8.3.2 Default password non-dismissible warning */}
@@ -2205,6 +4523,90 @@ export default function LabAssetsPage() {
                     </tbody>
                   </table>
                 </div>
+
+                {/* Spec §6.6 Extracted Signatures Preview Table */}
+                {importJob.preview.signatures?.items &&
+                importJob.preview.signatures.items.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <h4 className="font-medium text-[12px] text-foreground">
+                      抽取到的成员电子签名（取消勾选将跳过入库）
+                    </h4>
+                    <div className="overflow-x-auto rounded-md border border-border">
+                      <table className="w-full text-left text-[12px]">
+                        <thead className="border-b border-border bg-muted/40 text-muted-foreground">
+                          <tr>
+                            <th className="px-2.5 py-2">入库</th>
+                            <th className="px-2.5 py-2">姓名</th>
+                            <th className="px-2.5 py-2">角色</th>
+                            <th className="px-2.5 py-2">状态</th>
+                            <th className="px-2.5 py-2">尺寸 / 格式</th>
+                            <th className="px-2.5 py-2">告警</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {importJob.preview.signatures.items.map((sig) => {
+                            const isSkipped = Boolean(
+                              skipSignatureIds[sig.sig_id],
+                            );
+                            return (
+                              <tr key={sig.sig_id}>
+                                <td className="px-2.5 py-1.5">
+                                  <input
+                                    type="checkbox"
+                                    disabled={sig.status !== "bound"}
+                                    checked={
+                                      sig.status === "bound" && !isSkipped
+                                    }
+                                    onChange={(e) =>
+                                      setSkipSignatureIds((prev) => ({
+                                        ...prev,
+                                        [sig.sig_id]: !e.target.checked,
+                                      }))
+                                    }
+                                  />
+                                </td>
+                                <td className="px-2.5 py-1.5 font-medium text-foreground">
+                                  {sig.person_name || "—"}
+                                </td>
+                                <td className="px-2.5 py-1.5">
+                                  {sig.role === "pi" ? "负责人" : "成员"}
+                                </td>
+                                <td className="px-2.5 py-1.5">
+                                  <Badge
+                                    variant={
+                                      sig.status === "bound"
+                                        ? "secondary"
+                                        : "outline"
+                                    }
+                                  >
+                                    {sig.status === "bound"
+                                      ? "已绑定"
+                                      : sig.status === "ambiguous"
+                                        ? "存在歧义"
+                                        : "已拒绝"}
+                                  </Badge>
+                                </td>
+                                <td className="px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
+                                  {sig.width && sig.height
+                                    ? `${sig.width}×${sig.height}`
+                                    : "—"}{" "}
+                                  {sig.mime ? `(${sig.mime})` : ""}
+                                </td>
+                                <td className="px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                                  {(sig.warnings || []).length > 0
+                                    ? (sig.warnings || [])
+                                        .map((w) => mapLabErrorCode(w))
+                                        .join("；")
+                                    : "无"}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
 
                 <DialogFooter>
                   <Button

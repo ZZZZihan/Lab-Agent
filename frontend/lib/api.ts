@@ -99,12 +99,22 @@ export class ApiError extends Error {
 
 async function parseError(response: Response): Promise<ApiError> {
   try {
-    const body = (await response.json()) as { error?: { code?: string; message?: string } };
-    return new ApiError(
-      response.status,
-      body.error?.code || "request_failed",
-      body.error?.message || response.statusText,
-    );
+    const body = (await response.json()) as {
+      error?: { code?: string; message?: string };
+      detail?: { code?: string; message?: string } | string;
+    };
+    const detailObj =
+      body.detail && typeof body.detail === "object" ? body.detail : undefined;
+    const detailStr =
+      typeof body.detail === "string" ? body.detail : undefined;
+    const code =
+      body.error?.code || detailObj?.code || "request_failed";
+    const message =
+      body.error?.message ||
+      detailObj?.message ||
+      detailStr ||
+      response.statusText;
+    return new ApiError(response.status, code, message);
   } catch {
     return new ApiError(response.status, "request_failed", response.statusText);
   }
@@ -131,6 +141,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       window.location.assign("/change-password");
     }
     throw err;
+  }
+  if (response.status === 204) {
+    return undefined as T;
   }
   return (await response.json()) as T;
 }
@@ -199,6 +212,16 @@ export type LabPersonItem = {
   source_import_id?: string | null;
   application_text: string;
   application_text_with_bio: string;
+  copy_text?: string;
+  bio_text?: string | null;
+  has_signature?: boolean;
+  signature_mime?: string | null;
+  signature_sha256?: string | null;
+  signature_updated_at?: string | null;
+  signature_source?: "docx_import" | "upload" | string | null;
+  signature_url?: string | null;
+  name_ambiguous?: boolean;
+  can_edit?: boolean;
   provenance?: Record<string, FieldProvenanceSummary>;
 };
 
@@ -377,6 +400,30 @@ export type ImportJobResponse = {
       spec?: string | null;
       value_wan?: string | null;
     }>;
+    signatures?: {
+      summary?: {
+        found_images?: number;
+        bound?: number;
+        rejected?: number;
+        ambiguous?: number;
+        warnings?: number;
+      };
+      items?: Array<{
+        sig_id: string;
+        role: "pi" | "member" | string;
+        person_ref?: string | null;
+        person_key?: string | null;
+        person_name?: string | null;
+        status: "bound" | "rejected" | "ambiguous" | string;
+        sha256?: string | null;
+        mime?: string | null;
+        width?: number | null;
+        height?: number | null;
+        size?: number;
+        warnings?: string[];
+      }>;
+      warnings?: Array<string | { code: string; message?: string }>;
+    };
     warnings?: Array<{ code: string; count?: number; section?: string }>;
   };
 };
@@ -400,6 +447,14 @@ export type ProvisionResult = {
     projects_skipped: number;
     facilities_inserted: number;
     facilities_skipped: number;
+  };
+  signature_result?: {
+    written: number;
+    unchanged: number;
+    kept_upload: number;
+    skipped: number;
+    rejected: number;
+    items?: Array<{ sig_id: string; person_id?: string | number; outcome: string }>;
   };
   roster_text: string;
   roster_csv: string;
@@ -610,4 +665,396 @@ export async function reindexLabAssets(): Promise<{
     rag_doc_key: string;
     rag_document_id?: string | null;
   }>("lab/reindex", { method: "POST" });
+}
+
+// ============================================================================
+// Spec v2.2: Person Dossier, Electronic Signatures & Proposal Reuse Basket API
+// ============================================================================
+
+export type DossierProjectItem = {
+  id: string;
+  title: string;
+  year?: number | null;
+  funder?: string | null;
+  grant_no?: string | null;
+  pi_name?: string | null;
+  status?: string;
+  status_label?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  relation: "pi" | "participant" | "host" | string;
+  match?: "exact" | "ambiguous" | string;
+  copy_text?: string;
+  application_text?: string;
+  application_text_with_rel?: string;
+};
+
+export type DossierAchievementItem = {
+  id: string;
+  title: string;
+  kind?: string;
+  kind_label?: string;
+  venue?: string | null;
+  year?: number | null;
+  relation: "first_author" | "coauthor" | string;
+  author_position?: number | null;
+  match?: "exact" | "ambiguous" | string;
+  copy_text?: string;
+  application_text?: string;
+  application_text_plain?: string;
+};
+
+export type PersonDossierResponse = {
+  person: LabPersonItem & {
+    org?: string | null;
+  };
+  can_edit?: boolean;
+  signature?: {
+    has_signature?: boolean;
+    can_edit?: boolean;
+    url?: string | null;
+    sha256?: string | null;
+    signature_sha256?: string | null;
+    mime?: string | null;
+    signature_mime?: string | null;
+    updated_at?: string | null;
+    signature_updated_at?: string | null;
+    source?: "docx_import" | "upload" | string | null;
+    signature_source?: "docx_import" | "upload" | string | null;
+  };
+  projects: DossierProjectItem[];
+  achievements?: DossierAchievementItem[];
+  outputs?: DossierAchievementItem[];
+  counts?: {
+    projects: number;
+    outputs?: number;
+    achievements?: number;
+  };
+  truncated?: {
+    projects: boolean;
+    outputs?: boolean;
+    achievements?: boolean;
+  };
+};
+
+export type SignatureUploadResponse = {
+  person_id: string;
+  has_signature: boolean;
+  signature_sha256: string;
+  signature_mime: string;
+  signature_updated_at: string;
+  signature_source: "upload" | "docx_import" | string;
+  width?: number;
+  height?: number;
+  unchanged?: boolean;
+};
+
+export type BasketEntityKind = "person" | "project" | "achievement" | "facility";
+
+export type BasketItemRef = {
+  kind: BasketEntityKind | string;
+  id: string;
+};
+
+export type BasketItem = {
+  kind: BasketEntityKind;
+  id: string;
+  label: string;
+};
+
+export type BasketOptions = {
+  with_support: boolean;
+  with_relation: boolean;
+  numbering: "bracket" | "arabic" | "none";
+  group_by_kind: boolean;
+  include_signatures: boolean;
+  naming: "seq_name" | "name" | "name_id";
+};
+
+export type BasketState = {
+  version: 1;
+  items: BasketItem[];
+  options: BasketOptions;
+};
+
+export type BatchFormatOptions = {
+  with_support?: boolean;
+  with_relation?: boolean;
+  include_bio?: boolean;
+  numbering?: "none" | "arabic" | "bracket";
+  separator?: "blank_line" | "newline";
+  group_by_kind?: boolean;
+};
+
+export type BatchFormatResponse = {
+  text: string;
+  lines?: string[];
+  count?: number;
+  items?: Array<{
+    kind: string;
+    id: string;
+    ok: boolean;
+    text?: string;
+    error?: string;
+  }>;
+  stats?: {
+    requested: number;
+    deduplicated: number;
+    ok: number;
+    missing: number;
+  };
+};
+
+export type ExportSelectedOptions = {
+  with_support?: boolean;
+  with_relation?: boolean;
+  include_bio?: boolean;
+  numbering?: "none" | "arabic" | "bracket";
+  group_by_kind?: boolean;
+  include_signatures?: boolean;
+  signature_width_cm?: number;
+  title?: string;
+};
+
+export type BlobDownloadResult = {
+  blob: Blob;
+  filename: string;
+  includedCount: number | null;
+  missingCount: number | null;
+};
+
+const LAB_ERROR_MESSAGES: Record<string, string> = {
+  SIGNATURE_TOO_LARGE: "签名图片需小于 2 MB",
+  SIGNATURE_REJECTED_FORMAT: "仅支持 PNG / JPEG / WebP 格式",
+  SIGNATURE_CORRUPT: "图片文件已损坏",
+  SIGNATURE_BAD_DIMENSIONS: "图片尺寸不符合要求（8–6000 像素）",
+  FORBIDDEN_SIGNATURE_EDIT: "仅本人或管理员可修改签名",
+  SIGNATURE_PRECONDITION_FAILED: "签名已被他人更新，请刷新",
+  SIGNATURE_NOT_FOUND: "该成员暂无签名",
+  PERSON_NOT_FOUND: "成员不存在或已删除",
+  SIGNATURE_FILE_MISSING: "请选择要上传的签名图片文件",
+  BASKET_EMPTY: "素材篮为空",
+  BASKET_TOO_LARGE: "素材篮超出上限（最多 200 项）",
+  NO_SIGNATURES_SELECTED: "所选成员均无签名",
+  BASKET_ALL_MISSING: "所选条目均已不存在",
+  FORMAT_KIND_UNSUPPORTED: "包含不支持的素材类型",
+  SIG_WEBP_NOT_EMBEDDED: "部分签名为 WebP 格式，未嵌入 Word，请使用签名 ZIP",
+  SIG_NOT_UPLOADED: "部分成员未上传签名",
+  SIG_CORRUPT: "部分签名损坏",
+  SIG_EXPORT_QUOTA: "超出导出体积上限，部分签名未嵌入",
+  ITEM_NOT_FOUND: "部分条目已不存在",
+  SIG_COLUMN_FALLBACK: "未找到“签字”表头，已按最后一列识别签名",
+  SIG_INVALID_IMAGE: "签名图片格式或尺寸校验未通过",
+  SIG_TOO_LARGE: "签名图片超过 2 MB，已跳过",
+  SIG_MULTIPLE_IN_CELL: "同一签名格内存在多张图片，未自动绑定",
+  SIG_ORPHAN: "签名列存在图片但该行无姓名，未绑定",
+  SIG_PI_AMBIGUOUS: "负责人签章区图片无法唯一确定",
+  SIG_PI_CONFLICT: "负责人成员行签名与签章区签名不一致，已保留成员行签名",
+  SIG_DUPLICATE_HASH: "同一签名图片被绑定到多名成员，请核对",
+  SIG_MISSING_PART: "文档内引用的签名图片部件缺失",
+  SIG_IMPORT_QUOTA: "超出单次导入签名图片配额上限",
+  SIG_PERSON_AMBIGUOUS: "存在同名成员，签名已跳过自动覆盖",
+};
+
+export function mapLabErrorCode(
+  code?: string | null,
+  fallbackMessage?: string,
+): string {
+  if (!code) return fallbackMessage || "操作失败，请稍后重试";
+  const upper = code.trim().toUpperCase();
+  if (LAB_ERROR_MESSAGES[upper]) return LAB_ERROR_MESSAGES[upper];
+  if (fallbackMessage && fallbackMessage !== code && fallbackMessage !== "request_failed") {
+    return fallbackMessage;
+  }
+  return `操作失败（${code}），请稍后重试`;
+}
+
+export function parseFilenameFromDisposition(
+  disposition: string | null,
+  fallback: string,
+): string {
+  if (!disposition) return fallback;
+  const starMatch = disposition.match(/filename\*\s*=\s*UTF-8''([^;\s]+)/i);
+  if (starMatch && starMatch[1]) {
+    try {
+      return decodeURIComponent(starMatch[1].replace(/^"|"$/g, ""));
+    } catch {
+      return starMatch[1];
+    }
+  }
+  const plainMatch = disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
+  if (plainMatch && plainMatch[1]) {
+    return plainMatch[1].trim();
+  }
+  return fallback;
+}
+
+export async function getPersonDossier(
+  personId: string,
+  signal?: AbortSignal,
+): Promise<PersonDossierResponse> {
+  return api<PersonDossierResponse>(
+    `lab/people/${encodeURIComponent(personId)}/dossier`,
+    signal ? { signal } : undefined,
+  );
+}
+
+export function getPersonSignatureUrl(
+  personId: string,
+  disposition: "inline" | "attachment" = "inline",
+  sha256?: string | null,
+): string {
+  const params = new URLSearchParams({ disposition });
+  if (sha256) {
+    params.set("v", sha256);
+  }
+  return `/api/backend/lab/people/${encodeURIComponent(personId)}/signature?${params.toString()}`;
+}
+
+export async function uploadPersonSignature(
+  personId: string,
+  file: File,
+  ifMatchSha?: string | null,
+): Promise<SignatureUploadResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  const headers: Record<string, string> = {};
+  if (ifMatchSha) {
+    const cleanSha = ifMatchSha.replace(/^"|"$/g, "");
+    headers["If-Match"] = `"${cleanSha}"`;
+  }
+  return api<SignatureUploadResponse>(
+    `lab/people/${encodeURIComponent(personId)}/signature`,
+    {
+      method: "PUT",
+      headers,
+      body: form,
+    },
+  );
+}
+
+export async function deletePersonSignature(
+  personId: string,
+  ifMatchSha?: string | null,
+): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (ifMatchSha) {
+    const cleanSha = ifMatchSha.replace(/^"|"$/g, "");
+    headers["If-Match"] = `"${cleanSha}"`;
+  }
+  await api<void>(`lab/people/${encodeURIComponent(personId)}/signature`, {
+    method: "DELETE",
+    headers,
+  });
+}
+
+export async function formatLabBatch(
+  items: BasketItemRef[],
+  options?: BatchFormatOptions,
+): Promise<BatchFormatResponse> {
+  const normalizedOptions: BatchFormatOptions = {
+    with_support: options?.with_support ?? true,
+    with_relation: options?.with_relation ?? false,
+    include_bio: options?.include_bio ?? false,
+    numbering: options?.numbering ?? "bracket",
+    separator: options?.separator ?? "blank_line",
+    group_by_kind: options?.group_by_kind ?? false,
+  };
+  return api<BatchFormatResponse>("lab/format/batch", {
+    method: "POST",
+    body: JSON.stringify({
+      items: items.map((it) => ({ kind: it.kind, id: it.id })),
+      options: normalizedOptions,
+    }),
+    signal:
+      typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+        ? AbortSignal.timeout(60000)
+        : undefined,
+  });
+}
+
+export async function downloadSignaturesZip(
+  personIds: string[],
+  naming: "seq_name" | "name" | "name_id" = "seq_name",
+  includeManifest: boolean = true,
+): Promise<BlobDownloadResult> {
+  const response = await fetch("/api/backend/lab/people/signatures:zip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      person_ids: personIds,
+      naming,
+      include_manifest: includeManifest,
+    }),
+    cache: "no-store",
+    signal:
+      typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+        ? AbortSignal.timeout(60000)
+        : undefined,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `课题组签名_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.zip`,
+  );
+  const incRaw = response.headers.get("x-signatures-included");
+  const missRaw = response.headers.get("x-signatures-missing");
+  return {
+    blob,
+    filename,
+    includedCount: incRaw !== null && incRaw !== "" ? Number(incRaw) : null,
+    missingCount: missRaw !== null && missRaw !== "" ? Number(missRaw) : null,
+  };
+}
+
+export async function exportSelectedLabAssets(
+  items: BasketItemRef[],
+  options?: ExportSelectedOptions,
+): Promise<BlobDownloadResult & { warnings: string[] }> {
+  const normalizedOptions: ExportSelectedOptions = {
+    with_support: options?.with_support ?? true,
+    with_relation: options?.with_relation ?? false,
+    include_bio: options?.include_bio ?? false,
+    numbering: options?.numbering ?? "bracket",
+    group_by_kind: options?.group_by_kind ?? true,
+    include_signatures: options?.include_signatures ?? true,
+    signature_width_cm: options?.signature_width_cm ?? 3.0,
+    title: options?.title ?? "写本子素材汇总",
+  };
+  const response = await fetch("/api/backend/lab/export:selected", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: items.map((it) => ({ kind: it.kind, id: it.id })),
+      options: normalizedOptions,
+    }),
+    cache: "no-store",
+    signal:
+      typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
+        ? AbortSignal.timeout(60000)
+        : undefined,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `写本子素材_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.docx`,
+  );
+  const warnHeader = response.headers.get("x-export-warnings") || "";
+  const warnings = warnHeader
+    .split(",")
+    .map((w) => w.trim())
+    .filter(Boolean);
+  return {
+    blob,
+    filename,
+    includedCount: null,
+    missingCount: null,
+    warnings,
+  };
 }
