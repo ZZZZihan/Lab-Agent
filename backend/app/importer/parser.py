@@ -16,7 +16,7 @@ from app.importer.reader import (
     normalize_label,
     validate_and_load_docx,
 )
-from app.models import User
+from app.models import LabPerson, User
 
 PARSER_VERSION = "v2.1-hybrid"
 
@@ -102,6 +102,7 @@ def parse_proposal_docx(
     raw_bytes: bytes,
     *,
     existing_users: list[User] | None = None,
+    existing_people: list[LabPerson] | None = None,
     as_of_time_override: date | None = None,
     max_file_mb: int = 20,
     max_uncompressed_mb: int = 50,
@@ -154,7 +155,11 @@ def parse_proposal_docx(
                 person["bio"] = bio
                 break
 
-    assign_people_identities(people, existing_users=existing_users)
+    assign_people_identities(
+        people,
+        existing_users=existing_users,
+        existing_people=existing_people,
+    )
 
     facilities, fac_pii = _extract_facilities(grids)
     pii_dropped += fac_pii

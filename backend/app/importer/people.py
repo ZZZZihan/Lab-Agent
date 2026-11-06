@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 
 from pypinyin import Style, lazy_pinyin
 
 from app.importer.fingerprint import person_fp
 from app.importer.pii import is_pii_id_or_phone
-from app.models import User
+from app.models import LabPerson, User
 
 T1_CERT_RE = re.compile(r"^(?=.*\d)[a-z0-9]{6,12}$")
 LOGIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
@@ -114,9 +115,11 @@ def is_valid_login_name(login_name: str) -> bool:
 def assign_people_identities(
     people: list[dict[str, object]],
     existing_users: list[User] | None = None,
+    existing_people: list[LabPerson] | None = None,
 ) -> None:
     """Populate `tier`, `login_name`, `email`, `fingerprint`, `match`, `warnings` in-place."""
     users = existing_users or []
+    users_by_id: dict[uuid.UUID, User] = {u.id: u for u in users}
     by_email: dict[str, User] = {
         u.email.lower(): u for u in users if u.email is not None and u.email.strip()
     }
@@ -125,7 +128,13 @@ def assign_people_identities(
         for u in users
         if u.login_name is not None and u.login_name.strip()
     }
+    by_fp: dict[str, User] = {}
+    for lp in existing_people or []:
+        if lp.user_id is not None and lp.user_id in users_by_id and lp.entity_fingerprint:
+            by_fp[lp.entity_fingerprint] = users_by_id[lp.user_id]
+
     used_logins: set[str] = set(RESERVED_LOGIN_NAMES) | set(by_login.keys())
+    used_matched_user_ids: set[uuid.UUID] = set()
 
     for idx, person in enumerate(people, start=1):
         person.setdefault("key", f"p{idx}")
@@ -140,18 +149,32 @@ def assign_people_identities(
             cert=raw_cert,
             email=raw_email,
         )
-        existing_warnings = list(person.get("warnings") or [])  # type: ignore[call-overload]
+        existing_warnings = [
+            w
+            for w in list(person.get("warnings") or [])  # type: ignore[call-overload]
+            if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED", "LOGIN_NAME_SUFFIXED")
+        ]
         for w in item_warnings:
             if w not in existing_warnings:
                 existing_warnings.append(w)
 
         person["tier"] = tier
         person["email"] = valid_email
+        affiliation = str(person.get("affiliation") or "").strip() or None
+        candidate_fp = person_fp(
+            tier=tier,
+            login_name=base_login if tier == "T1" else None,
+            name=name,
+            affiliation=affiliation,
+        )
 
         matched_user: User | None = None
         match_status = "new"
         if valid_email and valid_email in by_email:
             matched_user = by_email[valid_email]
+            match_status = "existing"
+        elif candidate_fp in by_fp and by_fp[candidate_fp].id not in used_matched_user_ids:
+            matched_user = by_fp[candidate_fp]
             match_status = "existing"
         elif tier == "T1" and base_login in by_login:
             candidate = by_login[base_login]
@@ -165,8 +188,10 @@ def assign_people_identities(
                     existing_warnings.append("LOGIN_CONFLICT")
 
         if match_status == "existing" and matched_user is not None:
+            used_matched_user_ids.add(matched_user.id)
             if matched_user.login_name:
                 allocated = matched_user.login_name
+                used_logins.add(allocated.lower())
             else:
                 allocated = _allocate_unique_login(base_login, used_logins, existing_warnings)
             person["login_name"] = allocated
@@ -190,7 +215,7 @@ def assign_people_identities(
             tier=tier,
             login_name=str(person.get("login_name") or ""),
             name=name,
-            affiliation=str(person.get("affiliation") or "") or None,
+            affiliation=affiliation,
         )
 
 

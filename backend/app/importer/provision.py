@@ -204,6 +204,7 @@ async def provision_import_job(
         raise ProvisionError(422, "as_of_time_required", "请提供本子基准时间 as_of_time")
 
     existing_users = list(await session.scalars(select(User)))
+    existing_people = list(await session.scalars(select(LabPerson)))
     users_by_id = {u.id: u for u in existing_users}
     used_login_names = {
         u.login_name.lower() for u in existing_users if u.login_name is not None
@@ -216,11 +217,15 @@ async def provision_import_job(
     if not raw_people:
         raise ProvisionError(422, "import_parse_failed", "预览中没有可开通的人员记录")
 
-    # Recompute login_name and matches against current DB users
+    # Recompute login_name and matches against current DB users & existing LabPerson fingerprints
     for p in raw_people:
         if p.get("tier") == "T1":
             p["cert"] = p.get("login_name")
-    assign_people_identities(raw_people, existing_users=existing_users)
+    assign_people_identities(
+        raw_people,
+        existing_users=existing_users,
+        existing_people=existing_people,
+    )
 
     overrides_by_key = {ov.key: ov for ov in body.people}
     active_people: list[dict[str, Any]] = []
@@ -252,6 +257,16 @@ async def provision_import_job(
                 raise ProvisionError(409, "login_name_taken", f"登录名已被占用: {custom_login}")
             person["login_name"] = custom_login
             used_login_names.add(custom_login)
+            if ov.link_user_id is None:
+                cur_match = person.get("match")
+                if isinstance(cur_match, dict) and cur_match.get("status") == "conflict":
+                    person["match"] = {"status": "new"}
+            person["fingerprint"] = person_fp(
+                tier=str(person.get("tier") or "T2"),
+                login_name=custom_login,
+                name=normalize_person_name(str(person.get("name") or "")),
+                affiliation=str(person.get("affiliation") or "").strip() or None,
+            )
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
             ]

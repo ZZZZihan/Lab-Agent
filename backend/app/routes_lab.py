@@ -192,12 +192,14 @@ async def parse_proposal_upload(
     raw_bytes = await file.read()
     filename = (file.filename or "proposal.docx").strip()
     existing_users = list(await session.scalars(select(User)))
+    existing_people = list(await session.scalars(select(LabPerson)))
 
     try:
         parsed_bundle: dict[str, Any] = parse_proposal_docx(
             filename,
             raw_bytes,
             existing_users=existing_users,
+            existing_people=existing_people,
             as_of_time_override=override_date,
             max_file_mb=settings.import_max_file_mb,
             max_uncompressed_mb=settings.import_max_uncompressed_mb,

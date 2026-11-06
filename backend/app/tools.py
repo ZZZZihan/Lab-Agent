@@ -231,16 +231,29 @@ async def query_lab_assets(
     achievements_count = len(list(await session.scalars(select(LabAchievement.id))))
     facilities_count = len(list(await session.scalars(select(LabFacility.id))))
 
-    profile_doc = await session.scalar(
-        select(Document)
-        .where(
-            Document.doc_key.like("lab-profile-%"),
-            Document.deleted_at.is_(None),
-            Document.status == "ready",
-        )
-        .order_by(Document.created_at.desc())
-        .limit(1)
+    resolved_groups = (
+        group_ids if group_ids is not None else await load_user_group_ids(session, user.id)
     )
+    principal = Principal(id=user.id, role=user.role, group_ids=resolved_groups)
+    profile_candidates = list(
+        await session.scalars(
+            select(Document)
+            .where(
+                Document.doc_key.like("lab-profile-%"),
+                Document.deleted_at.is_(None),
+                Document.status == "ready",
+            )
+            .order_by(Document.created_at.desc())
+        )
+    )
+    profile_doc: Document | None = None
+    for cand in profile_candidates:
+        grants = list(
+            await session.scalars(select(DocumentACL).where(DocumentACL.document_id == cand.id))
+        )
+        if can_read(principal, cand, grants):
+            profile_doc = cand
+            break
     if profile_doc is not None:
         profile_chunks = list(
             await session.scalars(

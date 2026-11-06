@@ -436,10 +436,16 @@ async def test_provision_hardcodes_member_role_and_preserves_existing_admin(
     assert prov2.status_code == 200, prov2.text
     res2 = prov2.json()
     assert "初始口令：另行私发" in res2["roster_text"]
+    assert res2["stats"]["users_created"] == 0
+    assert res2["stats"]["users_linked"] == 10
     assert res2["stats"]["people_skipped"] == 10
     assert res2["stats"]["projects_skipped"] == 6
     assert res2["stats"]["achievements_skipped"] == 5
     assert res2["stats"]["facilities_skipped"] == 1
+
+    async with maker() as session:
+        all_users_after = list(await session.scalars(select(User)))
+        assert len(all_users_after) == 11
 
 
 async def test_three_in_one_login_password_change_and_expiry(
@@ -654,6 +660,42 @@ async def test_lab_assets_api_formatters_and_rag_chat_integration(
     excerpts = " ".join(str(it.get("excerpt") or "") for it in citations_event["items"])
     assert "AGE240005" in excerpts or "TJYGZ59" in excerpts
 
+    # Verify ACL enforcement on lab-profile-* document in query_lab_assets:
+    # When admin changes the profile document visibility to "private", a regular member
+    # must not receive its chunks via fallback injection.
+    rag_doc_id = prov_resp.json()["rag_document_id"]
+    acl_resp = await client.put(
+        f"/api/v1/documents/{rag_doc_id}/acl",
+        json={"visibility": "private"},
+        headers=headers,
+    )
+    assert acl_resp.status_code == 200
+
+    member_login = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "2431101262", "password": INITIAL_PW},
+    )
+    assert member_login.status_code == 200
+    member_headers = {"Authorization": f"Bearer {member_login.json()['access_token']}"}
+    member_chat = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "课题组有哪些在研项目？"},
+        headers=member_headers,
+    )
+    assert member_chat.status_code == 200
+    member_events = [
+        json.loads(block.split("data:", 1)[1].strip())
+        for block in member_chat.text.split("\n\n")
+        if "data:" in block
+    ]
+    member_done = next(e for e in member_events if e.get("type") == "done")
+    assert member_done["refused"] is True
+    member_citations = next(
+        (e for e in member_events if e.get("type") == "citations"),
+        {"items": []},
+    )
+    assert member_citations["items"] == []
+
     # Verify zero PII across all database tables
     maker = get_sessionmaker()
     async with maker() as session:
@@ -665,3 +707,70 @@ async def test_lab_assets_api_formatters_and_rag_chat_integration(
                 assert SYNTH_MOBILE_1 not in row_str
                 assert SYNTH_MOBILE_2 not in row_str
                 assert SYNTH_LANDLINE not in row_str
+
+
+async def test_login_conflict_resolved_by_replacement_login_name(
+    client: AsyncClient,
+) -> None:
+    await _seed_admin()
+    # Pre-seed a user occupying T1 login_name "2431101262" with a different display_name
+    maker = get_sessionmaker()
+    async with maker() as session:
+        session.add(
+            User(
+                email=None,
+                login_name="2431101262",
+                display_name="张占号",
+                password_hash=hash_password(INITIAL_PW),
+                role="member",
+                is_active=True,
+            )
+        )
+        await session.commit()
+
+    headers = await _login_headers(client, ADMIN_EMAIL)
+    raw_docx = build_synthetic_proposal_docx()
+
+    parse_resp = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert parse_resp.status_code == 200
+    job_data = parse_resp.json()
+    job_id = job_data["job_id"]
+
+    lin_person = next(
+        p for p in job_data["preview"]["people"] if p["name"] == "林雪莹"
+    )
+    assert lin_person["match"]["status"] == "conflict"
+    assert "LOGIN_CONFLICT" in lin_person["warnings"]
+
+    # Confirming without resolving the conflict fails with 422 login_conflict_unresolved
+    fail_resp = await client.post(
+        f"/api/v1/admin/imports/{job_id}/provision",
+        json={"initial_password": INITIAL_PW},
+        headers=headers,
+    )
+    assert fail_resp.status_code == 422
+    assert fail_resp.json()["error"]["code"] == "login_conflict_unresolved"
+
+    # Confirming with an unused replacement login_name clears the conflict and succeeds
+    ok_resp = await client.post(
+        f"/api/v1/admin/imports/{job_id}/provision",
+        json={
+            "initial_password": INITIAL_PW,
+            "people": [{"key": lin_person["key"], "login_name": "linxueying2431"}],
+        },
+        headers=headers,
+    )
+    assert ok_resp.status_code == 200, ok_resp.text
+    assert ok_resp.json()["status"] == "provisioned"
+
+    # 林雪莹 can now log in with the replacement login_name
+    r_login = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "linxueying2431", "password": INITIAL_PW},
+    )
+    assert r_login.status_code == 200
+    assert r_login.json()["user"]["display_name"] == "林雪莹"
