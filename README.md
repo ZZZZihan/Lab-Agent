@@ -366,7 +366,7 @@ The committed files `evals/calibrations/hashing-hashing-cjk-v1-512-redact-0-qp-e
 
 | LLM Model | Returned Model | Embedding | Dataset | Split | Questions | Refusal | False Refusal | False Answer | Citation P | Citation R | Citation F1 | Invalid Cite | Unannotated | Fact Recall | TTFT p50/p95 (ms) | Latency p50/p95 (ms) | Tokens | Date | Git SHA |
 | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| `antigravity/gemini-3.8-flash` | `gemini-3.8-flash` | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v1` | test | 27 | 0.852 | 0.191 | 0.000 | 0.738 | 0.762 | 0.746 | 0.000 | 0.000 | 0.762 | 2608 / 5021 | 2635 / 5123 | 8520 | 2026-11-05 | `4576097` |
+| `antigravity/gemini-3.8-flash` | `gemini-3.8-flash` | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v1` | test | 27 | 0.852 | 0.191 | 0.000 | 0.762 | 0.762 | 0.762 | 0.000 | 0.000 | 0.738 | 2651 / 4507 | 2753 / 4515 | 8070 | 2026-11-06 | `265e8de` |
 | `grok/grok-4.7-build-fast` | `grok-4.7-build-fast` | `openai_compatible\|qwen3-embedding:8b@64b933495768\|4096h\|redact=0\|qp=e1e90dad\|dp=e3b0c442` | `v1` | test | 27 | 0.852 | 0.191 | 0.000 | 0.738 | 0.762 | 0.746 | 0.000 | 0.000 | 0.738 | 2030 / 3215 | 2005 / 3307 | 37366 | 2026-11-05 | `4576097` |
 <!-- eval:end -->
 

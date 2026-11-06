@@ -261,6 +261,15 @@ if [[ "$OFFLINE" != "true" ]]; then
   echo "==> Running container embedding check (app.embed_check)..."
   if ! docker compose "${COMPOSE_FILES[@]}" exec -T api python -m app.embed_check; then
     echo "Error: Container embedding check failed. Check EMBEDDING_BASE_URL (default http://host.docker.internal:11434/v1) and host Ollama." >&2
+    if [[ "$(uname -s)" == "Linux" && "$LINUX_EMBED" != "true" ]]; then
+      cat >&2 <<'EOF'
+Hint (Linux Docker bridge): Host Ollama defaults to binding 127.0.0.1:11434, which is not
+reachable from inside the 'api' container via host.docker.internal:11434.
+To fix this on Linux, either:
+  1. Use the containerized Ollama profile: ./scripts/demo.sh --linux-embed
+  2. Or bind host Ollama to 0.0.0.0 (set OLLAMA_HOST=0.0.0.0:11434 in systemd) and restart ollama.
+EOF
+    fi
     exit 1
   fi
 fi

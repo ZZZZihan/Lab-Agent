@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import random
 import re
 import subprocess
@@ -22,14 +23,14 @@ from alembic import command
 from alembic.config import Config
 from app.agent import run_agent
 from app.auth import UNUSABLE_PASSWORD_HASH
-from app.config import Settings, get_settings, repo_root
+from app.config import Settings, get_settings, repo_root, reset_settings_cache
 from app.db import dispose_engine, get_sessionmaker
 from app.ingest_worker import process_next_pending
 from app.llm import LLM, build_llm
 from app.models import User
-from app.rag.chunker import chunk_markdown, parse_front_matter
+from app.rag.chunker import chunk_document
 from app.rag.embedder import build_embedder
-from app.rag.ingest import upsert_source
+from app.rag.ingest import ingest_text, read_corpus_dir, upsert_source
 from app.rag.redact import redact_text
 from app.reindex import apply_reindex
 from app.secrets import read_secret
@@ -162,11 +163,11 @@ def _load_questions(path: Path) -> list[dict[str, Any]]:
 
 def _gold_map(corpus_dir: Path) -> dict[tuple[str, str], str]:
     mapping: dict[tuple[str, str], str] = {}
-    for file in sorted(corpus_dir.glob("*.md")):
-        meta, body = parse_front_matter(file.read_text(encoding="utf-8"))
+    for meta, body in _read_corpus(corpus_dir):
         key = meta["key"]
+        source_format = meta.get("source_format") or "markdown"
         seen: set[str] = set()
-        for chunk in chunk_markdown(body):
+        for chunk in chunk_document(body, source_format):
             if chunk.heading in seen:
                 raise RuntimeError(f"duplicate heading {key} / {chunk.heading}")
             seen.add(chunk.heading)
@@ -175,10 +176,7 @@ def _gold_map(corpus_dir: Path) -> dict[tuple[str, str], str]:
 
 
 def _read_corpus(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
-    records: list[tuple[dict[str, str], str]] = []
-    for file in sorted(corpus_dir.glob("*.md")):
-        records.append(parse_front_matter(file.read_text(encoding="utf-8")))
-    return records
+    return read_corpus_dir(corpus_dir)
 
 
 def _latency_summary(samples: Sequence[float]) -> dict[str, float]:
@@ -747,6 +745,7 @@ def _resolve_model_settings(
     *,
     corpus_dir: Path,
     questions_path: Path,
+    dataset: str = "v1",
 ) -> Settings:
     provider = base_settings.llm_provider
     resolved_api_key = base_settings.llm_api_key
@@ -766,15 +765,56 @@ def _resolve_model_settings(
         )
         if not (resolved_api_key and len(resolved_api_key.get_secret_value()) >= 8):
             raise RuntimeError(f"LLM_API_KEY is required for provider {provider}")
-    return base_settings.model_copy(
-        update={
-            "llm_provider": provider,
-            "llm_model": model_name,
-            "llm_api_key": resolved_api_key,
-            "corpus_dir": str(corpus_dir),
-            "questions_path": str(questions_path),
-        }
-    )
+    updates: dict[str, Any] = {
+        "llm_provider": provider,
+        "llm_model": model_name,
+        "llm_api_key": resolved_api_key,
+        "corpus_dir": str(corpus_dir),
+        "questions_path": str(questions_path),
+    }
+    if dataset != "v1" and base_settings.load_tuned_config:
+        root = repo_root()
+        slug = base_settings.embedding_slug
+        allowed_fps = {base_settings.embedding_fingerprint}
+        candidates = [
+            Path(base_settings.calibration_dir) / dataset / f"{slug}.json",
+            root / "evals" / "calibrations" / dataset / f"{slug}.json",
+        ]
+        if base_settings.resolved_embedding_index == "hnsw_prefix":
+            base_slug = base_settings.base_embedding_slug
+            candidates.extend(
+                [
+                    Path(base_settings.calibration_dir) / dataset / f"{base_slug}.json",
+                    root / "evals" / "calibrations" / dataset / f"{base_slug}.json",
+                ]
+            )
+            allowed_fps.add(base_settings.base_embedding_fingerprint)
+        for candidate in candidates:
+            if candidate.is_file():
+                try:
+                    loaded = json.loads(candidate.read_text(encoding="utf-8"))
+                except Exception:
+                    loaded = None
+                if (
+                    isinstance(loaded, dict)
+                    and loaded.get("embedder_fingerprint") in allowed_fps
+                ):
+                    explicit = base_settings._explicit_tuning_fields
+                    for field_name, cast_fn in (
+                        ("retrieval_mode", str),
+                        ("rrf_k", int),
+                        ("evidence_score_min", float),
+                        ("rare_coverage_min", float),
+                        ("cite_margin", float),
+                        ("cite_k", int),
+                        ("dense_pool", int),
+                        ("lexical_pool", int),
+                    ):
+                        if field_name not in explicit and field_name in loaded:
+                            updates[field_name] = cast_fn(loaded[field_name])
+                    updates["calibration_source"] = str(candidate)
+                    break
+    return base_settings.model_copy(update=updates)
 
 
 async def _run(
@@ -801,8 +841,15 @@ async def _run(
         if split != "all"
         else list(all_questions)
     )
-    if max_questions is not None and max_questions > 0:
-        selected_questions = selected_questions[:max_questions]
+    if max_questions is not None and 0 < max_questions < len(selected_questions):
+        if max_questions <= 2:
+            selected_questions = selected_questions[:max_questions]
+        else:
+            n_sel = len(selected_questions)
+            selected_questions = [
+                selected_questions[round(i * (n_sel - 1) / (max_questions - 1))]
+                for i in range(max_questions)
+            ]
     if not selected_questions:
         raise SystemExit(f"No questions found for dataset={dataset!r} split={split!r}")
 
@@ -837,14 +884,14 @@ async def _run(
                 user = User(
                     email="eval@lab.local",
                     display_name="评测",
-                    role="admin",
+                    role="member",
                     password_hash=UNUSABLE_PASSWORD_HASH,
                     is_active=False,
                 )
                 session.add(user)
                 await session.flush()
             else:
-                user.role = "admin"
+                user.role = "member"
                 user.password_hash = UNUSABLE_PASSWORD_HASH
                 user.is_active = False
                 await session.flush()
@@ -857,6 +904,43 @@ async def _run(
                 records=corpus_records,
                 storage=base_settings.embedding_storage,
             )
+            seed_only_dir = corpus_dir.parent / "seed_only"
+            if seed_only_dir.is_dir():
+                seed_only_records = _read_corpus(seed_only_dir)
+                if seed_only_records:
+                    acl_owner = await session.scalar(
+                        select(User).where(User.email == "eval-acl-owner@qingheng.lab")
+                    )
+                    if acl_owner is None:
+                        acl_owner = User(
+                            email="eval-acl-owner@qingheng.lab",
+                            display_name="评测ACL所有者",
+                            role="admin",
+                            password_hash=UNUSABLE_PASSWORD_HASH,
+                            is_active=False,
+                        )
+                        session.add(acl_owner)
+                        await session.flush()
+                    else:
+                        acl_owner.role = "admin"
+                        acl_owner.password_hash = UNUSABLE_PASSWORD_HASH
+                        acl_owner.is_active = False
+                        await session.flush()
+                    for meta, body in seed_only_records:
+                        key = meta.get("key")
+                        await ingest_text(
+                            session,
+                            embedder=embedder,
+                            owner_id=acl_owner.id,
+                            title=meta.get("title") or key or "未命名",
+                            text=body,
+                            collection=meta.get("collection") or "knowledge",
+                            visibility=meta.get("visibility") or "private",
+                            source="eval",
+                            source_format=meta.get("source_format") or "markdown",
+                            doc_key=key,
+                            storage=base_settings.embedding_storage,
+                        )
             await session.commit()
 
             for model_name in model_list:
@@ -865,6 +949,7 @@ async def _run(
                     model_name,
                     corpus_dir=corpus_dir,
                     questions_path=questions_path,
+                    dataset=dataset,
                 )
                 llm = build_llm(model_settings)
                 try:
@@ -883,7 +968,11 @@ async def _run(
                 metrics = aggregate_e2e_metrics(q_results)
                 llm_slug = slugify_model(model_name)
                 embed_slug = model_settings.embedding_slug
-                run_slug = f"{llm_slug}__{embed_slug}"
+                run_slug = (
+                    f"{llm_slug}__{embed_slug}"
+                    if dataset == "v1"
+                    else f"{llm_slug}__{embed_slug}__{dataset}"
+                )
 
                 repo_e2e_dir = root / "evals" / "results" / "e2e"
                 runtime_e2e_dir = Path(model_settings.calibration_dir) / "e2e"
@@ -1009,6 +1098,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     model_list = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
+    if model_list and os.environ.get("LLM_MODEL", "").strip() in {"", "fake-grounded-v1"}:
+        os.environ["LLM_MODEL"] = model_list[0]
+        reset_settings_cache()
     command.upgrade(Config(str(repo_root() / "backend" / "alembic.ini")), "head")
     asyncio.run(
         _run(
