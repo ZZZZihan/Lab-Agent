@@ -22,6 +22,9 @@ import {
   api,
   currentUser,
   reindexLabAssets,
+  restoreImportedField,
+  updateLabEntity,
+  type FieldProvenanceSummary,
   type ImportJobResponse,
   type LabAchievementItem,
   type LabFacilityItem,
@@ -34,6 +37,112 @@ import {
 import { useI18n } from "@/lib/i18n";
 
 type TabKey = "people" | "projects" | "achievements" | "facilities";
+
+type EditableFieldConfig = {
+  key: string;
+  label: string;
+  type?: "text" | "textarea" | "select" | "number" | "date";
+  options?: Array<{ value: string; label: string }>;
+  adminOnly?: boolean;
+};
+
+const EDITABLE_FIELDS: Record<TabKey, EditableFieldConfig[]> = {
+  people: [
+    { key: "title", label: "职称" },
+    { key: "degree", label: "学位" },
+    { key: "affiliation", label: "所在单位" },
+    { key: "research_specialty", label: "研究专长" },
+    { key: "admin_duty", label: "行政职务" },
+    { key: "tutor_role", label: "博硕导岗位" },
+    { key: "email", label: "邮箱" },
+    {
+      key: "project_role",
+      label: "项目角色",
+      type: "select",
+      adminOnly: true,
+      options: [
+        { value: "applicant", label: "课题负责人 (applicant)" },
+        { value: "member", label: "项目组成员 (member)" },
+      ],
+    },
+    { key: "bio", label: "个人学术简历", type: "textarea" },
+  ],
+  projects: [
+    { key: "title", label: "项目名称" },
+    { key: "funder", label: "资助来源" },
+    { key: "grant_no", label: "批准号" },
+    { key: "pi_name", label: "项目负责人" },
+    {
+      key: "status",
+      label: "项目状态",
+      type: "select",
+      options: [
+        { value: "ongoing", label: "在研 (ongoing)" },
+        { value: "completed", label: "已结题 (completed)" },
+        { value: "unknown", label: "未注明 (unknown)" },
+      ],
+    },
+    { key: "start_date", label: "起始日期", type: "date" },
+    { key: "end_date", label: "截止日期", type: "date" },
+    { key: "amount_wan", label: "经费 (万元)" },
+    { key: "relationship_note", label: "与本课题关系说明", type: "textarea" },
+  ],
+  achievements: [
+    {
+      key: "kind",
+      label: "成果类型",
+      type: "select",
+      options: [
+        { value: "paper", label: "论文" },
+        { value: "report", label: "研究报告/资政报告" },
+        { value: "patent", label: "发明专利" },
+        { value: "software", label: "软件著作权" },
+        { value: "book", label: "学术专著" },
+        { value: "exhibition", label: "成果展" },
+        { value: "other", label: "其他成果" },
+      ],
+    },
+    { key: "title", label: "成果名称" },
+    { key: "first_author", label: "第一作者" },
+    { key: "authors_text", label: "全部作者" },
+    { key: "venue", label: "刊物/出版社/采纳单位" },
+    { key: "year", label: "年份", type: "number" },
+    { key: "support_note", label: "支撑价值说明", type: "textarea" },
+  ],
+  facilities: [
+    {
+      key: "category",
+      label: "设备类别",
+      type: "select",
+      options: [
+        { value: "equipment", label: "科研设备 (equipment)" },
+        { value: "compute", label: "算力设备 (compute)" },
+      ],
+    },
+    { key: "name", label: "设备名称" },
+    { key: "spec", label: "型号规格与配置" },
+    { key: "value_wan", label: "原值 (万元)" },
+    { key: "usage_scenario", label: "主要用途说明", type: "textarea" },
+  ],
+};
+
+const FIELD_LABEL_MAP: Record<string, string> = Object.values(EDITABLE_FIELDS)
+  .flat()
+  .reduce<Record<string, string>>((acc, item) => {
+    acc[item.key] = item.label;
+    return acc;
+  }, {});
+
+function formatProvValue(val: unknown): string {
+  if (val === null || val === undefined || val === "") return "（空）";
+  if (typeof val === "string") return val;
+  if (typeof val === "number" || typeof val === "boolean") return String(val);
+  try {
+    return JSON.stringify(val);
+  } catch {
+    return String(val);
+  }
+}
 
 type PersonOverrideState = {
   exclude: boolean;
@@ -90,11 +199,25 @@ export default function LabAssetsPage() {
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedBioId, setExpandedBioId] = useState<string | null>(null);
+  const [expandedProvId, setExpandedProvId] = useState<string | null>(null);
 
   const [exportingFormat, setExportingFormat] = useState<"md" | "docx" | null>(
     null,
   );
   const [reindexing, setReindexing] = useState(false);
+
+  // Phase 2 Online Edit & Field Provenance Restore state
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editType, setEditType] = useState<TabKey>("people");
+  const [editItem, setEditItem] = useState<
+    LabPersonItem | LabProjectItem | LabAchievementItem | LabFacilityItem | null
+  >(null);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [restoringFieldKey, setRestoringFieldKey] = useState<string | null>(
+    null,
+  );
 
   // Admin 3-Step Import Wizard state
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -584,6 +707,334 @@ export default function LabAssetsPage() {
     setHasSavedCredentials(true);
   }
 
+  const myAllowedNames = useMemo(() => {
+    const names = new Set<string>();
+    if (me?.display_name) names.add(me.display_name.trim());
+    if (me?.id) {
+      for (const p of people) {
+        if (p.user_id === me.id && p.name) {
+          names.add(p.name.trim());
+        }
+      }
+    }
+    return names;
+  }, [me, people]);
+
+  function canEditEntity(
+    type: TabKey,
+    item: LabPersonItem | LabProjectItem | LabAchievementItem | LabFacilityItem,
+  ): boolean {
+    if (!me) return false;
+    if (me.role === "admin") return true;
+    if (me.role !== "member") return false;
+    if (type === "people") {
+      const p = item as LabPersonItem;
+      return p.user_id === me.id || myAllowedNames.has((p.name || "").trim());
+    }
+    if (type === "projects") {
+      const proj = item as LabProjectItem;
+      return Boolean(
+        proj.pi_name && myAllowedNames.has(proj.pi_name.trim()),
+      );
+    }
+    if (type === "achievements") {
+      const ach = item as LabAchievementItem;
+      return Boolean(
+        ach.first_author && myAllowedNames.has(ach.first_author.trim()),
+      );
+    }
+    return false;
+  }
+
+  function openEditModal(
+    type: TabKey,
+    item: LabPersonItem | LabProjectItem | LabAchievementItem | LabFacilityItem,
+  ) {
+    setEditError("");
+    setEditType(type);
+    setEditItem(item);
+    const initialForm: Record<string, string> = {};
+    const fields = EDITABLE_FIELDS[type];
+    const rec = item as unknown as Record<string, unknown>;
+    for (const f of fields) {
+      const val = rec[f.key];
+      initialForm[f.key] =
+        val === null || val === undefined ? "" : String(val);
+    }
+    setEditForm(initialForm);
+    setEditModalOpen(true);
+  }
+
+  async function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editItem) return;
+    setEditError("");
+    setStatusBanner("");
+    setEditSaving(true);
+    try {
+      const payload: Record<string, unknown> = {};
+      for (const f of EDITABLE_FIELDS[editType]) {
+        if (f.adminOnly && me?.role !== "admin") continue;
+        const rawVal = editForm[f.key] ?? "";
+        if (f.type === "number") {
+          const trimmed = rawVal.trim();
+          payload[f.key] = trimmed ? Number(trimmed) : null;
+        } else {
+          payload[f.key] = rawVal;
+        }
+      }
+      const res = await updateLabEntity(editType, editItem.id, payload);
+      const updatedEntity = (res.person ||
+        res.project ||
+        res.achievement ||
+        res.facility) as
+        | LabPersonItem
+        | LabProjectItem
+        | LabAchievementItem
+        | LabFacilityItem
+        | undefined;
+      if (updatedEntity) {
+        setEditItem(updatedEntity);
+      }
+      setEditModalOpen(false);
+      setStatusBanner("已保存修改并记录字段级人工溯源");
+      await loadAll();
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function handleRestoreImported(
+    type: TabKey,
+    itemId: string,
+    field: string,
+  ) {
+    setError("");
+    setEditError("");
+    setStatusBanner("");
+    const opKey = `${itemId}:${field}`;
+    setRestoringFieldKey(opKey);
+    try {
+      const res = await restoreImportedField(type, itemId, field);
+      const updatedEntity = (res.person ||
+        res.project ||
+        res.achievement ||
+        res.facility) as
+        | LabPersonItem
+        | LabProjectItem
+        | LabAchievementItem
+        | LabFacilityItem
+        | undefined;
+      if (updatedEntity && editItem && editItem.id === itemId) {
+        setEditItem(updatedEntity);
+        const rec = updatedEntity as unknown as Record<string, unknown>;
+        const restoredVal = rec[field];
+        setEditForm((prev) => ({
+          ...prev,
+          [field]:
+            restoredVal === null || restoredVal === undefined
+              ? ""
+              : String(restoredVal),
+        }));
+      }
+      setStatusBanner(
+        `字段「${FIELD_LABEL_MAP[field] || field}」已恢复为申报书导入值`,
+      );
+      await loadAll();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : t.error;
+      if (editModalOpen) {
+        setEditError(msg);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setRestoringFieldKey(null);
+    }
+  }
+
+  function renderEntitySourceBadges(
+    asOfTime?: string | null,
+    provenance?: Record<string, FieldProvenanceSummary>,
+  ) {
+    const provValues = provenance ? Object.values(provenance) : [];
+    const hasManual = provValues.some(
+      (p) => p.source_kind === "manual" || p.has_manual_override,
+    );
+    return (
+      <>
+        <Badge
+          variant="outline"
+          className="border-border bg-muted/30 font-normal text-[11px] text-muted-foreground"
+        >
+          {t.provenanceSourceProposal} ({asOfTime || "—"})
+        </Badge>
+        {hasManual ? (
+          <Badge
+            variant="secondary"
+            className="border-purple-500/40 bg-purple-500/15 font-normal text-[11px] text-purple-800 dark:text-purple-300"
+          >
+            {t.provenanceSourceManual}
+          </Badge>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderFieldProvenanceBadge(prov?: FieldProvenanceSummary) {
+    if (!prov) return null;
+    if (prov.source_kind === "manual") {
+      return (
+        <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px]">
+          <Badge
+            variant="secondary"
+            className="border-purple-500/40 bg-purple-500/15 px-1.5 py-0 text-[11px] font-normal text-purple-800 dark:text-purple-300"
+          >
+            {t.provenanceSourceManual}
+          </Badge>
+          {prov.has_manual_override &&
+          prov.imported_value !== undefined &&
+          prov.imported_value !== null &&
+          prov.imported_value !== "" ? (
+            <span className="text-muted-foreground">
+              原导入值：{formatProvValue(prov.imported_value)}
+            </span>
+          ) : null}
+        </span>
+      );
+    }
+    if (prov.source_kind === "legacy") {
+      return (
+        <Badge
+          variant="outline"
+          className="px-1.5 py-0 text-[11px] font-normal text-muted-foreground"
+        >
+          {t.provenanceSourceLegacy} ({prov.as_of_time || "—"})
+        </Badge>
+      );
+    }
+    return (
+      <Badge
+        variant="outline"
+        className="px-1.5 py-0 text-[11px] font-normal text-muted-foreground"
+      >
+        {t.provenanceSourceProposal} ({prov.as_of_time || "—"})
+      </Badge>
+    );
+  }
+
+  function renderCardProvenanceSection(
+    type: TabKey,
+    item: LabPersonItem | LabProjectItem | LabAchievementItem | LabFacilityItem,
+  ) {
+    const provMap = item.provenance;
+    if (!provMap || Object.keys(provMap).length === 0) return null;
+    const editable = canEditEntity(type, item);
+    const entries = Object.entries(provMap);
+    const manualOverrides = entries.filter(
+      ([, p]) => p.has_manual_override || p.source_kind === "manual",
+    );
+    const isExpanded = expandedProvId === item.id;
+
+    return (
+      <div className="mt-2 space-y-1.5">
+        {manualOverrides.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-purple-500/30 bg-purple-500/5 px-2.5 py-1.5 text-[12px]">
+            {manualOverrides.map(([field, p]) => {
+              const opKey = `${item.id}:${field}`;
+              return (
+                <div
+                  key={field}
+                  className="inline-flex flex-wrap items-center gap-1.5"
+                >
+                  <span className="font-medium text-foreground">
+                    {FIELD_LABEL_MAP[field] || field}：
+                  </span>
+                  <span className="text-purple-800 dark:text-purple-300">
+                    {t.provenanceSourceManual}
+                  </span>
+                  {p.has_manual_override &&
+                  p.imported_value !== undefined &&
+                  p.imported_value !== null ? (
+                    <span className="text-muted-foreground">
+                      （原导入值：{formatProvValue(p.imported_value)}）
+                    </span>
+                  ) : null}
+                  {editable && p.has_manual_override ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-[11px]"
+                      disabled={restoringFieldKey === opKey}
+                      onClick={() => handleRestoreImported(type, item.id, field)}
+                    >
+                      {restoringFieldKey === opKey
+                        ? t.loading
+                        : t.restoreImportedBtn}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        <div>
+          <button
+            type="button"
+            className="text-[11px] text-muted-foreground underline hover:text-foreground"
+            onClick={() =>
+              setExpandedProvId((prev) => (prev === item.id ? null : item.id))
+            }
+          >
+            {isExpanded
+              ? "收起字段溯源明细"
+              : `查看字段级溯源 (${entries.length})`}
+          </button>
+          {isExpanded ? (
+            <div className="mt-1.5 grid grid-cols-1 gap-1.5 rounded-md border border-border bg-muted/20 p-2.5 text-[12px] sm:grid-cols-2">
+              {entries.map(([field, p]) => {
+                const opKey = `${item.id}:${field}`;
+                return (
+                  <div
+                    key={field}
+                    className="flex flex-wrap items-center justify-between gap-1.5 rounded border border-border/60 bg-card px-2 py-1"
+                  >
+                    <span className="font-medium text-foreground">
+                      {FIELD_LABEL_MAP[field] || field}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {renderFieldProvenanceBadge(p)}
+                      {editable && p.has_manual_override ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={restoringFieldKey === opKey}
+                          onClick={() =>
+                            handleRestoreImported(type, item.id, field)
+                          }
+                        >
+                          {restoringFieldKey === opKey
+                            ? t.loading
+                            : t.restoreImportedBtn}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Shell>
       <div className="space-y-6">
@@ -950,6 +1401,10 @@ export default function LabAssetsPage() {
                           {person.tutor_role && person.tutor_role !== "无" ? (
                             <Badge variant="outline">{person.tutor_role}</Badge>
                           ) : null}
+                          {renderEntitySourceBadges(
+                            person.as_of_time,
+                            person.provenance,
+                          )}
                         </div>
                         <p className="mt-1 text-[13px] text-muted-foreground">
                           {[
@@ -967,6 +1422,7 @@ export default function LabAssetsPage() {
                         <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
                           {person.application_text}
                         </p>
+                        {renderCardProvenanceSection("people", person)}
                         {person.bio ? (
                           <div className="mt-2">
                             <button
@@ -992,6 +1448,16 @@ export default function LabAssetsPage() {
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
+                      {canEditEntity("people", person) ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() => openEditModal("people", person)}
+                        >
+                          {t.editAssetBtn}
+                        </Button>
+                      ) : null}
                       <Button
                         size="sm"
                         variant="outline"
@@ -1076,6 +1542,10 @@ export default function LabAssetsPage() {
                                 ? "（按基准期推断）"
                                 : ""}
                             </Badge>
+                            {renderEntitySourceBadges(
+                              proj.as_of_time,
+                              proj.provenance,
+                            )}
                           </div>
                           <p className="mt-1 text-[13px] text-muted-foreground">
                             {[
@@ -1091,9 +1561,20 @@ export default function LabAssetsPage() {
                           <p className="mt-1.5 whitespace-pre-wrap font-serif text-[13px] text-foreground/90">
                             {displayAppText}
                           </p>
+                          {renderCardProvenanceSection("projects", proj)}
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
+                        {canEditEntity("projects", proj) ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            onClick={() => openEditModal("projects", proj)}
+                          >
+                            {t.editAssetBtn}
+                          </Button>
+                        ) : null}
                         <Button
                           size="sm"
                           variant="outline"
@@ -1151,6 +1632,10 @@ export default function LabAssetsPage() {
                                 {ach.year}
                               </Badge>
                             ) : null}
+                            {renderEntitySourceBadges(
+                              ach.as_of_time,
+                              ach.provenance,
+                            )}
                           </div>
                           <p className="mt-1 text-[13px] text-muted-foreground">
                             {[
@@ -1165,9 +1650,20 @@ export default function LabAssetsPage() {
                           <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
                             {displayAchText}
                           </p>
+                          {renderCardProvenanceSection("achievements", ach)}
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
+                        {canEditEntity("achievements", ach) ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2.5 text-[12px]"
+                            onClick={() => openEditModal("achievements", ach)}
+                          >
+                            {t.editAssetBtn}
+                          </Button>
+                        ) : null}
                         <Button
                           size="sm"
                           variant="outline"
@@ -1227,30 +1723,174 @@ export default function LabAssetsPage() {
                               {fac.value_wan} 万元
                             </Badge>
                           ) : null}
+                          {renderEntitySourceBadges(
+                            fac.as_of_time,
+                            fac.provenance,
+                          )}
                         </div>
                         <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
                           {fac.application_text}
                         </p>
+                        {renderCardProvenanceSection("facilities", fac)}
                       </div>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 px-2.5 text-[12px]"
-                      onClick={() =>
-                        copyToClipboard(fac.application_text, fac.id)
-                      }
-                    >
-                      {copiedId === fac.id
-                        ? t.copiedGrantFormat
-                        : t.copyGrantFormat}
-                    </Button>
+                    <div className="flex flex-wrap gap-1.5">
+                      {canEditEntity("facilities", fac) ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() => openEditModal("facilities", fac)}
+                        >
+                          {t.editAssetBtn}
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2.5 text-[12px]"
+                        onClick={() =>
+                          copyToClipboard(fac.application_text, fac.id)
+                        }
+                      >
+                        {copiedId === fac.id
+                          ? t.copiedGrantFormat
+                          : t.copyGrantFormat}
+                      </Button>
+                    </div>
                   </div>
                 </div>
               ))
             )}
           </div>
         )}
+
+        {/* Phase 2 Online Edit & Field Provenance Restore Dialog */}
+        <Dialog open={editModalOpen} onOpenChange={setEditModalOpen}>
+          <DialogContent className="max-w-2xl max-h-[88vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>
+                {t.editAssetBtn} · {t.fieldProvenanceTitle}
+              </DialogTitle>
+              <DialogDescription>
+                修改保存后将自动生成人工溯源记录（优先于新旧申报书导入值）。带有人工覆盖的字段可随时一键「
+                {t.restoreImportedBtn}」。
+              </DialogDescription>
+            </DialogHeader>
+
+            {editError ? (
+              <p role="alert" className="text-[13px] text-destructive">
+                {editError}
+              </p>
+            ) : null}
+
+            {editItem ? (
+              <form onSubmit={handleSaveEdit} className="space-y-3.5 text-[13px]">
+                {EDITABLE_FIELDS[editType].map((fieldCfg) => {
+                  if (fieldCfg.adminOnly && me?.role !== "admin") return null;
+                  const prov = editItem.provenance?.[fieldCfg.key];
+                  const opKey = `${editItem.id}:${fieldCfg.key}`;
+                  return (
+                    <div key={fieldCfg.key} className="space-y-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label
+                          htmlFor={`edit-field-${fieldCfg.key}`}
+                          className="text-[12px] font-medium text-foreground"
+                        >
+                          {fieldCfg.label}{" "}
+                          <span className="font-mono text-[11px] text-muted-foreground">
+                            ({fieldCfg.key})
+                          </span>
+                        </Label>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {renderFieldProvenanceBadge(prov)}
+                          {prov?.has_manual_override ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[11px]"
+                              disabled={restoringFieldKey === opKey}
+                              onClick={() =>
+                                handleRestoreImported(
+                                  editType,
+                                  editItem.id,
+                                  fieldCfg.key,
+                                )
+                              }
+                            >
+                              {restoringFieldKey === opKey
+                                ? t.loading
+                                : t.restoreImportedBtn}
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                      {fieldCfg.type === "textarea" ? (
+                        <textarea
+                          id={`edit-field-${fieldCfg.key}`}
+                          rows={3}
+                          value={editForm[fieldCfg.key] ?? ""}
+                          onChange={(e) =>
+                            setEditForm((prev) => ({
+                              ...prev,
+                              [fieldCfg.key]: e.target.value,
+                            }))
+                          }
+                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-[13px] text-foreground"
+                        />
+                      ) : fieldCfg.type === "select" && fieldCfg.options ? (
+                        <select
+                          id={`edit-field-${fieldCfg.key}`}
+                          value={editForm[fieldCfg.key] ?? ""}
+                          onChange={(e) =>
+                            setEditForm((prev) => ({
+                              ...prev,
+                              [fieldCfg.key]: e.target.value,
+                            }))
+                          }
+                          className="h-9 w-full rounded-md border border-input bg-background px-3 text-[13px] text-foreground"
+                        >
+                          {fieldCfg.options.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <Input
+                          id={`edit-field-${fieldCfg.key}`}
+                          type={fieldCfg.type || "text"}
+                          value={editForm[fieldCfg.key] ?? ""}
+                          onChange={(e) =>
+                            setEditForm((prev) => ({
+                              ...prev,
+                              [fieldCfg.key]: e.target.value,
+                            }))
+                          }
+                          className="h-9 text-[13px]"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+
+                <DialogFooter className="pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setEditModalOpen(false)}
+                  >
+                    {t.cancel}
+                  </Button>
+                  <Button type="submit" disabled={editSaving}>
+                    {editSaving ? t.saving : t.save}
+                  </Button>
+                </DialogFooter>
+              </form>
+            ) : null}
+          </DialogContent>
+        </Dialog>
 
         {/* Admin 3-Step Cold-Start Import Wizard */}
         <Dialog

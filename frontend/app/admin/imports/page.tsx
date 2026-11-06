@@ -22,13 +22,20 @@ import {
   api,
   currentUser,
   deleteImportJob,
+  executeImportMerge,
   getImportJob,
   getImportRoster,
   listImportJobs,
+  previewImportMerge,
   reparseImportJob,
+  revertImportMerge,
   updateImportPreview,
   type ImportJobResponse,
   type ImportJobSummary,
+  type MergeChangeCategory,
+  type MergeChangeItem,
+  type MergeDecision,
+  type MergePreviewResponse,
   type ProvisionResult,
   type RosterRegenResponse,
   type User,
@@ -72,6 +79,59 @@ type AdminUserItem = {
   display_name: string;
   role: string;
 };
+
+const FIELD_LABELS: Record<string, string> = {
+  title: "职称/名称 (title)",
+  admin_duty: "行政职务 (admin_duty)",
+  tutor_role: "博硕导 (tutor_role)",
+  research_specialty: "研究专长 (research_specialty)",
+  degree: "学位 (degree)",
+  affiliation: "所在单位 (affiliation)",
+  email: "邮箱 (email)",
+  project_role: "项目角色 (project_role)",
+  bio: "学术简历 (bio)",
+  funder: "资助来源 (funder)",
+  grant_no: "批准号 (grant_no)",
+  pi_name: "负责人 (pi_name)",
+  lab_role: "承担角色 (lab_role)",
+  start_date: "起始日期 (start_date)",
+  end_date: "截止日期 (end_date)",
+  amount_wan: "经费万元 (amount_wan)",
+  status: "项目状态 (status)",
+  status_source: "状态来源 (status_source)",
+  relationship_note: "关系说明 (relationship_note)",
+  raw_text: "原始描述 (raw_text)",
+  kind: "成果类型 (kind)",
+  first_author: "第一作者 (first_author)",
+  authors_text: "作者列表 (authors_text)",
+  venue: "发表刊物/采纳 (venue)",
+  year: "年份 (year)",
+  support_note: "支撑价值说明 (support_note)",
+  parse_quality: "解析质量 (parse_quality)",
+  category: "设备类别 (category)",
+  name: "名称 (name)",
+  spec: "型号规格 (spec)",
+  value_wan: "原值万元 (value_wan)",
+  usage_scenario: "用途说明 (usage_scenario)",
+};
+
+const ENTITY_TYPE_LABELS: Record<string, string> = {
+  person: "成员",
+  project: "项目",
+  achievement: "成果",
+  facility: "设备",
+};
+
+function formatMergeVal(val: unknown): string {
+  if (val === null || val === undefined || val === "") return "（空）";
+  if (typeof val === "string") return val;
+  if (typeof val === "number" || typeof val === "boolean") return String(val);
+  try {
+    return JSON.stringify(val);
+  } catch {
+    return String(val);
+  }
+}
 
 function buildInitialOverrides(
   job: ImportJobResponse,
@@ -148,6 +208,20 @@ export default function AdminImportsPage() {
   const [rosterJobTitle, setRosterJobTitle] = useState("");
   const [rosterData, setRosterData] = useState<RosterRegenResponse | null>(null);
   const [rosterModalCopied, setRosterModalCopied] = useState(false);
+
+  // Phase 2 Merge Preview & Conflict Arbitration Modal state
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
+  const [mergeTargetJob, setMergeTargetJob] = useState<ImportJobSummary | null>(null);
+  const [mergeAsOfInput, setMergeAsOfInput] = useState("");
+  const [mergePreview, setMergePreview] = useState<MergePreviewResponse | null>(null);
+  const [mergeLoading, setMergeLoading] = useState(false);
+  const [mergeError, setMergeError] = useState("");
+  const [mergeCategoryFilter, setMergeCategoryFilter] = useState<string>("all");
+  const [mergeDecisions, setMergeDecisions] = useState<
+    Record<string, "adopt_incoming" | "keep_current" | "force_adopt">
+  >({});
+  const [executingMerge, setExecutingMerge] = useState(false);
+  const [revertingJobId, setRevertingJobId] = useState<string | null>(null);
 
   const loadJobs = useCallback(async () => {
     setError("");
@@ -573,6 +647,253 @@ export default function AdminImportsPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleOpenMergePreview(job: ImportJobSummary) {
+    setError("");
+    setInfoMessage("");
+    setMergeError("");
+    setMergeTargetJob(job);
+    setMergeAsOfInput(job.as_of_time || "");
+    setMergePreview(null);
+    setMergeDecisions({});
+    setMergeCategoryFilter("all");
+    setMergeModalOpen(true);
+    setMergeLoading(true);
+    try {
+      const preview = await previewImportMerge(
+        job.job_id || job.id,
+        job.as_of_time || undefined,
+      );
+      setMergePreview(preview);
+      if (preview.as_of_time) {
+        setMergeAsOfInput(preview.as_of_time);
+      }
+    } catch (err) {
+      setMergeError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setMergeLoading(false);
+    }
+  }
+
+  async function handleRefreshMergePreview() {
+    if (!mergeTargetJob) return;
+    setMergeError("");
+    setMergeLoading(true);
+    try {
+      const preview = await previewImportMerge(
+        mergeTargetJob.job_id || mergeTargetJob.id,
+        mergeAsOfInput.trim() || undefined,
+      );
+      setMergePreview(preview);
+      setMergeDecisions({});
+    } catch (err) {
+      setMergeError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setMergeLoading(false);
+    }
+  }
+
+  const unresolvedConflictCount = useMemo(() => {
+    if (!mergePreview) return 0;
+    return mergePreview.changes.filter(
+      (c) =>
+        (c.category === "same_time_conflict" || c.requires_decision) &&
+        !mergeDecisions[c.change_key],
+    ).length;
+  }, [mergePreview, mergeDecisions]);
+
+  const filteredMergeChanges = useMemo(() => {
+    if (!mergePreview) return [];
+    if (mergeCategoryFilter === "all") return mergePreview.changes;
+    return mergePreview.changes.filter((c) => c.category === mergeCategoryFilter);
+  }, [mergePreview, mergeCategoryFilter]);
+
+  async function handleExecuteMerge() {
+    if (!mergeTargetJob || !mergePreview) return;
+    if (unresolvedConflictCount > 0) {
+      setMergeError(`${t.unresolvedConflictsHint}（剩余 ${unresolvedConflictCount} 项）`);
+      return;
+    }
+    setMergeError("");
+    setExecutingMerge(true);
+    try {
+      const decisionsList: MergeDecision[] = Object.entries(mergeDecisions).map(
+        ([change_key, action]) => ({ change_key, action }),
+      );
+      const res = await executeImportMerge(
+        mergeTargetJob.job_id || mergeTargetJob.id,
+        {
+          as_of_time: mergeAsOfInput.trim() || mergePreview.as_of_time || undefined,
+          decisions: decisionsList,
+        },
+      );
+      setMergeModalOpen(false);
+      const sum = res.summary || {};
+      const addedN = res.added_count ?? sum.added ?? mergePreview.summary.added;
+      const updatedN =
+        res.updated_count ?? sum.updated ?? mergePreview.summary.updated;
+      const fillN =
+        res.fill_blank_count ??
+        sum.fill_blank ??
+        mergePreview.summary.fill_blank;
+      const forcedN =
+        res.forced_count ??
+        sum.forced ??
+        decisionsList.filter((d) => d.action === "force_adopt").length;
+      setInfoMessage(
+        `已完成版本合并（${mergeTargetJob.original_filename}）：新增 ${addedN} 项、演进更新 ${updatedN} 项、空白补齐 ${fillN} 项、人工强制采用 ${forcedN} 项。`,
+      );
+      await loadJobs();
+    } catch (err) {
+      setMergeError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setExecutingMerge(false);
+    }
+  }
+
+  async function handleRevertMerge(job: ImportJobSummary) {
+    const confirmed = window.confirm(t.revertMergeConfirm);
+    if (!confirmed) return;
+    const targetId = job.job_id || job.id;
+    setError("");
+    setInfoMessage("");
+    setRevertingJobId(targetId);
+    try {
+      const res = await revertImportMerge(targetId);
+      setInfoMessage(
+        `已撤销本子合并（${job.original_filename}）：回退字段 ${res.reverted_fields} 处，清理新增独立实体 ${res.deleted_entities} 项（状态恢复为 ${res.job_status}）。`,
+      );
+      await loadJobs();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setRevertingJobId(null);
+    }
+  }
+
+  function renderMergeCategoryBadge(category: MergeChangeCategory) {
+    if (category === "updated") {
+      return (
+        <Badge
+          variant="secondary"
+          className="border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+        >
+          更新
+        </Badge>
+      );
+    }
+    if (category === "fill_blank") {
+      return (
+        <Badge
+          variant="secondary"
+          className="border-blue-500/30 bg-blue-500/15 text-blue-700 dark:text-blue-300"
+        >
+          填空
+        </Badge>
+      );
+    }
+    if (category === "time_regression") {
+      return (
+        <Badge
+          variant="secondary"
+          className="border-amber-500/40 bg-amber-500/15 text-amber-800 dark:text-amber-300"
+        >
+          时间倒退已忽略
+        </Badge>
+      );
+    }
+    if (category === "manual_protected") {
+      return (
+        <Badge
+          variant="secondary"
+          className="border-purple-500/40 bg-purple-500/15 text-purple-800 dark:text-purple-300"
+        >
+          人工保护已忽略
+        </Badge>
+      );
+    }
+    if (category === "same_time_conflict") {
+      return (
+        <Badge
+          variant="outline"
+          className="border-destructive/50 bg-destructive/15 font-semibold text-destructive"
+        >
+          同时间冲突
+        </Badge>
+      );
+    }
+    return <Badge variant="outline">{category}</Badge>;
+  }
+
+  function renderComparisonDetail(item: MergeChangeItem) {
+    const incomingStr = formatMergeVal(item.incoming_value);
+    const currentStr = formatMergeVal(item.current_value);
+    const inTime = item.incoming_as_of_time || "—";
+    const curTime = item.current_as_of_time || "—";
+
+    if (item.category === "time_regression") {
+      return (
+        <span>
+          <span className="font-medium text-amber-800 dark:text-amber-300">
+            {incomingStr} ({inTime} 本子)
+          </span>{" "}
+          → 当前保留：
+          <span className="font-semibold text-foreground">
+            {currentStr} ({curTime} 本子)
+          </span>
+        </span>
+      );
+    }
+    if (item.category === "manual_protected") {
+      return (
+        <span>
+          <span className="text-muted-foreground">
+            {incomingStr} ({inTime} 本子)
+          </span>{" "}
+          → 当前保留人工修改：
+          <span className="font-semibold text-purple-800 dark:text-purple-300">
+            {currentStr}
+          </span>
+        </span>
+      );
+    }
+    if (item.category === "same_time_conflict") {
+      return (
+        <span>
+          本次导入：
+          <span className="font-semibold text-destructive">
+            {incomingStr} ({inTime} 本子)
+          </span>{" "}
+          vs 当前值：
+          <span className="font-semibold text-foreground">
+            {currentStr} ({curTime} 本子)
+          </span>
+        </span>
+      );
+    }
+    if (item.category === "fill_blank") {
+      return (
+        <span>
+          当前：<span className="text-muted-foreground">（空）</span> → 补齐为：
+          <span className="font-semibold text-blue-700 dark:text-blue-300">
+            {incomingStr} ({inTime} 本子)
+          </span>
+        </span>
+      );
+    }
+    return (
+      <span>
+        原值：
+        <span className="text-muted-foreground">
+          {currentStr} ({curTime} 本子)
+        </span>{" "}
+        → 更新为：
+        <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+          {incomingStr} ({inTime} 本子)
+        </span>
+      </span>
+    );
+  }
+
   const previewSummary = useMemo(() => {
     const list = importJob?.preview?.people || [];
     let newCount = 0;
@@ -630,7 +951,7 @@ export default function AdminImportsPage() {
           variant="secondary"
           className="border-blue-500/30 bg-blue-500/15 text-blue-700 dark:text-blue-300"
         >
-          已合并 (merged)
+          merged（已合并）
         </Badge>
       );
     }
@@ -781,21 +1102,59 @@ export default function AdminImportsPage() {
                               <Button
                                 size="sm"
                                 variant="outline"
+                                onClick={() => handleOpenMergePreview(job)}
+                              >
+                                {t.mergePreviewBtn}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
                                 onClick={() => handleDeleteJob(job)}
                               >
                                 {t.delete}
                               </Button>
                             </>
                           ) : null}
-                          {job.status === "provisioned" ||
-                          job.status === "merged" ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleOpenRosterModal(job)}
-                            >
-                              查看清单（不含口令）
-                            </Button>
+                          {job.status === "provisioned" ? (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleOpenMergePreview(job)}
+                              >
+                                {t.mergePreviewBtn}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleOpenRosterModal(job)}
+                              >
+                                查看清单（不含口令）
+                              </Button>
+                            </>
+                          ) : null}
+                          {job.status === "merged" ? (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  revertingJobId === (job.job_id || job.id)
+                                }
+                                onClick={() => handleRevertMerge(job)}
+                              >
+                                {revertingJobId === (job.job_id || job.id)
+                                  ? t.loading
+                                  : t.revertMergeBtn}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleOpenRosterModal(job)}
+                              >
+                                查看清单（不含口令）
+                              </Button>
+                            </>
                           ) : null}
                           {job.status === "failed" ? (
                             <Button
@@ -815,6 +1174,356 @@ export default function AdminImportsPage() {
             </table>
           </div>
         )}
+
+        {/* Phase 2 Multi-Proposal Merge Preview & Conflict Arbitration Modal */}
+        <Dialog open={mergeModalOpen} onOpenChange={setMergeModalOpen}>
+          <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>
+                {t.mergeDialogTitle} — {mergeTargetJob?.original_filename || ""}
+              </DialogTitle>
+              <DialogDescription>{t.mergeDialogDesc}</DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 text-xs">
+              <div className="flex flex-wrap items-end justify-between gap-3 rounded-md border border-border bg-muted/30 p-3">
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="merge-as-of" className="text-xs">
+                      本次合并基准日期 (as_of_time)
+                    </Label>
+                    <Input
+                      id="merge-as-of"
+                      type="date"
+                      value={mergeAsOfInput}
+                      onChange={(e) => setMergeAsOfInput(e.target.value)}
+                      className="h-8 w-44 font-mono text-xs"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={mergeLoading}
+                    onClick={handleRefreshMergePreview}
+                  >
+                    {mergeLoading ? t.loading : "重新比对预览"}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  合并仅增量演进课题组资料库与字段级溯源，绝不新建或改动已有用户账号与口令。
+                </p>
+              </div>
+
+              {mergeError ? (
+                <p role="alert" className="text-sm text-destructive">
+                  {mergeError}
+                </p>
+              ) : null}
+
+              {mergeLoading ? (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  {t.loading}
+                </p>
+              ) : mergePreview ? (
+                <div className="space-y-4">
+                  {/* Top 6-item Summary Cards (Spec §10.5) */}
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6">
+                    <div className="rounded-md border border-border bg-card p-2.5">
+                      <p className="text-[11px] text-muted-foreground">
+                        {t.mergeSummaryAdded}
+                      </p>
+                      <p className="mt-1 font-display text-lg font-semibold text-foreground">
+                        新增 {mergePreview.summary.added}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2.5">
+                      <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
+                        {t.mergeSummaryUpdated}
+                      </p>
+                      <p className="mt-1 font-display text-lg font-semibold text-emerald-800 dark:text-emerald-200">
+                        更新 {mergePreview.summary.updated}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-2.5">
+                      <p className="text-[11px] text-blue-800 dark:text-blue-300">
+                        {t.mergeSummaryFillBlank}
+                      </p>
+                      <p className="mt-1 font-display text-lg font-semibold text-blue-800 dark:text-blue-200">
+                        填空 {mergePreview.summary.fill_blank}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5">
+                      <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                        {t.mergeSummaryTimeRegression}
+                      </p>
+                      <p className="mt-1 font-display text-lg font-semibold text-amber-800 dark:text-amber-200">
+                        倒退 {mergePreview.summary.time_regression}（已自动忽略）
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-purple-500/40 bg-purple-500/10 p-2.5">
+                      <p className="text-[11px] text-purple-800 dark:text-purple-300">
+                        {t.mergeSummaryManualProtected}
+                      </p>
+                      <p className="mt-1 font-display text-lg font-semibold text-purple-800 dark:text-purple-200">
+                        人工保护 {mergePreview.summary.manual_protected}（已自动忽略）
+                      </p>
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-md border p-2.5",
+                        mergePreview.summary.same_time_conflict > 0
+                          ? "border-destructive bg-destructive/15"
+                          : "border-border bg-card",
+                      )}
+                    >
+                      <p className="text-[11px] text-muted-foreground">
+                        {t.mergeSummaryConflict}
+                      </p>
+                      <p
+                        className={cn(
+                          "mt-1 font-display text-lg font-semibold",
+                          mergePreview.summary.same_time_conflict > 0
+                            ? "text-destructive"
+                            : "text-foreground",
+                        )}
+                      >
+                        待裁决冲突 {mergePreview.summary.same_time_conflict}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Added Entities Summary */}
+                  {mergePreview.added_entities &&
+                  mergePreview.added_entities.length > 0 ? (
+                    <div className="rounded-md border border-border bg-muted/20 p-3">
+                      <p className="mb-1.5 font-medium text-foreground">
+                        本次将直接并入的新增条目（共{" "}
+                        {mergePreview.added_entities.length} 项）：
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {mergePreview.added_entities.map((ent, idx) => (
+                          <Badge
+                            key={`${ent.entity_type}-${ent.name}-${idx}`}
+                            variant="outline"
+                            className="text-xs"
+                          >
+                            [
+                            {ENTITY_TYPE_LABELS[ent.entity_type] ||
+                              ent.entity_type}
+                            ] {ent.name}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Category filter buttons */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(
+                      [
+                        ["all", `全部字段变更 (${mergePreview.changes.length})`],
+                        ["updated", `更新 (${mergePreview.summary.updated})`],
+                        ["fill_blank", `填空 (${mergePreview.summary.fill_blank})`],
+                        [
+                          "time_regression",
+                          `时间倒退已忽略 (${mergePreview.summary.time_regression})`,
+                        ],
+                        [
+                          "manual_protected",
+                          `人工保护已忽略 (${mergePreview.summary.manual_protected})`,
+                        ],
+                        [
+                          "same_time_conflict",
+                          `同时间冲突 (${mergePreview.summary.same_time_conflict})`,
+                        ],
+                      ] as const
+                    ).map(([catKey, catLabel]) => (
+                      <Button
+                        key={catKey}
+                        type="button"
+                        size="sm"
+                        variant={
+                          mergeCategoryFilter === catKey ? "default" : "outline"
+                        }
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() => setMergeCategoryFilter(catKey)}
+                      >
+                        {catLabel}
+                      </Button>
+                    ))}
+                  </div>
+
+                  {/* Changes Detail Table */}
+                  {filteredMergeChanges.length === 0 ? (
+                    <div className="rounded-md border border-border bg-card p-6 text-center text-muted-foreground">
+                      当前筛选分类下暂无字段级差异记录。
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-md border border-border">
+                      <table className="w-full text-left text-xs">
+                        <thead className="border-b border-border bg-muted/40 text-muted-foreground">
+                          <tr>
+                            <th className="px-3 py-2">实体名称</th>
+                            <th className="px-3 py-2">字段名</th>
+                            <th className="px-3 py-2">变化类别</th>
+                            <th className="px-3 py-2">对比详情</th>
+                            <th className="px-3 py-2">裁决操作</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {filteredMergeChanges.map((item) => {
+                            const decision = mergeDecisions[item.change_key];
+                            const isConflict =
+                              item.category === "same_time_conflict" ||
+                              item.requires_decision;
+                            const isForceable =
+                              item.category === "time_regression" ||
+                              item.category === "manual_protected";
+                            return (
+                              <tr
+                                key={item.change_key}
+                                className={
+                                  isConflict
+                                    ? "bg-destructive/10"
+                                    : undefined
+                                }
+                              >
+                                <td className="px-3 py-2.5 font-medium text-foreground">
+                                  <span className="mr-1 text-muted-foreground">
+                                    [
+                                    {ENTITY_TYPE_LABELS[item.entity_type] ||
+                                      item.entity_type}
+                                    ]
+                                  </span>
+                                  {item.entity_name}
+                                </td>
+                                <td className="px-3 py-2.5 font-mono">
+                                  {FIELD_LABELS[item.field] || item.field}
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  {renderMergeCategoryBadge(item.category)}
+                                </td>
+                                <td className="px-3 py-2.5 leading-relaxed">
+                                  {renderComparisonDetail(item)}
+                                </td>
+                                <td className="px-3 py-2.5">
+                                  {isForceable ? (
+                                    <div className="space-y-0.5">
+                                      <label className="flex cursor-pointer items-center gap-1.5 font-medium text-foreground">
+                                        <input
+                                          type="checkbox"
+                                          checked={decision === "force_adopt"}
+                                          onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            setMergeDecisions((prev) => {
+                                              const next = { ...prev };
+                                              if (checked) {
+                                                next[item.change_key] =
+                                                  "force_adopt";
+                                              } else {
+                                                delete next[item.change_key];
+                                              }
+                                              return next;
+                                            });
+                                          }}
+                                          className="h-3.5 w-3.5 rounded border-border"
+                                        />
+                                        {t.forceAdoptLabel}
+                                      </label>
+                                      <p className="text-[11px] text-muted-foreground">
+                                        {t.forceAdoptHint}
+                                      </p>
+                                    </div>
+                                  ) : isConflict ? (
+                                    <div className="flex flex-col gap-1">
+                                      <label className="flex cursor-pointer items-center gap-1.5 font-medium text-foreground">
+                                        <input
+                                          type="radio"
+                                          name={`conflict-${item.change_key}`}
+                                          checked={
+                                            decision === "adopt_incoming"
+                                          }
+                                          onChange={() =>
+                                            setMergeDecisions((prev) => ({
+                                              ...prev,
+                                              [item.change_key]:
+                                                "adopt_incoming",
+                                            }))
+                                          }
+                                          className="h-3.5 w-3.5"
+                                        />
+                                        {t.adoptIncomingLabel}
+                                      </label>
+                                      <label className="flex cursor-pointer items-center gap-1.5 font-medium text-foreground">
+                                        <input
+                                          type="radio"
+                                          name={`conflict-${item.change_key}`}
+                                          checked={decision === "keep_current"}
+                                          onChange={() =>
+                                            setMergeDecisions((prev) => ({
+                                              ...prev,
+                                              [item.change_key]: "keep_current",
+                                            }))
+                                          }
+                                          className="h-3.5 w-3.5"
+                                        />
+                                        {t.keepCurrentLabel}
+                                      </label>
+                                    </div>
+                                  ) : (
+                                    <span className="text-muted-foreground">
+                                      默认自动写入
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {unresolvedConflictCount > 0 ? (
+                    <p
+                      role="alert"
+                      className="text-xs font-medium text-destructive"
+                    >
+                      ⚠ {t.unresolvedConflictsHint}（剩余待裁决冲突：
+                      {unresolvedConflictCount} 项）
+                    </p>
+                  ) : null}
+
+                  <DialogFooter className="flex flex-wrap items-center justify-between gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setMergeModalOpen(false)}
+                    >
+                      {t.cancel}
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={
+                        executingMerge ||
+                        mergeLoading ||
+                        unresolvedConflictCount > 0
+                      }
+                      onClick={handleExecuteMerge}
+                    >
+                      {executingMerge
+                        ? "正在执行版本合并…"
+                        : unresolvedConflictCount > 0
+                          ? `${t.confirmExecuteMerge}（待裁决 ${unresolvedConflictCount} 项）`
+                          : t.confirmExecuteMerge}
+                    </Button>
+                  </DialogFooter>
+                </div>
+              ) : null}
+            </div>
+          </DialogContent>
+        </Dialog>
 
         {/* Passwordless Roster Modal */}
         <Dialog open={rosterModalOpen} onOpenChange={setRosterModalOpen}>
