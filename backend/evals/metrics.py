@@ -221,7 +221,10 @@ def evaluate(
             )
         gold = _gold(row)
         cited = {str(hit["key"]) for hit in decision["citations"]}
-        latencies.append(float(row["elapsed_ms"]))
+        row_elapsed = float(row["elapsed_ms"])
+        if mode == "hybrid_rrf_rerank":
+            row_elapsed += float(row.get("rerank_ms") or 0.0)
+        latencies.append(row_elapsed)
         correct_refusal = (row["answerable"] and not decision["refused"]) or (
             not row["answerable"] and decision["refused"]
         )

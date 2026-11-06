@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,6 +29,8 @@ from app.rag.retrieve import search_knowledge
 from app.rag.rrf import Hit, decision_score
 from evals.metrics import MODES as METRICS_MODES
 from evals.metrics import evaluate
+from evals.report import render_eval_block
+from evals.run_eval import _choose_rrf
 from sqlalchemy import select
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
@@ -152,6 +155,39 @@ async def test_rerank_client_formats_and_outbound_pii_redaction() -> None:
     )
     with pytest.raises(RerankError):
         await bad_client.rerank("q", ["d1"])
+
+    # Verify incomplete results (e.g. only 1 of 2 docs) and duplicate indices raise RerankError
+    def _incomplete_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
+
+    incomplete_client = RerankClient(
+        base_url="http://rerank.internal:3425/v1",
+        model="bge-reranker-v2-m3",
+        transport=httpx.MockTransport(_incomplete_handler),
+    )
+    with pytest.raises(RerankError) as exc_inc:
+        await incomplete_client.rerank("q", ["d1", "d2"])
+    assert exc_inc.value.code == "invalid_response"
+
+    def _dup_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.4},
+                ]
+            },
+        )
+
+    dup_client = RerankClient(
+        base_url="http://rerank.internal:3425/v1",
+        model="bge-reranker-v2-m3",
+        transport=httpx.MockTransport(_dup_handler),
+    )
+    with pytest.raises(RerankError) as exc_dup:
+        await dup_client.rerank("q", ["d1", "d2"])
+    assert exc_dup.value.code == "invalid_response"
 
 
 def test_reranker_settings_and_fingerprint_stability() -> None:
@@ -515,4 +551,91 @@ def test_decision_score_and_eval_rerank_failed_refusal() -> None:
     )
     assert float(rrf_metrics["false_refusal_rate"]) == pytest.approx(0.0)
     assert float(rrf_metrics["citation_f1"]) == pytest.approx(1.0)
+
+
+def test_rerank_latency_isolation_rrf_k_freeze_and_report(tmp_path: Path) -> None:
+    # 1. _choose_rrf freezes rrf_k for hybrid_rrf_rerank to featurized_rrf_k
+    rows: list[dict[str, object]] = [
+        {
+            "id": "q1",
+            "split": "dev",
+            "type": "fact",
+            "answerable": True,
+            "gold": ["doc-1#0"],
+            "query_tokens": ["低温"],
+            "elapsed_ms": 15.0,
+            "rerank_ms": 42.0,
+            "featurized_rrf_k": 40,
+            "df": {"低温": 1},
+            "n_docs": 10,
+            "rerank_failed": False,
+            "hits": [
+                {
+                    "key": "doc-1#0",
+                    "cosine": 0.85,
+                    "bm25": 2.0,
+                    "rerank_score": 0.94,
+                    "tokens": ["低温"],
+                    "chunk_id": "c1",
+                    "document_id": "d1",
+                    "heading": "H1",
+                    "title": "T1",
+                    "chunk_index": 0,
+                }
+            ],
+        }
+    ]
+    assert _choose_rrf(rows, "hybrid_rrf_rerank") == 40
+
+    # 2. evaluate() separates base elapsed_ms (15.0) from rerank_ms (42.0) across modes
+    params = {
+        "rrf_k": 40,
+        "evidence_score_min": 0.50,
+        "rare_coverage_min": 0.0,
+        "cite_margin": 0.15,
+        "cite_k": 2,
+    }
+    dense_eval = evaluate(rows, mode="dense", params=params, include_ci=False)  # type: ignore[arg-type]
+    rrf_eval = evaluate(rows, mode="hybrid_rrf", params=params, include_ci=False)  # type: ignore[arg-type]
+    api_eval = evaluate(rows, mode="hybrid_rrf_rerank", params=params, include_ci=False)  # type: ignore[arg-type]
+    assert float(dense_eval["latency_ms_p50"]) == pytest.approx(15.0)
+    assert float(rrf_eval["latency_ms_p50"]) == pytest.approx(15.0)
+    assert float(api_eval["latency_ms_p50"]) == pytest.approx(57.0)
+
+    # 3. render_eval_block includes hybrid_rrf_rerank dev/test rows when present
+    res_dir = tmp_path / "results" / "v1"
+    cal_dir = tmp_path / "calibrations"
+    res_dir.mkdir(parents=True)
+    cal_dir.mkdir(parents=True)
+    sample_metric = {"value": 0.9, "ci_low": 0.8, "ci_high": 1.0, "n": 10}
+    split_block = {
+        "n": 10,
+        "recall_at_5": sample_metric,
+        "mrr": sample_metric,
+        "citation_f1": sample_metric,
+        "refusal_correctness": sample_metric,
+        "false_refusal_rate": {"value": 0.1, "ci_low": 0.0, "ci_high": 0.2, "n": 10},
+        "false_answer_rate": {"value": 0.0, "ci_low": 0.0, "ci_high": 0.1, "n": 10},
+    }
+    (res_dir / "test-rerank.json").write_text(
+        json.dumps(
+            {
+                "dataset": "v1",
+                "embedder_fingerprint": "hashing|hashing-cjk-v1|512|redact=0|qp=e3b0c442|dp=e3b0c442|rr=bge@v1",
+                "selected_mode": "hybrid_rrf_rerank",
+                "git_sha": "abc1234",
+                "generated_at": "2026-11-06T00:00:00Z",
+                "questions": {"dev": 10, "test": 10},
+                "modes": {
+                    "dense": {"dev": split_block, "test": split_block},
+                    "hybrid_rrf_rerank": {"dev": split_block, "test": split_block},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    rendered = render_eval_block(tmp_path / "results", cal_dir)
+    assert "hybrid RRF + API rerank (selected) | dev |" in rendered
+    assert "hybrid RRF + API rerank (selected) | test |" in rendered
+
 

@@ -163,6 +163,11 @@ class RerankClient:
                     "invalid_response",
                     f"Rerank result index {raw_idx} out of range (0..{n_docs - 1})",
                 )
+            if raw_idx in seen_indices:
+                raise RerankError(
+                    "invalid_response",
+                    f"Duplicate rerank result index {raw_idx}",
+                )
             raw_score = entry.get("relevance_score")
             if raw_score is None:
                 raw_score = entry.get("score")
@@ -176,6 +181,13 @@ class RerankClient:
                 raise RerankError("invalid_response", "Rerank score must be finite")
             seen_indices.add(raw_idx)
             parsed.append(RerankResultItem(index=raw_idx, relevance_score=score_val))
+
+        expected_count = n_docs if top_n is None else min(max(int(top_n), 0), n_docs)
+        if len(parsed) != expected_count:
+            raise RerankError(
+                "invalid_response",
+                f"Rerank response returned {len(parsed)} results, expected {expected_count}",
+            )
 
         parsed.sort(key=lambda item: (-item.relevance_score, item.index))
         return parsed

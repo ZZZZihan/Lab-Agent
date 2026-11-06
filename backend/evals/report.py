@@ -173,6 +173,8 @@ def render_eval_block(results_dir: Path, calibrations_dir: Path) -> str:
             ("hybrid_rrf", "test"),
             ("hybrid_lexical_rerank", "test"),
             ("hybrid_lexical_rerank15", "test"),
+            ("hybrid_rrf_rerank", "dev"),
+            ("hybrid_rrf_rerank", "test"),
         ]
         for mode_key, split in mode_splits:
             mode_entry = modes.get(mode_key)

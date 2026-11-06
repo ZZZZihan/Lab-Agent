@@ -16,7 +16,7 @@ from app.audit import write_audit
 from app.config import MODES, Settings
 from app.rag.bm25 import bm25_score, document_frequencies, rare_coverage
 from app.rag.embedder import Embedder
-from app.rag.rerank import RerankClient, get_rerank_client
+from app.rag.rerank import RerankClient, RerankError, get_rerank_client
 from app.rag.rrf import Hit, order_for_mode
 from app.rag.tokenize import content_tokens, tokenize, tsquery
 
@@ -30,6 +30,7 @@ class SearchBundle:
     elapsed_ms: float
     mode: str
     rerank_failed: bool = False
+    rerank_ms: float = 0.0
 
 
 RetrievalBundle = SearchBundle
@@ -276,6 +277,7 @@ async def search_knowledge(
             b=settings.bm25_b,
         )
     rerank_failed = False
+    rerank_ms = 0.0
     use_api_rerank = active_mode == "hybrid_rrf_rerank"
     if use_api_rerank:
         rrf_ranked = order_for_mode(
@@ -287,6 +289,7 @@ async def search_knowledge(
             n_docs=n_docs,
         )
         if rrf_ranked:
+            rerank_started = time.perf_counter()
             pool_size = int(settings.rerank_pool or 20)
             head = [cast(Hit, dict(h)) for h in rrf_ranked[:pool_size]]
             tail = [cast(Hit, dict(h)) for h in rrf_ranked[pool_size:]]
@@ -302,7 +305,12 @@ async def search_knowledge(
                     for item in rerank_items
                 }
                 for idx, h in enumerate(head):
-                    score_val = score_by_idx.get(idx, 0.0)
+                    if idx not in score_by_idx:
+                        raise RerankError(
+                            "invalid_response",
+                            f"Missing rerank score for index {idx}",
+                        )
+                    score_val = score_by_idx[idx]
                     h["rerank_score"] = score_val
                     h["rerank"] = score_val
                 head.sort(
@@ -329,6 +337,8 @@ async def search_knowledge(
                         "reason": "upstream_error",
                     },
                 )
+            finally:
+                rerank_ms = (time.perf_counter() - rerank_started) * 1000.0
         else:
             ranked = rrf_ranked
     else:
@@ -359,6 +369,7 @@ async def search_knowledge(
         elapsed_ms=elapsed,
         mode=active_mode,
         rerank_failed=rerank_failed,
+        rerank_ms=rerank_ms,
     )
 
 

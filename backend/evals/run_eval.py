@@ -298,11 +298,15 @@ async def _featurize(
                         "answerable": bool(question["answerable"]),
                         "gold": gold,
                         "query_tokens": content_tokens(str(question["question"])),
-                        "elapsed_ms": bundle.elapsed_ms,
+                        "elapsed_ms": max(
+                            0.0, float(bundle.elapsed_ms) - float(bundle.rerank_ms)
+                        ),
+                        "rerank_ms": float(bundle.rerank_ms),
                         "embed_ms": embedder.last_query_ms,
                         "df": bundle.df,
                         "n_docs": bundle.n_docs,
                         "rerank_failed": bool(bundle.rerank_failed),
+                        "featurized_rrf_k": int(settings.rrf_k or 60),
                         "hits": [
                             {
                                 "key": hit["key"],
@@ -332,6 +336,12 @@ async def _featurize(
 def _choose_rrf(rows: list[dict[str, object]], mode: str) -> int:
     """Pick RRF k on the dev split using retrieval metrics only."""
     if mode == "dense":
+        return 60
+    if mode == "hybrid_rrf_rerank":
+        if rows:
+            val = rows[0].get("featurized_rrf_k")
+            if isinstance(val, int):
+                return val
         return 60
     best_k = 60
     best = (-1.0, -1.0)
