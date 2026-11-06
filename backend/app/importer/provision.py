@@ -778,12 +778,48 @@ async def sync_lab_profile_rag(
     existing_doc = await session.scalar(
         select(Document).where(Document.doc_key == doc_key)
     )
-    visibility = existing_doc.visibility if existing_doc is not None else "lab"
+    prev_profile_doc = await session.scalar(
+        select(Document)
+        .where(
+            Document.doc_key.like("lab-profile-%"),
+            Document.deleted_at.is_(None),
+        )
+        .order_by(Document.updated_at.desc(), Document.created_at.desc())
+        .limit(1)
+    )
+    visibility = (
+        existing_doc.visibility
+        if existing_doc is not None
+        else (prev_profile_doc.visibility if prev_profile_doc is not None else "lab")
+    )
+
+    effective_owner_id: uuid.UUID | None = None
+    if existing_doc is not None and existing_doc.owner_id is not None:
+        effective_owner_id = existing_doc.owner_id
+    elif prev_profile_doc is not None and prev_profile_doc.owner_id is not None:
+        effective_owner_id = prev_profile_doc.owner_id
+    elif target_job is not None and (
+        target_job.provisioned_by is not None or target_job.uploaded_by is not None
+    ):
+        candidate_id = target_job.provisioned_by or target_job.uploaded_by
+        candidate_user = (
+            await session.get(User, candidate_id) if candidate_id is not None else None
+        )
+        if candidate_user is not None and candidate_user.role == "admin":
+            effective_owner_id = candidate_user.id
+    if effective_owner_id is None:
+        admin_user_id = await session.scalar(
+            select(User.id)
+            .where(User.role == "admin")
+            .order_by(User.created_at.asc())
+            .limit(1)
+        )
+        effective_owner_id = admin_user_id or actor_id
 
     await upsert_source(
         session,
         embedder=embedder,
-        owner_id=actor_id,
+        owner_id=effective_owner_id,
         source=source,
         records=[
             (
@@ -799,6 +835,8 @@ async def sync_lab_profile_rag(
         ],
     )
     rag_doc = await session.scalar(select(Document).where(Document.doc_key == doc_key))
+    if rag_doc is not None and rag_doc.owner_id != effective_owner_id:
+        rag_doc.owner_id = effective_owner_id
     if target_job is not None and rag_doc is not None:
         target_job.rag_document_id = rag_doc.id
 

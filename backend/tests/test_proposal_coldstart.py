@@ -1292,7 +1292,7 @@ async def test_import_job_mgmt_roster_lab_crud_autoreindex_batch_and_export(
 
 async def test_codex_review_regressions(client: AsyncClient) -> None:
     """Regression suite covering all 5 Codex review scenarios."""
-    await _seed_admin()
+    admin_user = await _seed_admin()
     admin_headers = await _login_headers(client, ADMIN_EMAIL)
     raw_docx = build_synthetic_proposal_docx()
 
@@ -1630,6 +1630,62 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     )
     assert r_md_export.status_code == 200
     assert distinct_rel in r_md_export.content.decode("utf-8")
+
+    # --- Round 3 Regression A: Member edits and /lab/reindex preserve canonical profile document owner_id & visibility ---
+    async with maker() as session:
+        prof_doc_before = await session.scalar(
+            select(Document).where(Document.doc_key == new_doc_key)
+        )
+        assert prof_doc_before is not None
+        assert prof_doc_before.owner_id == admin_user.id
+        prof_doc_before.visibility = "private"
+        await session.commit()
+
+    r_member_reindex = await client.post("/api/v1/lab/reindex", headers=yang_headers)
+    assert r_member_reindex.status_code == 200
+    async with maker() as session:
+        prof_doc_after = await session.scalar(
+            select(Document).where(Document.doc_key == new_doc_key)
+        )
+        assert prof_doc_after is not None
+        assert prof_doc_after.owner_id == admin_user.id
+        assert prof_doc_after.visibility == "private"
+        prof_doc_after.visibility = "lab"
+        await session.commit()
+
+    # --- Round 3 Regression B: T1 members retain certificate-based fingerprint across profile updates ---
+    lin_row = next(p for p in people_rows if p["name"] == "林雪莹")
+    wang_row = next(p for p in people_rows if p["name"] == "王诗涵")
+    cao_row = next(p for p in people_rows if p["name"] == "曹梦轩")
+    orig_lin_fp = lin_row["entity_fingerprint"]
+    orig_wang_fp = wang_row["entity_fingerprint"]
+    orig_cao_fp = cao_row["entity_fingerprint"]
+
+    r_lin_upd = await client.patch(
+        f"/api/v1/lab/people/{lin_row['id']}",
+        json={"bio": "深度学习与教育大模型方向硕士生", "research_specialty": "大模型微调"},
+        headers=admin_headers,
+    )
+    assert r_lin_upd.status_code == 200, r_lin_upd.text
+    assert r_lin_upd.json()["person"]["entity_fingerprint"] == orig_lin_fp
+
+    # Two T1 members with the same name and affiliation but distinct student IDs never collide on update
+    r_cao_rename = await client.patch(
+        f"/api/v1/lab/people/{cao_row['id']}",
+        json={"name": "王诗涵", "bio": "同名T1研究生B"},
+        headers=admin_headers,
+    )
+    assert r_cao_rename.status_code == 200, r_cao_rename.text
+    assert r_cao_rename.json()["person"]["entity_fingerprint"] == orig_cao_fp
+
+    r_wang_upd = await client.patch(
+        f"/api/v1/lab/people/{wang_row['id']}",
+        json={"bio": "同名T1研究生A"},
+        headers=admin_headers,
+    )
+    assert r_wang_upd.status_code == 200, r_wang_upd.text
+    assert r_wang_upd.json()["person"]["entity_fingerprint"] == orig_wang_fp
+
 
 
 

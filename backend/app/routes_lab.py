@@ -1174,6 +1174,32 @@ async def update_lab_person(
     if actor.role != "admin" and person.user_id != user.id:
         raise APIError(403, "forbidden", "仅管理员或本人可修改成员档案")
 
+    old_name = person.name
+    old_affiliation = person.affiliation
+    old_email = person.email
+    old_fp = person.entity_fingerprint
+    old_t2_t3_fp = person_fp(
+        tier="T3" if old_email else "T2",
+        login_name=None,
+        name=old_name,
+        affiliation=old_affiliation,
+        email=old_email,
+    )
+    is_t1_person = old_fp != old_t2_t3_fp
+    t1_login: str | None = None
+    if is_t1_person and person.user_id is not None:
+        linked_user = await session.get(User, person.user_id)
+        if linked_user is not None and linked_user.login_name:
+            candidate_t1_fp = person_fp(
+                tier="T1",
+                login_name=linked_user.login_name,
+                name=old_name,
+                affiliation=old_affiliation,
+                email=old_email,
+            )
+            if candidate_t1_fp == old_fp:
+                t1_login = linked_user.login_name
+
     if body.name is not None:
         cleaned_name = normalize_person_name(_scrub_str(body.name) or "")
         if not cleaned_name:
@@ -1205,13 +1231,26 @@ async def update_lab_person(
     if body.bio is not None:
         person.bio = _scrub_str(body.bio)
 
-    new_person_fp = person_fp(
-        tier="T3" if person.email else "T2",
-        login_name=None,
-        name=person.name,
-        affiliation=person.affiliation,
-        email=person.email,
-    )
+    if is_t1_person:
+        new_person_fp = (
+            person_fp(
+                tier="T1",
+                login_name=t1_login,
+                name=person.name,
+                affiliation=person.affiliation,
+                email=person.email,
+            )
+            if t1_login
+            else old_fp
+        )
+    else:
+        new_person_fp = person_fp(
+            tier="T3" if person.email else "T2",
+            login_name=None,
+            name=person.name,
+            affiliation=person.affiliation,
+            email=person.email,
+        )
     dup_person_id = await session.scalar(
         select(LabPerson.id).where(
             LabPerson.entity_fingerprint == new_person_fp,
