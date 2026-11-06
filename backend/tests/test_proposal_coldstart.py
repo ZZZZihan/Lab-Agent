@@ -1751,6 +1751,78 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_wang_upd.status_code == 200, r_wang_upd.text
     assert r_wang_upd.json()["person"]["entity_fingerprint"] == orig_wang_fp
 
+    # --- Round 5 Regression: Grouped profile sections > 800 chars split cleanly on blank paragraphs ---
+    from app.importer.formatters import render_lab_profile_markdown
+    from app.rag.chunker import chunk_markdown
+
+    large_people = [
+        {
+            "name": f"成员{i}",
+            "project_role": "applicant" if i == 0 else "member",
+            "degree": "博士",
+            "affiliation": "天津天狮学院计算机科学与技术学院",
+            "title": "教授",
+            "admin_duty": "院长",
+            "tutor_role": "博士生导师",
+            "research_specialty": "人工智能与大模型安全对齐研究",
+            "bio": "长期从事人工智能、自然语言处理、教育测评大模型与多模态学习研究，主持多项国家级与省部级重点科研课题。",
+        }
+        for i in range(10)
+    ]
+    large_projects = [
+        {
+            "title": f"面向教育测评的大模型可信推理与安全对齐关键技术研究子课题{i}",
+            "grant_no": f"AGE2026-{i:03d}",
+            "funder": "全国教育科学规划重点课题",
+            "pi_name": f"成员{i}",
+            "lab_role": "host",
+            "status": "ongoing" if i < 6 else "completed",
+            "start_date": "2025-01-01",
+            "amount_wan": "25.00",
+        }
+        for i in range(10)
+    ]
+    large_achievements = [
+        {
+            "kind": "paper",
+            "title": f"大规模在线教育考试智能评卷与异常行为检测算法研究第{i}篇",
+            "first_author": f"成员{i}",
+            "venue": "计算机学报",
+            "year": 2025,
+            "support_note": "提出了高可靠试题结构化抽取与评分一致性校验方法",
+        }
+        for i in range(10)
+    ]
+    large_facilities = [
+        {
+            "name": f"高性能计算加速集群节点{i}",
+            "spec": "8xA800-80GB GPU服务器及高速互联存储部件",
+            "value_wan": "68.00",
+            "usage_scenario": "用于课题组搭建教育考试专属大模型轻量化微调与推理验证实验环境",
+        }
+        for i in range(10)
+    ]
+    large_md = render_lab_profile_markdown(
+        project_title="大型课题组档案切分回归测试",
+        as_of_time="2026-06-01",
+        people=large_people,
+        projects=large_projects,
+        achievements=large_achievements,
+        facilities=large_facilities,
+        relationship_note="本课题是在前期系列国家级重点课题基础上的深入拓展。",
+    )
+    assert len(large_md) > 4500
+    large_chunks = chunk_markdown(large_md, max_chars=800)
+    assert len(large_chunks) <= 20
+    for ch in large_chunks:
+        assert len(ch.text) <= 800, (
+            f"Chunk {ch.index} ({ch.heading}) exceeded 800 chars: {len(ch.text)}"
+        )
+        first_para = ch.text.split("\n\n", 1)[0]
+        if first_para.startswith("## "):
+            assert "\n" not in first_para
+
+
 
 
 

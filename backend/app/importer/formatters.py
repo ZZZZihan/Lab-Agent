@@ -206,6 +206,7 @@ def render_lab_profile_markdown(
         f"前期成果（{len(achievements)}项）及设备与支撑条件（{len(facilities)}项）。",
         "",
         "## 课题组概况与项目清单",
+        "",
     ]
     if ongoing_projects:
         lines.append(
@@ -213,20 +214,23 @@ def render_lab_profile_markdown(
             + "；".join(format_project_application(p).rstrip("。") for p in ongoing_projects)
             + "。"
         )
+        lines.append("")
     if completed_projects:
         lines.append(
             f"课题组概况与项目清单之已结题项目清单（共{len(completed_projects)}项）："
             + "；".join(format_project_application(p).rstrip("。") for p in completed_projects)
             + "。"
         )
+        lines.append("")
     if rel_text:
         lines.append(
             f"课题组概况与项目清单之本课题与已承担项目的关系：{rel_text.rstrip('。')}。"
         )
-    lines.append("")
+        lines.append("")
 
     if projects:
         lines.append("## 课题组概况与项目清单（承担全部项目汇总）")
+        lines.append("")
         brief_items: list[str] = []
         for p in projects:
             pt = str(_get(p, "title") or "").strip()
@@ -244,6 +248,7 @@ def render_lab_profile_markdown(
 
     if people:
         lines.append("## 团队成员")
+        lines.append("")
         for person in people:
             pname = str(_get(person, "name") or "")
             prole = (
@@ -260,10 +265,11 @@ def render_lab_profile_markdown(
                 )
             else:
                 lines.append(f"团队成员 {pname}（{prole}）：{base_line}。")
-        lines.append("")
+            lines.append("")
 
     if projects:
         lines.append("## 承担项目")
+        lines.append("")
         emitted_rel_notes: set[str] = set()
         for idx, proj in enumerate(projects):
             gno = str(_get(proj, "grant_no") or "").strip()
@@ -279,10 +285,11 @@ def render_lab_profile_markdown(
                 p_line += f"；与本课题关系：{proj_rel.rstrip('。')}"
             prefix = f"承担项目 {gno}：" if gno else "承担项目："
             lines.append(f"{prefix}{p_line}。")
-        lines.append("")
+            lines.append("")
 
     if achievements:
         lines.append("## 前期成果")
+        lines.append("")
         papers = [a for a in achievements if str(_get(a, "kind")) == "paper"]
         for ach in achievements:
             akind = ACHIEVEMENT_KIND_LABELS.get(
@@ -294,6 +301,7 @@ def render_lab_profile_markdown(
                 lines.append(f"前期成果（{akind}）：{a_base}；{sup}。")
             else:
                 lines.append(f"前期成果（{akind}）：{a_base}。")
+            lines.append("")
         if len(papers) > 1:
             paper_items = [
                 format_achievement_application(p, include_support=False).rstrip("。")
@@ -304,13 +312,14 @@ def render_lab_profile_markdown(
                 + "；".join(paper_items)
                 + "。"
             )
-        lines.append("")
+            lines.append("")
 
     if facilities:
         lines.append("## 设备与支撑条件")
+        lines.append("")
         for fac in facilities:
             lines.append(f"设备与支撑条件（实验室算力设备）：{format_facility_application(fac)}")
-        lines.append("")
+            lines.append("")
 
     md = "\n".join(lines).strip() + "\n"
     assert_no_pii(md)
