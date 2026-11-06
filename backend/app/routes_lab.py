@@ -1088,13 +1088,17 @@ async def _require_lab_editor(
     *,
     owner_name: str | None = None,
     new_owner_name: str | None = None,
+    require_owner: bool = False,
+    admin_only: bool = False,
 ) -> User:
     user = await _user(session, actor)
     if actor.role == "admin":
         return user
+    if admin_only:
+        raise APIError(403, "forbidden", "仅管理员可修改或删除公共设备记录")
     if actor.role != "member":
         raise APIError(403, "forbidden", "权限不足")
-    if owner_name is not None or new_owner_name is not None:
+    if require_owner or owner_name is not None or new_owner_name is not None:
         person = await session.scalar(
             select(LabPerson).where(LabPerson.user_id == user.id)
         )
@@ -1106,9 +1110,15 @@ async def _require_lab_editor(
             )
             if n
         }
-        if owner_name is not None:
-            norm_owner = normalize_person_name(owner_name)
-            if not norm_owner or norm_owner not in allowed_names:
+        if require_owner or owner_name is not None:
+            norm_owner = normalize_person_name(owner_name or "")
+            if not norm_owner:
+                raise APIError(
+                    403,
+                    "forbidden",
+                    "未登记负责人的记录仅管理员可修改或删除",
+                )
+            if norm_owner not in allowed_names:
                 raise APIError(403, "forbidden", "仅管理员或条目负责人可修改此记录")
             all_people = list(await session.scalars(select(LabPerson)))
             same_name_count = sum(
@@ -1279,11 +1289,7 @@ async def create_lab_project(
         select(LabProject.id).where(LabProject.entity_fingerprint == fp_val)
     )
     if existing_fp is not None:
-        fp_val = project_fp(
-            grant_no=f"{grant_no or ''}-{uuid.uuid4().hex[:8]}",
-            title=title,
-            funder=funder,
-        )
+        raise APIError(409, "duplicate_entity", "该资产记录已存在（指纹冲突）")
 
     project = LabProject(
         title=title,
@@ -1330,7 +1336,10 @@ async def update_lab_project(
         session,
         actor,
         owner_name=project.pi_name,
-        new_owner_name=_scrub_str(body.pi_name) if body.pi_name is not None else None,
+        new_owner_name=(_scrub_str(body.pi_name) or "")
+        if body.pi_name is not None
+        else None,
+        require_owner=True,
     )
 
     if body.title is not None:
@@ -1404,7 +1413,9 @@ async def delete_lab_project(
     project = await session.get(LabProject, project_id)
     if project is None:
         raise APIError(404, "not_found", "项目记录不存在")
-    user = await _require_lab_editor(session, actor, owner_name=project.pi_name)
+    user = await _require_lab_editor(
+        session, actor, owner_name=project.pi_name, require_owner=True
+    )
 
     await session.delete(project)
     await session.flush()
@@ -1456,13 +1467,7 @@ async def create_lab_achievement(
         select(LabAchievement.id).where(LabAchievement.entity_fingerprint == fp_val)
     )
     if existing_fp is not None:
-        fp_val = achievement_fp(
-            kind=kind,
-            title=f"{title}-{uuid.uuid4().hex[:8]}",
-            year=body.year,
-            raw_text=raw_text,
-            parse_quality=pq,
-        )
+        raise APIError(409, "duplicate_entity", "该资产记录已存在（指纹冲突）")
 
     achievement = LabAchievement(
         kind=kind,
@@ -1506,9 +1511,10 @@ async def update_lab_achievement(
         session,
         actor,
         owner_name=achievement.first_author,
-        new_owner_name=_scrub_str(body.first_author)
+        new_owner_name=(_scrub_str(body.first_author) or "")
         if body.first_author is not None
         else None,
+        require_owner=True,
     )
 
     if body.kind is not None:
@@ -1573,7 +1579,10 @@ async def delete_lab_achievement(
     if achievement is None:
         raise APIError(404, "not_found", "成果记录不存在")
     user = await _require_lab_editor(
-        session, actor, owner_name=achievement.first_author
+        session,
+        actor,
+        owner_name=achievement.first_author,
+        require_owner=True,
     )
 
     await session.delete(achievement)
@@ -1618,9 +1627,7 @@ async def create_lab_facility(
         select(LabFacility.id).where(LabFacility.entity_fingerprint == fp_val)
     )
     if existing_fp is not None:
-        fp_val = facility_fp(
-            category=category, name=f"{name}-{uuid.uuid4().hex[:8]}", spec=spec
-        )
+        raise APIError(409, "duplicate_entity", "该资产记录已存在（指纹冲突）")
 
     facility = LabFacility(
         category=category,
@@ -1657,7 +1664,7 @@ async def update_lab_facility(
     facility = await session.get(LabFacility, facility_id)
     if facility is None:
         raise APIError(404, "not_found", "设备记录不存在")
-    user = await _require_lab_editor(session, actor)
+    user = await _require_lab_editor(session, actor, admin_only=True)
 
     if body.category is not None:
         facility.category = _scrub_str(body.category) or facility.category
@@ -1712,7 +1719,7 @@ async def delete_lab_facility(
     facility = await session.get(LabFacility, facility_id)
     if facility is None:
         raise APIError(404, "not_found", "设备记录不存在")
-    user = await _require_lab_editor(session, actor)
+    user = await _require_lab_editor(session, actor, admin_only=True)
 
     await session.delete(facility)
     await session.flush()

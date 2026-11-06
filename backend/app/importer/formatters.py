@@ -264,14 +264,19 @@ def render_lab_profile_markdown(
 
     if projects:
         lines.append("## 承担项目")
+        emitted_rel_notes: set[str] = set()
         for idx, proj in enumerate(projects):
             gno = str(_get(proj, "grant_no") or "").strip()
             amt = _get(proj, "amount_wan")
             p_line = format_project_application(proj, include_relationship=False).rstrip("。")
             if amt is not None and str(amt).strip():
                 p_line += f"，经费{amt}万元"
-            if idx == 0 and rel_text:
-                p_line += f"；与本课题关系：{rel_text.rstrip('。')}"
+            proj_rel = str(_get(proj, "relationship_note") or "").strip()
+            if idx == 0 and not proj_rel and rel_text:
+                proj_rel = rel_text
+            if proj_rel and proj_rel not in emitted_rel_notes:
+                emitted_rel_notes.add(proj_rel)
+                p_line += f"；与本课题关系：{proj_rel.rstrip('。')}"
             prefix = f"承担项目 {gno}：" if gno else "承担项目："
             lines.append(f"{prefix}{p_line}。")
         lines.append("")

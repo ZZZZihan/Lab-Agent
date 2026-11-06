@@ -1553,4 +1553,83 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_dup_proj.status_code == 409
     assert r_dup_proj.json()["error"]["code"] == "duplicate_entity"
 
+    # --- Round 2 Regression A: Unowned project (`pi_name=None`) / achievement (`first_author=None`)
+    # and shared facility (`PATCH/DELETE /lab/facilities/{id}`) cannot be modified/deleted by non-admin ---
+    r_unowned_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={"title": "未填写负责人的公共项目", "grant_no": "UNOWNED-01"},
+        headers=admin_headers,
+    )
+    assert r_unowned_proj.status_code == 200
+    unowned_proj_id = r_unowned_proj.json()["project"]["id"]
+
+    r_claim_unowned = await client.patch(
+        f"/api/v1/lab/projects/{unowned_proj_id}",
+        json={"pi_name": "杨硕"},
+        headers=yang_headers,
+    )
+    assert r_claim_unowned.status_code == 403
+    assert r_claim_unowned.json()["error"]["code"] == "forbidden"
+
+    r_del_unowned = await client.delete(
+        f"/api/v1/lab/projects/{unowned_proj_id}",
+        headers=yang_headers,
+    )
+    assert r_del_unowned.status_code == 403
+
+    r_fac_member_patch = await client.patch(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        json={"name": "非管理员试图修改设备"},
+        headers=yang_headers,
+    )
+    assert r_fac_member_patch.status_code == 403
+
+    r_fac_member_del = await client.delete(
+        f"/api/v1/lab/facilities/{man_fac_id}",
+        headers=yang_headers,
+    )
+    assert r_fac_member_del.status_code == 403
+
+    # --- Round 2 Regression B: Duplicate software/patent achievement creation returns 409 duplicate_entity ---
+    r_sw1 = await client.post(
+        "/api/v1/lab/achievements",
+        json={
+            "kind": "software",
+            "title": "智能题库查重软著V1.0",
+            "raw_text": "智能题库查重软著V1.0，登记号：2026SR888999",
+            "first_author": "杨硕",
+            "year": 2026,
+        },
+        headers=yang_headers,
+    )
+    assert r_sw1.status_code == 200
+    r_sw_dup = await client.post(
+        "/api/v1/lab/achievements",
+        json={
+            "kind": "software",
+            "title": "智能题库查重软著V1.0（重复提交）",
+            "raw_text": "智能题库查重软著V1.0，登记号：2026SR888999",
+            "first_author": "杨硕",
+            "year": 2026,
+        },
+        headers=yang_headers,
+    )
+    assert r_sw_dup.status_code == 409
+    assert r_sw_dup.json()["error"]["code"] == "duplicate_entity"
+
+    # --- Round 2 Regression C: Distinct `relationship_note` on a later project is preserved in RAG & export ---
+    distinct_rel = "该青年项目为本课题提供可信知识图谱子图对齐算法原型"
+    r_rel_upd = await client.patch(
+        f"/api/v1/lab/projects/{yang_proj_id}",
+        json={"relationship_note": distinct_rel},
+        headers=yang_headers,
+    )
+    assert r_rel_upd.status_code == 200
+    r_md_export = await client.get(
+        "/api/v1/lab/export?format=md", headers=admin_headers
+    )
+    assert r_md_export.status_code == 200
+    assert distinct_rel in r_md_export.content.decode("utf-8")
+
+
 
