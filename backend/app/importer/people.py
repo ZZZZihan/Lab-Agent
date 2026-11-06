@@ -137,7 +137,9 @@ def assign_people_identities(
     used_matched_user_ids: set[uuid.UUID] = set()
 
     for idx, person in enumerate(people, start=1):
-        person.setdefault("key", f"p{idx}")
+        person.setdefault("key", str(person.get("temp_id") or f"p{idx}"))
+        person["temp_id"] = str(person["key"])
+        person["role"] = "pi" if person.get("project_role") == "applicant" else "member"
         name = normalize_person_name(str(person.get("name") or ""))
         person["name"] = name
         raw_cert = str(person.pop("cert", "") or person.get("student_id") or "")

@@ -11,10 +11,10 @@ ID18_RE = re.compile(r"(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])")
 ID15_RE = re.compile(r"(?<![0-9A-Za-z])\d{15}(?![0-9A-Za-z])")
 # 11-digit mainland mobile phone
 MOBILE_RE = re.compile(
-    r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)"
+    r"(?<![0-9A-Za-z])(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?![0-9A-Za-z])"
 )
 # Landline with area code hyphen (e.g. 022-83951234)
-TEL_RE = re.compile(r"(?<!\d)0\d{2,3}-\d{7,8}(?!\d)")
+TEL_RE = re.compile(r"(?<![0-9A-Za-z])0\d{2,3}-\d{7,8}(?![0-9A-Za-z])")
 
 PII_REPLACEMENT = "[已脱敏]"
 
@@ -67,6 +67,9 @@ def assert_no_pii(payload: str | dict[str, object] | list[object]) -> None:
     """Verify zero 18/15-digit ID card numbers or 11-digit mobile numbers remain."""
     if isinstance(payload, str):
         serialized = payload
+    elif isinstance(payload, dict):
+        cleaned = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+        serialized = json.dumps(cleaned, ensure_ascii=False, default=str)
     else:
         serialized = json.dumps(payload, ensure_ascii=False, default=str)
     sanitized = _HEX64_RE.sub("", _UUID_RE.sub("", serialized))

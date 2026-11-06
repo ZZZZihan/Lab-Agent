@@ -1,17 +1,46 @@
-"""Safe .docx reader with magic-byte, zip-bomb, macro, and merged-cell checks."""
+"""Safe .docx reader with magic-byte, zip-bomb, macro, merged-cell, and embedded-image extraction."""
 
 from __future__ import annotations
 
 import io
+import posixpath
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 import zipfile
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import docx
 
 ZIP_MAGIC = b"PK\x03\x04"
 ZERO_WIDTH_RE = re.compile(r"[​-‏﻿]")
+
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+MAX_EMBEDDED_IMAGE_READ_BYTES = 2_097_152 + 1  # Read up to 2 MiB + 1 byte to trigger SIGNATURE_TOO_LARGE safely
+
+
+@dataclass(frozen=True)
+class EmbeddedImage:
+    location_kind: Literal["table_cell", "paragraph"]
+    table_index: int | None
+    row_index: int | None
+    cell_index: int | None
+    block_index: int  # paragraph / table sequence index in document.xml <w:body>
+    rel_id: str  # r:embed or r:id
+    media_path: str  # e.g. word/media/image2.jpeg
+    data: bytes
+
+
+@dataclass(frozen=True)
+class BodyBlock:
+    block_index: int
+    kind: Literal["paragraph", "table"]
+    text: str
+    table_index: int | None = None
 
 
 class DocxValidationError(ValueError):
@@ -122,3 +151,194 @@ def extract_table_grid(table: Any) -> list[list[str]]:
             cells.append(normalize_cell_text(cell.text))
         rows.append(cells)
     return rows
+
+
+def _iter_body_elements(container: ET.Element) -> list[ET.Element]:
+    """Yield top-level `<w:p>` and `<w:tbl>` elements inside `<w:body>`, unwrapping `<w:sdtContent>`."""
+    out: list[ET.Element] = []
+    for child in container:
+        if child.tag in (f"{{{W_NS}}}p", f"{{{W_NS}}}tbl"):
+            out.append(child)
+        elif child.tag == f"{{{W_NS}}}sdt":
+            sdt_content = child.find(f"{{{W_NS}}}sdtContent")
+            if sdt_content is not None:
+                out.extend(_iter_body_elements(sdt_content))
+    return out
+
+
+def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
+    """Extract embedded image relationship IDs (`a:blip/@r:embed` and `v:imagedata/@r:id`).
+
+    Explicitly ignores external links (`a:blip/@r:link`).
+    """
+    rel_ids: list[str] = []
+    for node in elem.iter():
+        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
+        if local_name == "blip":
+            embed_id = node.get(f"{{{R_NS}}}embed")
+            if embed_id:
+                rel_ids.append(embed_id)
+        elif local_name == "imagedata":
+            vml_id = node.get(f"{{{R_NS}}}id")
+            if vml_id:
+                rel_ids.append(vml_id)
+    return rel_ids
+
+
+def _parse_document_media_rels(zf: zipfile.ZipFile) -> dict[str, str]:
+    """Parse `word/_rels/document.xml.rels` into `{rel_id: normalized_media_path}`.
+
+    Ignores `TargetMode="External"` and any target outside `word/media/`.
+    """
+    rels_path = "word/_rels/document.xml.rels"
+    if rels_path not in zf.namelist():
+        return {}
+    raw_rels = zf.read(rels_path)
+    if b"<!entity" in raw_rels[:4096].lower() or b"<!doctype" in raw_rels[:4096].lower():
+        return {}
+    try:
+        root = ET.fromstring(raw_rels)
+    except ET.ParseError:
+        return {}
+
+    mapping: dict[str, str] = {}
+    for rel in root.iter():
+        local_name = rel.tag.split("}")[-1] if "}" in rel.tag else rel.tag
+        if local_name != "Relationship":
+            continue
+        target_mode = (rel.get("TargetMode") or "").strip().lower()
+        if target_mode == "external":
+            continue
+        rel_id = (rel.get("Id") or "").strip()
+        target = (rel.get("Target") or "").strip().replace("\\", "/")
+        if not rel_id or not target:
+            continue
+        if target.startswith("/"):
+            norm_path = posixpath.normpath(target.lstrip("/"))
+        elif target.startswith("word/"):
+            norm_path = posixpath.normpath(target)
+        else:
+            norm_path = posixpath.normpath(posixpath.join("word", target))
+        parts = norm_path.split("/")
+        if ".." in parts or not norm_path.startswith("word/media/"):
+            continue
+        mapping[rel_id] = norm_path
+    return mapping
+
+
+def extract_body_blocks_and_images(
+    raw_bytes: bytes,
+) -> tuple[list[BodyBlock], list[EmbeddedImage]]:
+    """Extract ordered `<w:body>` blocks and all embedded images with coordinates from `.docx` bytes."""
+    blocks: list[BodyBlock] = []
+    images: list[EmbeddedImage] = []
+
+    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+        rels = _parse_document_media_rels(zf)
+        zip_names = set(zf.namelist())
+        if "word/document.xml" not in zip_names:
+            return blocks, images
+
+        media_cache: dict[str, bytes] = {}
+
+        def _read_media(media_path: str) -> bytes | None:
+            if media_path in media_cache:
+                return media_cache[media_path]
+            if media_path not in zip_names:
+                return None
+            info = zf.getinfo(media_path)
+            with zf.open(info) as fp:
+                # Cap read at 2 MiB + 1 byte so oversized entries trigger SIGNATURE_TOO_LARGE without OOM
+                data = fp.read(MAX_EMBEDDED_IMAGE_READ_BYTES)
+            media_cache[media_path] = data
+            return data
+
+        root = ET.fromstring(zf.read("word/document.xml"))
+        body = root.find(f"{{{W_NS}}}body")
+        if body is None:
+            return blocks, images
+
+        body_elems = _iter_body_elements(body)
+        table_counter = 0
+
+        for block_idx, elem in enumerate(body_elems):
+            if elem.tag == f"{{{W_NS}}}p":
+                text = normalize_cell_text(
+                    "".join(t.text or "" for t in elem.iter(f"{{{W_NS}}}t"))
+                )
+                blocks.append(
+                    BodyBlock(
+                        block_index=block_idx,
+                        kind="paragraph",
+                        text=text,
+                        table_index=None,
+                    )
+                )
+                for rel_id in _extract_rel_ids_from_element(elem):
+                    media_path = rels.get(rel_id)
+                    if not media_path:
+                        continue
+                    data = _read_media(media_path)
+                    if data is None:
+                        continue
+                    images.append(
+                        EmbeddedImage(
+                            location_kind="paragraph",
+                            table_index=None,
+                            row_index=None,
+                            cell_index=None,
+                            block_index=block_idx,
+                            rel_id=rel_id,
+                            media_path=media_path,
+                            data=data,
+                        )
+                    )
+            elif elem.tag == f"{{{W_NS}}}tbl":
+                t_idx = table_counter
+                table_counter += 1
+                text = normalize_cell_text(
+                    "".join(t.text or "" for t in elem.iter(f"{{{W_NS}}}t"))
+                )
+                blocks.append(
+                    BodyBlock(
+                        block_index=block_idx,
+                        kind="table",
+                        text=text,
+                        table_index=t_idx,
+                    )
+                )
+                for r_idx, tr in enumerate(elem.findall(f"{{{W_NS}}}tr")):
+                    for c_idx, tc in enumerate(tr.findall(f"{{{W_NS}}}tc")):
+                        # Skip vertical merge continuation cells (which have <w:vMerge/> without w:val="restart")
+                        vmerge = tc.find(f"./{{{W_NS}}}tcPr/{{{W_NS}}}vMerge")
+                        if vmerge is not None:
+                            vmerge_val = (vmerge.get(f"{{{W_NS}}}val") or "").strip().lower()
+                            if vmerge_val != "restart":
+                                continue
+                        for rel_id in _extract_rel_ids_from_element(tc):
+                            media_path = rels.get(rel_id)
+                            if not media_path:
+                                continue
+                            data = _read_media(media_path)
+                            if data is None:
+                                continue
+                            images.append(
+                                EmbeddedImage(
+                                    location_kind="table_cell",
+                                    table_index=t_idx,
+                                    row_index=r_idx,
+                                    cell_index=c_idx,
+                                    block_index=block_idx,
+                                    rel_id=rel_id,
+                                    media_path=media_path,
+                                    data=data,
+                                )
+                            )
+
+    return blocks, images
+
+
+def extract_embedded_images(raw_bytes: bytes) -> list[EmbeddedImage]:
+    """Return all embedded images from `.docx` bytes with their structural locations."""
+    _, images = extract_body_blocks_and_images(raw_bytes)
+    return images

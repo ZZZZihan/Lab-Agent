@@ -20,6 +20,7 @@ from app.config import Settings
 from app.importer.fingerprint import (
     achievement_fp,
     facility_fp,
+    norm,
     person_fp,
     project_fp,
 )
@@ -30,6 +31,7 @@ from app.importer.people import (
     normalize_person_name,
 )
 from app.importer.pii import assert_no_pii
+from app.importer.signature import persist_import_signatures
 from app.models import (
     Chunk,
     Document,
@@ -71,6 +73,8 @@ class ProvisionRequest(BaseModel):
     initial_password: str | None = None
     include_password: bool = True
     people: list[PersonOverride] = Field(default_factory=list)
+    skip_signature_ids: list[str] = Field(default_factory=list)
+    exclude_keys: list[str] = Field(default_factory=list)
 
 
 def _escape_csv(value: object) -> str:
@@ -243,12 +247,20 @@ async def provision_import_job(
     )
 
     overrides_by_key = {ov.key: ov for ov in body.people}
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     active_people: list[dict[str, Any]] = []
 
     for person in raw_people:
-        pkey = str(person.get("key") or "")
+        pkey = str(person.get("key") or person.get("temp_id") or "")
         ov = overrides_by_key.get(pkey)
-        if ov and ov.exclude:
+        if (
+            (ov and ov.exclude)
+            or pkey in exclude_key_set
+            or person.get("exclude") is True
+            or person.get("excluded") is True
+            or person.get("include") is False
+            or person.get("imported") is False
+        ):
             person["exclude"] = True
             continue
         person["exclude"] = False
@@ -340,10 +352,19 @@ async def provision_import_job(
     deadline_display = deadline_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
 
     # Pre-load existing fingerprints to implement ON CONFLICT DO NOTHING cleanly
-    existing_person_fps = set(await session.scalars(select(LabPerson.entity_fingerprint)))
-    existing_person_user_ids = {
-        uid for uid in await session.scalars(select(LabPerson.user_id)) if uid is not None
+    existing_people_by_fp: dict[str, LabPerson] = {
+        lp.entity_fingerprint: lp for lp in existing_people if lp.entity_fingerprint
     }
+    existing_people_by_uid: dict[uuid.UUID, LabPerson] = {
+        lp.user_id: lp for lp in existing_people if lp.user_id is not None
+    }
+    existing_people_by_name_aff: dict[tuple[str, str], list[LabPerson]] = {}
+    for lp in existing_people:
+        na_key = (normalize_person_name(lp.name), norm(lp.affiliation or ""))
+        existing_people_by_name_aff.setdefault(na_key, []).append(lp)
+
+    existing_person_fps = set(existing_people_by_fp.keys())
+    existing_person_user_ids = set(existing_people_by_uid.keys())
     existing_ach_fps = set(await session.scalars(select(LabAchievement.entity_fingerprint)))
     existing_proj_fps = set(await session.scalars(select(LabProject.entity_fingerprint)))
     existing_fac_fps = set(await session.scalars(select(LabFacility.entity_fingerprint)))
@@ -355,6 +376,8 @@ async def provision_import_job(
     new_roster_items: list[dict[str, object]] = []
     existing_roster_items: list[dict[str, object]] = []
     inserted_people: list[LabPerson] = []
+    imported_people_by_key: dict[str, LabPerson] = {}
+    ambiguous_person_keys: set[str] = set()
     inserted_achievements: list[LabAchievement] = []
     inserted_projects: list[LabProject] = []
     inserted_facilities: list[LabFacility] = []
@@ -424,6 +447,7 @@ async def provision_import_job(
                     }
                 )
 
+            pkey = str(person.get("temp_id") or person.get("key") or "")
             fp_val = str(person.get("fingerprint") or "") or person_fp(
                 tier=p_tier,
                 login_name=p_login,
@@ -431,8 +455,24 @@ async def provision_import_job(
                 affiliation=p_aff,
                 email=p_email,
             )
+            na_candidates = existing_people_by_name_aff.get(
+                (pname, norm(p_aff or "")), []
+            )
+            if (
+                len(na_candidates) >= 2
+                and p_tier == "T2"
+                and not p_email
+                and fp_val not in existing_people_by_fp
+            ):
+                ambiguous_person_keys.add(pkey)
+
             if fp_val in existing_person_fps or user_id in existing_person_user_ids:
                 people_skipped += 1
+                matched_existing_lp = existing_people_by_fp.get(
+                    fp_val
+                ) or existing_people_by_uid.get(user_id)
+                if matched_existing_lp is not None and pkey:
+                    imported_people_by_key[pkey] = matched_existing_lp
             else:
                 existing_person_fps.add(fp_val)
                 existing_person_user_ids.add(user_id)
@@ -459,6 +499,10 @@ async def provision_import_job(
                 )
                 session.add(new_person)
                 inserted_people.append(new_person)
+                existing_people_by_fp[fp_val] = new_person
+                existing_people_by_uid[user_id] = new_person
+                if pkey:
+                    imported_people_by_key[pkey] = new_person
                 people_inserted += 1
 
         # Achievements
@@ -642,6 +686,19 @@ async def provision_import_job(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
+
+        sig_result, sig_extra_warnings = persist_import_signatures(
+            preview=preview,
+            imported_people_by_key=imported_people_by_key,
+            skip_signature_ids=body.skip_signature_ids,
+            ambiguous_keys=ambiguous_person_keys,
+        )
+        cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}
+        if sig_extra_warnings:
+            cur_prev_warnings = list(cleaned_preview.get("warnings") or [])
+            cur_prev_warnings.extend(sig_extra_warnings)
+            cleaned_preview["warnings"] = cur_prev_warnings
+
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
@@ -655,11 +712,11 @@ async def provision_import_job(
         *new_roster_items,
         *existing_roster_items,
     ]
-    preview["as_of_time"] = as_of_date.isoformat()
-    preview["people"] = raw_people
-    preview["provisioned_roster_rows"] = roster_rows
-    assert_no_pii(preview)
-    job.preview = preview
+    cleaned_preview["as_of_time"] = as_of_date.isoformat()
+    cleaned_preview["people"] = raw_people
+    cleaned_preview["provisioned_roster_rows"] = roster_rows
+    assert_no_pii(cleaned_preview)
+    job.preview = cleaned_preview
 
     job.as_of_time = as_of_date
     job.status = "provisioned"
@@ -686,6 +743,7 @@ async def provision_import_job(
         "facilities_skipped": fac_skipped,
         "rag_doc_key": doc_key,
         "roster_rows": roster_rows,
+        "signature_result": sig_result,
     }
 
     job.rag_document_id = rag_doc.id if rag_doc is not None else None
@@ -722,6 +780,8 @@ async def provision_import_job(
         "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
         "rag_doc_key": doc_key,
         "stats": stats_payload,
+        "signature_result": sig_result,
+        "warnings": sig_extra_warnings,
         "roster_text": roster_text,
         "roster_csv": roster_csv,
     }

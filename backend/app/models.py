@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -304,6 +305,38 @@ class LabPerson(Base):
             "project_role IN ('applicant', 'member')",
             name="lab_people_project_role",
         ),
+        CheckConstraint(
+            "signature_data IS NULL OR (octet_length(signature_data) > 0 AND octet_length(signature_data) <= 2097152)",
+            name="ck_lab_people_signature_size",
+        ),
+        CheckConstraint(
+            "signature_mime IS NULL OR signature_mime IN ('image/png', 'image/jpeg', 'image/webp')",
+            name="ck_lab_people_signature_mime",
+        ),
+        CheckConstraint(
+            "signature_sha256 IS NULL OR signature_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_lab_people_signature_sha256",
+        ),
+        CheckConstraint(
+            "signature_source IS NULL OR signature_source IN ('docx_import', 'upload')",
+            name="ck_lab_people_signature_source",
+        ),
+        CheckConstraint(
+            "("
+            "signature_data IS NULL "
+            "AND signature_mime IS NULL "
+            "AND signature_sha256 IS NULL "
+            "AND signature_updated_at IS NULL "
+            "AND signature_source IS NULL"
+            ") OR ("
+            "signature_data IS NOT NULL "
+            "AND signature_mime IS NOT NULL "
+            "AND signature_sha256 IS NOT NULL "
+            "AND signature_updated_at IS NOT NULL "
+            "AND signature_source IS NOT NULL"
+            ")",
+            name="ck_lab_people_signature_all_or_none",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
@@ -323,6 +356,15 @@ class LabPerson(Base):
     affiliation: Mapped[str | None] = mapped_column(String(255), nullable=True)
     project_role: Mapped[str] = mapped_column(String(16), default="member")
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signature_data: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, deferred=True
+    )
+    signature_mime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    signature_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    signature_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    signature_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
     as_of_time: Mapped[date] = mapped_column(Date)
     source_import_id: Mapped[uuid.UUID] = mapped_column(

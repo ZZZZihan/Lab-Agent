@@ -31,6 +31,7 @@ from app.importer.provision import (
     _parse_iso_date,
     sync_lab_profile_rag,
 )
+from app.importer.signature import persist_import_signatures
 from app.models import (
     FieldProvenance,
     ImportJob,
@@ -127,6 +128,8 @@ class MergeRequest(BaseModel):
 
     as_of_time: date | None = None
     decisions: list[MergeDecision] = Field(default_factory=list)
+    skip_signature_ids: list[str] = Field(default_factory=list)
+    exclude_keys: list[str] = Field(default_factory=list)
 
 
 def _kind_rank(source_kind: str) -> int:
@@ -2136,7 +2139,18 @@ async def execute_merge(
 
     # 1. People (NEVER create or mutate User accounts during Phase 2 merge!)
     matched_people_map: dict[uuid.UUID, tuple[LabPerson, dict[str, object]]] = {}
+    imported_people_by_key: dict[str, LabPerson] = {}
+    new_people_by_fp: dict[str, LabPerson] = {}
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     for p in ppl_list:
+        pkey = str(p.get("temp_id") or p.get("key") or "")
+        if (
+            pkey in exclude_key_set
+            or p.get("excluded") is True
+            or p.get("include") is False
+            or p.get("imported") is False
+        ):
+            continue
         pname, fp_val, p_fields = _extract_person_incoming(p)
         if not pname:
             continue
@@ -2151,6 +2165,8 @@ async def execute_merge(
         )
         if matched_p is None:
             if fp_val in used_person_fps:
+                if pkey and fp_val in new_people_by_fp:
+                    imported_people_by_key[pkey] = new_people_by_fp[fp_val]
                 continue
             linked_uid: uuid.UUID | None = None
             raw_match = p.get("match")
@@ -2209,8 +2225,13 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
+            new_people_by_fp[fp_val] = new_person
+            if pkey:
+                imported_people_by_key[pkey] = new_person
             added_count += 1
         else:
+            if pkey:
+                imported_people_by_key[pkey] = matched_p
             raw_inc_email = p_fields.get("email")
             inc_email = raw_inc_email if isinstance(raw_inc_email, str) else None
             inc_aff = str(p_fields.get("affiliation") or "") or None
@@ -2443,11 +2464,22 @@ async def execute_merge(
     for matched_f, acc_f in matched_fac_map.values():
         await _merge_existing_entity("facility", matched_f, acc_f)
 
+    sig_result, sig_extra_warnings = persist_import_signatures(
+        preview=preview,
+        imported_people_by_key=imported_people_by_key,
+        skip_signature_ids=body.skip_signature_ids,
+    )
+    cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}
+    cleaned_preview["as_of_time"] = as_of_date.isoformat()
+    if sig_extra_warnings:
+        cur_prev_warnings = list(cleaned_preview.get("warnings") or [])
+        cur_prev_warnings.extend(sig_extra_warnings)
+        cleaned_preview["warnings"] = cur_prev_warnings
+    job.preview = cleaned_preview
+
     cur_stats = dict(job.stats or {})
     if job.status in ("parsed", "provisioned"):
         cur_stats["pre_merge_status"] = job.status
-    preview["as_of_time"] = as_of_date.isoformat()
-    job.preview = preview
     job.as_of_time = as_of_date
     job.status = "merged"
     await session.flush()
@@ -2465,6 +2497,7 @@ async def execute_merge(
         "kept_fields": kept_fields_count,
         "forced_fields": forced_fields_count,
         "rag_doc_key": doc_key,
+        "signature_result": sig_result,
     }
     cur_stats.update(merge_stats)
     job.stats = cur_stats
@@ -2479,6 +2512,8 @@ async def execute_merge(
         "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
         "rag_doc_key": doc_key,
         "stats": merge_stats,
+        "signature_result": sig_result,
+        "warnings": sig_extra_warnings,
     }
 
 
