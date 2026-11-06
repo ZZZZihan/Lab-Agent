@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from app.rag.retrieve import MODES as RETRIEVE_MODES
 from app.rag.retrieve import search_knowledge
 from app.rag.rrf import Hit, decide, decision_score
 from evals.metrics import MODES as METRICS_MODES
-from evals.metrics import evaluate
+from evals.metrics import evaluate, tune
 from evals.report import render_eval_block
 from evals.run_eval import _choose_rrf
 from sqlalchemy import select
@@ -673,6 +674,77 @@ def test_decide_hybrid_rrf_rerank_excludes_unscored_tail_candidates() -> None:
     assert refused["refused"] is True
     assert refused["reason"] == "low_score"
     assert refused["citations"] == []
+
+
+def test_tune_hybrid_rrf_rerank_filters_non_finite_scores() -> None:
+    failed_dev_row: dict[str, Any] = {
+        "id": "q-dev-fail",
+        "split": "dev",
+        "type": "fact",
+        "answerable": True,
+        "gold": ["doc-1#0"],
+        "query_tokens": ["低温"],
+        "elapsed_ms": 10.0,
+        "rerank_ms": 5.0,
+        "df": {"低温": 1},
+        "n_docs": 10,
+        "rerank_failed": True,
+        "hits": [
+            {
+                "key": "doc-1#0",
+                "cosine": 0.90,
+                "bm25": 2.0,
+                "rerank_score": None,
+                "tokens": ["低温"],
+                "chunk_id": "c1",
+                "document_id": "d1",
+                "heading": "H1",
+                "title": "T1",
+                "chunk_index": 0,
+            }
+        ],
+    }
+    scored_dev_row: dict[str, Any] = {
+        "id": "q-dev-ok",
+        "split": "dev",
+        "type": "fact",
+        "answerable": True,
+        "gold": ["doc-2#0"],
+        "query_tokens": ["巡检"],
+        "elapsed_ms": 10.0,
+        "rerank_ms": 8.0,
+        "df": {"巡检": 1},
+        "n_docs": 10,
+        "rerank_failed": False,
+        "hits": [
+            {
+                "key": "doc-2#0",
+                "cosine": 0.85,
+                "bm25": 1.8,
+                "rerank_score": 0.72,
+                "tokens": ["巡检"],
+                "chunk_id": "c2",
+                "document_id": "d2",
+                "heading": "H2",
+                "title": "T2",
+                "chunk_index": 0,
+            }
+        ],
+    }
+
+    # Case 1: all dev rows have failed/unscored rerank hits -> finite fallback threshold (0.99)
+    tuned_all_failed = tune([failed_dev_row], mode="hybrid_rrf_rerank", rrf_k=60)
+    score_min_all_failed = float(tuned_all_failed["params"]["evidence_score_min"])
+    assert math.isfinite(score_min_all_failed)
+    assert score_min_all_failed == pytest.approx(0.99)
+    json.dumps(tuned_all_failed["params"], allow_nan=False)
+
+    # Case 2: mixed scored and failed dev rows -> finite threshold from scored rows only
+    tuned_mixed = tune([failed_dev_row, scored_dev_row], mode="hybrid_rrf_rerank", rrf_k=60)
+    score_min_mixed = float(tuned_mixed["params"]["evidence_score_min"])
+    assert math.isfinite(score_min_mixed)
+    json.dumps(tuned_mixed["params"], allow_nan=False)
+
 
 
 
