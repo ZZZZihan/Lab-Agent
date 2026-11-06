@@ -691,10 +691,16 @@ export default function AdminImportsPage() {
                   </Button>
                   <Button
                     type="button"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(rosterData.roster_text);
-                      setRosterModalCopied(true);
-                      setTimeout(() => setRosterModalCopied(false), 2000);
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(
+                          rosterData.roster_text,
+                        );
+                        setRosterModalCopied(true);
+                        setTimeout(() => setRosterModalCopied(false), 2000);
+                      } catch {
+                        setError("复制到剪贴板失败，请手动全选复制或点击下载 CSV");
+                      }
                     }}
                   >
                     {rosterModalCopied ? "已复制文本" : "复制无口令通知文本"}
@@ -1165,13 +1171,20 @@ export default function AdminImportsPage() {
                   </Button>
                   <Button
                     type="button"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(
-                        provisionResult.roster_text,
-                      );
-                      setRosterCopied(true);
-                      setHasSavedCredentials(true);
-                      setTimeout(() => setRosterCopied(false), 2000);
+                    onClick={async () => {
+                      setWizardError("");
+                      try {
+                        await navigator.clipboard.writeText(
+                          provisionResult.roster_text,
+                        );
+                        setRosterCopied(true);
+                        setHasSavedCredentials(true);
+                        setTimeout(() => setRosterCopied(false), 2000);
+                      } catch {
+                        setWizardError(
+                          "复制到剪贴板失败，请手动全选复制或点击下载 CSV",
+                        );
+                      }
                     }}
                   >
                     {rosterCopied ? "已复制群发文本" : "一键复制群发文本"}

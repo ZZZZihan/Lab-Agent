@@ -211,12 +211,17 @@ export default function LabAssetsPage() {
     setProvisionResult(null);
   }
 
-  function copyToClipboard(text: string, tag: string) {
-    void navigator.clipboard.writeText(text);
-    setCopiedId(tag);
-    setTimeout(() => {
-      setCopiedId((prev) => (prev === tag ? null : prev));
-    }, 1800);
+  async function copyToClipboard(text: string, tag: string) {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(tag);
+      setTimeout(() => {
+        setCopiedId((prev) => (prev === tag ? null : prev));
+      }, 1800);
+    } catch {
+      setError("复制到剪贴板失败，请检查浏览器剪贴板权限或手动复制");
+    }
   }
 
   const baseYear = useMemo(() => {
@@ -1577,13 +1582,20 @@ export default function LabAssetsPage() {
                   </Button>
                   <Button
                     type="button"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(
-                        provisionResult.roster_text,
-                      );
-                      setRosterCopied(true);
-                      setHasSavedCredentials(true);
-                      setTimeout(() => setRosterCopied(false), 2000);
+                    onClick={async () => {
+                      setWizardError("");
+                      try {
+                        await navigator.clipboard.writeText(
+                          provisionResult.roster_text,
+                        );
+                        setRosterCopied(true);
+                        setHasSavedCredentials(true);
+                        setTimeout(() => setRosterCopied(false), 2000);
+                      } catch {
+                        setWizardError(
+                          "复制到剪贴板失败，请手动全选复制或点击下载 CSV",
+                        );
+                      }
                     }}
                   >
                     {rosterCopied ? "已复制群发文本" : "一键复制群发文本"}
