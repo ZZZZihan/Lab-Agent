@@ -20,7 +20,8 @@ import { useI18n } from "@/lib/i18n";
 
 type AdminUser = {
   id: string;
-  email: string;
+  email: string | null;
+  login_name?: string | null;
   display_name: string;
   role: "admin" | "member" | "viewer" | string;
   is_active: boolean;
@@ -197,7 +198,7 @@ export default function AdminUsersPage() {
                   return (
                     <tr key={u.id}>
                       <td className="px-4 py-3 font-medium">{u.display_name}</td>
-                      <td className="px-4 py-3 font-mono text-xs">{u.email}</td>
+                      <td className="px-4 py-3 font-mono text-xs">{u.email || u.login_name || "—"}</td>
                       <td className="px-4 py-3">
                         <select
                           aria-label={`${u.display_name} ${t.role}`}

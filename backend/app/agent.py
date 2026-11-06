@@ -25,6 +25,7 @@ from app.rag.rerank import RerankClient
 from app.rag.rrf import Decision, Hit, decide
 from app.tools import (
     fetch_document,
+    query_lab_assets,
     query_lab_projects,
     query_meetings,
     search_knowledge_base,
@@ -83,10 +84,24 @@ _runtime: ContextVar[Runtime] = ContextVar("lab_agent_runtime")
 
 PAPER_WORDS = ("论文", "arxiv", "预印", "笔记")
 DETAIL_WORDS = ("全文", "详细说明", "完整内容")
+LAB_ASSET_WORDS = (
+    "课题组",
+    "在研项目",
+    "承担项目",
+    "已结题",
+    "前期成果",
+    "研究专长",
+    "团队成员",
+    "申报书",
+    "支撑条件",
+    "算力设备",
+)
 
 
 def detect_intent(question: str) -> str:
     folded = question.lower()
+    if any(word in folded for word in LAB_ASSET_WORDS):
+        return "lab_assets"
     if any(word in folded for word in PAPER_WORDS):
         return "paper"
     return "knowledge"
@@ -98,8 +113,15 @@ def heuristic_action(state: LoopState, max_steps: int) -> dict[str, object] | No
     trace = [str(item.get("tool")) for item in state.get("trace") or []]
     question = str(state.get("question") or "")
     intent = detect_intent(question)
-    searched = {"search_knowledge_base", "query_lab_projects", "query_meetings"} & set(trace)
+    searched = {
+        "search_knowledge_base",
+        "query_lab_projects",
+        "query_meetings",
+        "query_lab_assets",
+    } & set(trace)
     if not searched:
+        if intent == "lab_assets":
+            return {"name": "query_lab_assets", "args": {"query": question, "k": 12}}
         return {"name": "search_knowledge_base", "args": {"query": question, "k": 12}}
     if intent == "paper" and "search_papers" not in trace:
         return {"name": "search_papers", "args": {"query": question}}
@@ -152,6 +174,25 @@ async def _tools_node(state: LoopState) -> dict[str, object]:
                 elapsed = float(found[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
                 mode = str(found[0].get("_mode") or mode)
                 rerank_failed = rerank_failed or bool(found[0].get("_rerank_failed"))
+        elif name == "query_lab_assets":
+            result = await query_lab_assets(
+                runtime["session"],
+                settings=runtime["settings"],
+                embedder=runtime["embedder"],
+                user=runtime["user"],
+                query=str(args.get("query") or ""),
+                k=int(args.get("k") or 12),
+                request_id=runtime["request_id"],
+                group_ids=runtime["group_ids"],
+                rerank_client=runtime.get("rerank_client"),
+            )
+            raw_hits = result["hits"]
+            hits = list(raw_hits) if isinstance(raw_hits, list) else []
+            if hits:
+                coverage = float(hits[0].get("_coverage") or 0.0)  # type: ignore[arg-type]
+                elapsed = float(hits[0].get("_elapsed_ms") or 0.0)  # type: ignore[arg-type]
+                mode = str(hits[0].get("_mode") or mode)
+                rerank_failed = rerank_failed or bool(hits[0].get("_rerank_failed"))
         elif name == "query_lab_projects":
             result = await query_lab_projects(
                 runtime["session"],

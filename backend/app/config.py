@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import urllib.parse
 import warnings
@@ -80,7 +81,7 @@ def extract_host_port(url: str | None) -> str | None:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(repo_root() / ".env"),
+        env_file=None if os.environ.get("APP_ENV") == "test" else str(repo_root() / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -178,6 +179,12 @@ class Settings(BaseSettings):
     oidc_audience: str | None = None
     oidc_jwks_json: str | None = None
     paper_search_provider: Literal["unconfigured"] = "unconfigured"
+    import_default_password: str = "LabAgent@2026"
+    initial_password_ttl_days: int = 7
+    import_max_file_mb: int = 20
+    import_max_uncompressed_mb: int = 50
+    public_base_url: str = "http://localhost:43123"
+    display_tz: str = "Asia/Shanghai"
     agent_max_steps: int = 4
     bm25_k1: float = 1.2
     bm25_b: float = 0.75

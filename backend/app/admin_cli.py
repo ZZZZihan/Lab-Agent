@@ -38,8 +38,9 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 for user in rows:
                     status = "active" if user.is_active else "inactive"
                     created = user.created_at.isoformat() if user.created_at else ""
+                    ident = user.email or user.login_name or str(user.id)
                     print(
-                        f"{user.id}\t{user.email}\t{user.display_name}\t{user.role}\t{status}\t{created}"
+                        f"{user.id}\t{ident}\t{user.display_name}\t{user.role}\t{status}\t{created}"
                     )
                 return 0
 

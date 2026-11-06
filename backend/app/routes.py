@@ -7,6 +7,8 @@ import hmac
 import io
 import ipaddress
 import json
+import re
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -30,12 +32,15 @@ from app.auth import (
     authenticate_pat,
     decode_unverified_for_logout,
     generate_pat,
+    hash_password,
     issue_token,
     revoke_token,
+    validate_password,
     verify_password,
 )
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
+from app.importer.people import clean_email, name_to_pinyin, normalize_person_name
 from app.llm import LLM
 from app.maintenance import purge_document, scrub_missing_document_citations
 from app.models import ApiToken, Conversation, Document, DocumentACL, Group, Message, User
@@ -57,8 +62,15 @@ class APIError(Exception):
 
 
 class LoginBody(BaseModel):
-    email: str
+    identifier: str | None = None
+    email: str | None = None
     password: str
+
+
+class ChangePasswordBody(BaseModel):
+    old_password: str
+    new_password: str
+    email: str | None = None
 
 
 class SearchBody(BaseModel):
@@ -116,7 +128,7 @@ async def _serialize_document_acl(
     user_emails: list[str] = []
     if user_ids:
         user_rows = list(await session.scalars(select(User).where(User.id.in_(user_ids))))
-        email_by_id = {u.id: u.email for u in user_rows}
+        email_by_id = {u.id: u.email or u.login_name or str(u.id) for u in user_rows}
         user_emails = [email_by_id[uid] for uid in user_ids if uid in email_by_id]
 
     group_slugs: list[str] = []
@@ -270,11 +282,32 @@ async def health(request: Request) -> dict[str, object]:
     }
 
 
+def _serialize_auth_user(user: User) -> dict[str, object]:
+    return {
+        "id": str(user.id),
+        "display_name": user.display_name,
+        "role": user.role,
+        "email": user.email,
+        "login_name": user.login_name,
+        "must_change_password": user.must_change_password_by is not None,
+        "must_change_password_by": (
+            user.must_change_password_by.isoformat()
+            if user.must_change_password_by is not None
+            else None
+        ),
+    }
+
+
 @router.post("/auth/login")
 async def login(body: LoginBody, request: Request) -> dict[str, object]:
     settings = _settings(request)
     ip = _client_ip(request)
-    limited_bucket = await request.app.state.limiter.check_login(ip, body.email)
+    raw = unicodedata.normalize("NFKC", (body.identifier or body.email or "")).strip()
+    raw = re.sub(r"[​-‏﻿]", "", raw)
+    if not raw:
+        raise APIError(401, "invalid_credentials", "请输入登录名、姓名、学工号或邮箱")
+
+    limited_bucket = await request.app.state.limiter.check_login(ip, raw.lower())
     if limited_bucket is not None:
         await write_audit(
             settings=settings,
@@ -285,8 +318,83 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
             detail={"bucket": limited_bucket},
         )
         raise APIError(429, "rate_limited", "登录尝试过于频繁")
+
     async with get_sessionmaker()() as session:
-        user = await session.scalar(select(User).where(User.email == body.email.strip().lower()))
+        user: User | None = None
+        if "@" in raw:
+            user = await session.scalar(
+                select(User).where(
+                    User.email == raw.lower(),
+                    User.is_active.is_(True),
+                )
+            )
+        elif raw.isascii():
+            user = await session.scalar(
+                select(User).where(
+                    User.login_name == raw.lower(),
+                    User.is_active.is_(True),
+                )
+            )
+        else:
+            clean_name = normalize_person_name(raw)
+            exact_matches = list(
+                await session.scalars(
+                    select(User).where(
+                        User.display_name == clean_name,
+                        User.is_active.is_(True),
+                    )
+                )
+            )
+            if len(exact_matches) > 1:
+                await write_audit(
+                    settings=settings,
+                    actor_id=None,
+                    action="login_failed",
+                    request_id=getattr(request.state, "request_id", None),
+                    ip=ip,
+                    detail={"method": "password", "reason": "ambiguous_name"},
+                )
+                raise APIError(
+                    401,
+                    "ambiguous_name",
+                    "存在重名账号，请使用登录名（如 wanzhenkai2）或学工号登录",
+                )
+            if len(exact_matches) == 1:
+                user = exact_matches[0]
+            else:
+                base_pinyin = name_to_pinyin(clean_name)
+                if base_pinyin:
+                    candidates = list(
+                        await session.scalars(
+                            select(User).where(
+                                User.login_name.like(f"{base_pinyin}%"),
+                                User.is_active.is_(True),
+                            )
+                        )
+                    )
+                    family_re = re.compile(rf"^{re.escape(base_pinyin)}\d*$")
+                    family = [
+                        u
+                        for u in candidates
+                        if u.login_name and family_re.match(u.login_name)
+                    ]
+                    if len(family) > 1:
+                        await write_audit(
+                            settings=settings,
+                            actor_id=None,
+                            action="login_failed",
+                            request_id=getattr(request.state, "request_id", None),
+                            ip=ip,
+                            detail={"method": "password", "reason": "ambiguous_name"},
+                        )
+                        raise APIError(
+                            401,
+                            "ambiguous_name",
+                            "存在重名账号，请使用登录名（如 wanzhenkai2）或学工号登录",
+                        )
+                    if len(family) == 1:
+                        user = family[0]
+
         if user is None or not user.is_active or not verify_password(user.password_hash, body.password):
             await write_audit(
                 settings=settings,
@@ -296,7 +404,23 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
                 ip=ip,
                 detail={"method": "password"},
             )
-            raise APIError(401, "invalid_credentials", "邮箱或密码不正确")
+            raise APIError(401, "invalid_credentials", "邮箱、登录名或密码不正确")
+
+        if user.must_change_password_by is not None and datetime.now(UTC) > user.must_change_password_by:
+            await write_audit(
+                settings=settings,
+                actor_id=user.id,
+                action="login_failed",
+                request_id=getattr(request.state, "request_id", None),
+                ip=ip,
+                detail={"method": "password", "reason": "initial_password_expired"},
+            )
+            raise APIError(
+                403,
+                "initial_password_expired",
+                "初始口令已过有效期，请联系管理员重置密码",
+            )
+
         token, _jti, ttl = issue_token(user, settings)
         await write_audit(
             settings=settings,
@@ -310,7 +434,7 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
             "access_token": token,
             "token_type": "bearer",
             "expires_in": ttl,
-            "user": {"id": str(user.id), "display_name": user.display_name, "role": user.role},
+            "user": _serialize_auth_user(user),
         }
 
 
@@ -342,9 +466,61 @@ async def logout(
 async def me(
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict[str, str]:
+) -> dict[str, object]:
     user = await _user(session, actor)
-    return {"id": str(user.id), "display_name": user.display_name, "role": user.role}
+    return _serialize_auth_user(user)
+
+
+@router.post("/auth/change-password")
+async def change_password(
+    body: ChangePasswordBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    settings = _settings(request)
+    user = await _user(session, actor)
+    if not verify_password(user.password_hash, body.old_password):
+        raise APIError(401, "invalid_credentials", "当前口令不正确")
+    if body.new_password == body.old_password:
+        raise APIError(400, "invalid_password", "新口令不能与旧口令相同")
+
+    email_bound = False
+    target_email = user.email
+    if body.email is not None and body.email.strip():
+        cleaned = clean_email(body.email)
+        if cleaned is None:
+            raise APIError(400, "invalid_email", "邮箱格式不正确")
+        existing = await session.scalar(
+            select(User).where(User.email == cleaned, User.id != user.id)
+        )
+        if existing is not None:
+            raise APIError(409, "email_taken", "该邮箱已被其他账号使用")
+        target_email = cleaned
+        email_bound = True
+
+    try:
+        validate_password(body.new_password, target_email)
+    except ValueError as exc:
+        raise APIError(400, "invalid_password", str(exc)) from exc
+
+    if email_bound and target_email is not None:
+        user.email = target_email
+    user.password_hash = hash_password(body.new_password)
+    user.must_change_password_by = None
+    await session.commit()
+    await session.refresh(user)
+    await write_audit(
+        settings=settings,
+        actor_id=user.id,
+        action="user_change_self_password",
+        resource_type="user",
+        resource_id=str(user.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"email_bound": email_bound},
+    )
+    return {"status": "ok", "user": _serialize_auth_user(user)}
 
 
 def _serialize_api_token(tok: ApiToken) -> dict[str, object]:
@@ -597,7 +773,9 @@ async def upload_document(
     grants: list[uuid.UUID] = []
     if grant_emails:
         for email in [part.strip().lower() for part in grant_emails.split(",") if part.strip()]:
-            granted = await session.scalar(select(User).where(User.email == email))
+            granted = await session.scalar(
+                select(User).where(User.email == email if "@" in email else User.login_name == email)
+            )
             if granted is None:
                 raise APIError(400, "unknown_grantee", "授权名单里有不存在的账号")
             if granted.id not in grants:
@@ -732,7 +910,9 @@ async def update_document_acl(
         email = raw_email.strip().lower()
         if not email:
             continue
-        granted = await session.scalar(select(User).where(User.email == email))
+        granted = await session.scalar(
+            select(User).where(User.email == email if "@" in email else User.login_name == email)
+        )
         if granted is None:
             raise APIError(400, "unknown_grantee", "授权名单里有不存在的账号")
         if granted.id not in user_ids:
