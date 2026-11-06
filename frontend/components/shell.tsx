@@ -44,6 +44,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
         setUser(found);
         if (found.must_change_password) {
           setPwOpen(true);
+          if (pathname !== "/change-password") {
+            router.replace("/change-password");
+          }
         }
         setReady(true);
         api<{ calibrated?: boolean }>("health")
@@ -55,7 +58,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           });
       })
       .catch(() => router.replace("/login"));
-  }, [router]);
+  }, [router, pathname]);
 
   const links = [
     { href: "/chat", label: t.chat },
@@ -64,6 +67,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/settings", label: t.settings },
     ...(user?.role === "admin"
       ? [
+          { href: "/admin/imports", label: t.importsNav },
           { href: "/admin/users", label: t.users },
           { href: "/admin/groups", label: t.groups },
           { href: "/audit", label: t.audit },

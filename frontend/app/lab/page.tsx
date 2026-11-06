@@ -1,10 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -15,10 +16,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "cn";
 import {
   ApiError,
   api,
   currentUser,
+  reindexLabAssets,
   type ImportJobResponse,
   type LabAchievementItem,
   type LabFacilityItem,
@@ -37,6 +40,27 @@ type PersonOverrideState = {
   login_name: string;
 };
 
+const DEFAULT_INITIAL_PASSWORD = "LabAgent@2026";
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+function extractProjectYear(proj: LabProjectItem): number | null {
+  if (proj.start_date && proj.start_date.length >= 4) {
+    const y = Number(proj.start_date.slice(0, 4));
+    if (!Number.isNaN(y) && y >= 1900 && y <= 2100) return y;
+  }
+  if (proj.end_date && proj.end_date.length >= 4) {
+    const y = Number(proj.end_date.slice(0, 4));
+    if (!Number.isNaN(y) && y >= 1900 && y <= 2100) return y;
+  }
+  const m4 = `${proj.grant_no || ""} ${proj.raw_text || ""}`.match(
+    /\b(19\d{2}|20\d{2})\b/,
+  );
+  if (m4) return Number(m4[1]);
+  const mGrant = (proj.grant_no || "").match(/^[A-Za-z]+(\d{2})\d{3,}$/);
+  if (mGrant) return 2000 + Number(mGrant[1]);
+  return null;
+}
+
 export default function LabAssetsPage() {
   const { t } = useI18n();
   const [me, setMe] = useState<User | null>(null);
@@ -47,6 +71,7 @@ export default function LabAssetsPage() {
   const [facilities, setFacilities] = useState<LabFacilityItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [statusBanner, setStatusBanner] = useState("");
 
   const [activeTab, setActiveTab] = useState<TabKey>("people");
   const [searchQuery, setSearchQuery] = useState("");
@@ -54,9 +79,22 @@ export default function LabAssetsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [kindFilter, setKindFilter] = useState("");
 
+  // Spec §7A.2–7A.3 quick filter & formatting switches
+  const [autoNumber, setAutoNumber] = useState(true);
+  const [onlyOngoingProjects, setOnlyOngoingProjects] = useState(false);
+  const [onlyRecentProjects, setOnlyRecentProjects] = useState(false);
+  const [includeProjectRel, setIncludeProjectRel] = useState(false);
+  const [onlyRecentAchievements, setOnlyRecentAchievements] = useState(false);
+  const [withSupportNote, setWithSupportNote] = useState(true);
+
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedBioId, setExpandedBioId] = useState<string | null>(null);
+
+  const [exportingFormat, setExportingFormat] = useState<"md" | "docx" | null>(
+    null,
+  );
+  const [reindexing, setReindexing] = useState(false);
 
   // Admin 3-Step Import Wizard state
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -68,12 +106,18 @@ export default function LabAssetsPage() {
 
   const [importJob, setImportJob] = useState<ImportJobResponse | null>(null);
   const [provisionAsOf, setProvisionAsOf] = useState("");
-  const [initialPassword, setInitialPassword] = useState("LabAgent@2026");
+  const [initialPassword, setInitialPassword] = useState(
+    DEFAULT_INITIAL_PASSWORD,
+  );
   const [includePassword, setIncludePassword] = useState(true);
-  const [overrides, setOverrides] = useState<Record<string, PersonOverrideState>>({});
+  const [overrides, setOverrides] = useState<
+    Record<string, PersonOverrideState>
+  >({});
   const [provisioning, setProvisioning] = useState(false);
-  const [provisionResult, setProvisionResult] = useState<ProvisionResult | null>(null);
+  const [provisionResult, setProvisionResult] =
+    useState<ProvisionResult | null>(null);
   const [rosterCopied, setRosterCopied] = useState(false);
+  const [hasSavedCredentials, setHasSavedCredentials] = useState(false);
 
   const loadAll = useCallback(async () => {
     setError("");
@@ -131,6 +175,42 @@ export default function LabAssetsPage() {
     };
   }, [t.error]);
 
+  // Spec §8.3.3 beforeunload guard when Step 3 has plaintext credentials in memory
+  const hasUnsavedPlaintextRoster = Boolean(
+    wizardOpen &&
+      wizardStep === 3 &&
+      provisionResult &&
+      includePassword &&
+      !hasSavedCredentials,
+  );
+
+  useEffect(() => {
+    if (!hasUnsavedPlaintextRoster) return;
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault();
+      e.returnValue = t.credentialLeaveConfirm;
+      return t.credentialLeaveConfirm;
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
+
+  function tryCloseWizard() {
+    if (
+      wizardStep === 3 &&
+      provisionResult &&
+      includePassword &&
+      !hasSavedCredentials
+    ) {
+      const confirmed = window.confirm(t.credentialLeaveConfirm);
+      if (!confirmed) return;
+    }
+    setWizardOpen(false);
+    setProvisionResult(null);
+  }
+
   function copyToClipboard(text: string, tag: string) {
     void navigator.clipboard.writeText(text);
     setCopiedId(tag);
@@ -138,6 +218,15 @@ export default function LabAssetsPage() {
       setCopiedId((prev) => (prev === tag ? null : prev));
     }, 1800);
   }
+
+  const baseYear = useMemo(() => {
+    const asOf = overview ? overview.as_of_time : null;
+    if (asOf && asOf.length >= 4) {
+      const y = Number(asOf.slice(0, 4));
+      if (!Number.isNaN(y) && y >= 1990) return y;
+    }
+    return new Date().getFullYear();
+  }, [overview]);
 
   const filteredPeople = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -155,8 +244,14 @@ export default function LabAssetsPage() {
 
   const filteredProjects = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const minYear = baseYear - 5;
     return projects.filter((j) => {
       if (statusFilter && j.status !== statusFilter) return false;
+      if (onlyOngoingProjects && j.status !== "ongoing") return false;
+      if (onlyRecentProjects) {
+        const py = extractProjectYear(j);
+        if (py !== null && py < minYear) return false;
+      }
       if (!q) return true;
       return (
         j.title.toLowerCase().includes(q) ||
@@ -165,12 +260,23 @@ export default function LabAssetsPage() {
         (j.pi_name || "").toLowerCase().includes(q)
       );
     });
-  }, [projects, statusFilter, searchQuery]);
+  }, [
+    projects,
+    statusFilter,
+    onlyOngoingProjects,
+    onlyRecentProjects,
+    baseYear,
+    searchQuery,
+  ]);
 
   const filteredAchievements = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const minYear = baseYear - 5;
     return achievements.filter((a) => {
       if (kindFilter && a.kind !== kindFilter) return false;
+      if (onlyRecentAchievements) {
+        if (a.year && a.year < minYear) return false;
+      }
       if (!q) return true;
       return (
         a.title.toLowerCase().includes(q) ||
@@ -179,7 +285,7 @@ export default function LabAssetsPage() {
         (a.support_note || "").toLowerCase().includes(q)
       );
     });
-  }, [achievements, kindFilter, searchQuery]);
+  }, [achievements, kindFilter, onlyRecentAchievements, baseYear, searchQuery]);
 
   const filteredFacilities = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -193,32 +299,75 @@ export default function LabAssetsPage() {
     });
   }, [facilities, searchQuery]);
 
-  function handleBatchCopy() {
-    let lines: string[] = [];
-    if (activeTab === "people") {
-      lines = filteredPeople
-        .filter((item) => selectedIds[item.id])
-        .map((item) => item.application_text);
-    } else if (activeTab === "projects") {
-      lines = filteredProjects
-        .filter((item) => selectedIds[item.id])
-        .map((item) => item.application_text);
-    } else if (activeTab === "achievements") {
-      lines = filteredAchievements
-        .filter((item) => selectedIds[item.id])
-        .map((item) => item.application_text);
-    } else {
-      lines = filteredFacilities
-        .filter((item) => selectedIds[item.id])
-        .map((item) => item.application_text);
-    }
-    if (lines.length === 0) return;
-    const formatted =
-      lines.length === 1
-        ? lines[0]
-        : lines.map((line, idx) => `（${idx + 1}）${line}`).join("\n");
-    copyToClipboard(formatted, "batch");
+  function getProjectText(proj: LabProjectItem): string {
+    return includeProjectRel
+      ? proj.application_text_with_rel
+      : proj.application_text;
   }
+
+  function getAchievementText(ach: LabAchievementItem): string {
+    return withSupportNote
+      ? ach.application_text
+      : ach.application_text_plain;
+  }
+
+  function formatBatchLines(lines: string[]): string {
+    if (lines.length === 0) return "";
+    if (autoNumber || lines.length > 1) {
+      return lines.map((line, idx) => `[${idx + 1}] ${line}`).join("\n");
+    }
+    return lines[0];
+  }
+
+  function collectTabLines(onlySelected: boolean): string[] {
+    if (activeTab === "people") {
+      const items = onlySelected
+        ? filteredPeople.filter((item) => selectedIds[item.id])
+        : filteredPeople;
+      return items.map((item) => item.application_text);
+    }
+    if (activeTab === "projects") {
+      const items = onlySelected
+        ? filteredProjects.filter((item) => selectedIds[item.id])
+        : filteredProjects;
+      return items.map((item) => getProjectText(item));
+    }
+    if (activeTab === "achievements") {
+      const items = onlySelected
+        ? filteredAchievements.filter((item) => selectedIds[item.id])
+        : filteredAchievements;
+      return items.map((item) => getAchievementText(item));
+    }
+    const items = onlySelected
+      ? filteredFacilities.filter((item) => selectedIds[item.id])
+      : filteredFacilities;
+    return items.map((item) => item.application_text);
+  }
+
+  function handleBatchCopySelected() {
+    const lines = collectTabLines(true);
+    if (lines.length === 0) return;
+    copyToClipboard(formatBatchLines(lines), "batch-selected");
+  }
+
+  function handleBatchCopyAllTab() {
+    const lines = collectTabLines(false);
+    if (lines.length === 0) return;
+    copyToClipboard(formatBatchLines(lines), "batch-all");
+  }
+
+  const currentTabListLength = useMemo(() => {
+    if (activeTab === "people") return filteredPeople.length;
+    if (activeTab === "projects") return filteredProjects.length;
+    if (activeTab === "achievements") return filteredAchievements.length;
+    return filteredFacilities.length;
+  }, [
+    activeTab,
+    filteredPeople.length,
+    filteredProjects.length,
+    filteredAchievements.length,
+    filteredFacilities.length,
+  ]);
 
   const selectedCount = useMemo(() => {
     const currentList =
@@ -230,7 +379,14 @@ export default function LabAssetsPage() {
             ? filteredAchievements
             : filteredFacilities;
     return currentList.filter((item) => selectedIds[item.id]).length;
-  }, [activeTab, filteredPeople, filteredProjects, filteredAchievements, filteredFacilities, selectedIds]);
+  }, [
+    activeTab,
+    filteredPeople,
+    filteredProjects,
+    filteredAchievements,
+    filteredFacilities,
+    selectedIds,
+  ]);
 
   function toggleSelectAll() {
     const currentList =
@@ -241,7 +397,9 @@ export default function LabAssetsPage() {
           : activeTab === "achievements"
             ? filteredAchievements
             : filteredFacilities;
-    const allChecked = currentList.length > 0 && currentList.every((item) => selectedIds[item.id]);
+    const allChecked =
+      currentList.length > 0 &&
+      currentList.every((item) => selectedIds[item.id]);
     const next = { ...selectedIds };
     for (const item of currentList) {
       next[item.id] = !allChecked;
@@ -249,10 +407,90 @@ export default function LabAssetsPage() {
     setSelectedIds(next);
   }
 
+  async function handleExportAll(format: "md" | "docx") {
+    setError("");
+    setStatusBanner("");
+    setExportingFormat(format);
+    try {
+      const response = await fetch(
+        `/api/backend/lab/export?format=${format}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
+      if (!response.ok) {
+        let msg = t.error;
+        try {
+          const errBody = (await response.json()) as {
+            error?: { message?: string };
+          };
+          if (errBody.error?.message) msg = errBody.error.message;
+        } catch {
+          // ignore JSON parse failure
+        }
+        throw new Error(msg);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = format === "docx" ? "lab-assets.docx" : "lab-assets.md";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.error);
+    } finally {
+      setExportingFormat(null);
+    }
+  }
+
+  async function handleReindex() {
+    setError("");
+    setStatusBanner("");
+    setReindexing(true);
+    try {
+      const res = await reindexLabAssets();
+      setStatusBanner(`${t.reindexLabSuccess} (${res.rag_doc_key})`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setReindexing(false);
+    }
+  }
+
+  function handleFileChange(file: File | null) {
+    setWizardError("");
+    if (!file) {
+      setUploadFile(null);
+      return;
+    }
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith(".docx") || lower.endsWith(".docm") || lower.endsWith(".doc")) {
+      setWizardError("仅支持上传 .docx 格式的申报书文件（不支持 .doc 或 .docm）");
+      setUploadFile(null);
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setWizardError("文件大小超过 20 MB 上限");
+      setUploadFile(null);
+      return;
+    }
+    setUploadFile(file);
+  }
+
   async function handleParseUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!uploadFile) {
       setWizardError("请先选择一个 .docx 申报书文件");
+      return;
+    }
+    if (!uploadFile.name.toLowerCase().endsWith(".docx")) {
+      setWizardError("仅支持上传 .docx 格式的申报书文件");
+      return;
+    }
+    if (uploadFile.size > MAX_UPLOAD_BYTES) {
+      setWizardError("文件大小超过 20 MB 上限");
       return;
     }
     setWizardError("");
@@ -317,6 +555,7 @@ export default function LabAssetsPage() {
         },
       );
       setProvisionResult(res);
+      setHasSavedCredentials(false);
       setWizardStep(3);
       await loadAll();
     } catch (err) {
@@ -337,6 +576,7 @@ export default function LabAssetsPage() {
     a.download = `labagent-accounts-${provisionResult.as_of_time}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    setHasSavedCredentials(true);
   }
 
   return (
@@ -351,26 +591,71 @@ export default function LabAssetsPage() {
               {t.labAssetsSubtitle}
             </p>
           </div>
-          {me?.role === "admin" ? (
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
-              onClick={() => {
-                setWizardError("");
-                setWizardStep(1);
-                setUploadFile(null);
-                setImportJob(null);
-                setProvisionResult(null);
-                setWizardOpen(true);
-              }}
+              variant="outline"
+              disabled={exportingFormat !== null}
+              onClick={() => handleExportAll("md")}
             >
-              {t.importProposalBtn}
+              {exportingFormat === "md" ? t.loading : t.exportMdBtn}
             </Button>
-          ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={exportingFormat !== null}
+              onClick={() => handleExportAll("docx")}
+            >
+              {exportingFormat === "docx" ? t.loading : t.exportDocxBtn}
+            </Button>
+            {me?.role === "admin" || me?.role === "member" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={reindexing}
+                onClick={handleReindex}
+              >
+                {reindexing ? t.reindexingLab : t.reindexLabBtn}
+              </Button>
+            ) : null}
+            {me?.role === "admin" ? (
+              <>
+                <Link
+                  href="/admin/imports"
+                  className={cn(
+                    buttonVariants({ variant: "outline", size: "sm" }),
+                  )}
+                >
+                  {t.importsNav}
+                </Link>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setWizardError("");
+                    setWizardStep(1);
+                    setUploadFile(null);
+                    setImportJob(null);
+                    setProvisionResult(null);
+                    setHasSavedCredentials(false);
+                    setWizardOpen(true);
+                  }}
+                >
+                  {t.importProposalBtn}
+                </Button>
+              </>
+            ) : null}
+          </div>
         </div>
 
         {error ? (
           <p role="alert" className="text-[13px] text-destructive">
             {error}
+          </p>
+        ) : null}
+
+        {statusBanner ? (
+          <p role="status" className="text-[13px] font-medium text-emerald-600">
+            {statusBanner}
           </p>
         ) : null}
 
@@ -389,23 +674,28 @@ export default function LabAssetsPage() {
                   {overview.counts.projects}
                 </span>
                 <span className="text-[11px] text-muted-foreground">
-                  在研 {overview.counts.projects_ongoing} · 结题 {overview.counts.projects_completed}
+                  在研 {overview.counts.projects_ongoing} · 结题{" "}
+                  {overview.counts.projects_completed}
                 </span>
               </div>
             </div>
             <div className="rounded-lg border border-border bg-card p-3.5">
-              <p className="text-[12px] text-muted-foreground">{t.tabAchievements}</p>
+              <p className="text-[12px] text-muted-foreground">
+                {t.tabAchievements}
+              </p>
               <p className="mt-1 font-display text-[22px] font-medium text-foreground">
                 {overview.counts.achievements}
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card p-3.5">
-              <p className="text-[12px] text-muted-foreground">{t.tabFacilities}</p>
+              <p className="text-[12px] text-muted-foreground">
+                {t.tabFacilities}
+              </p>
               <p className="mt-1 font-display text-[22px] font-medium text-foreground">
                 {overview.counts.facilities}
               </p>
             </div>
-            <div className="rounded-lg border border-border bg-card p-3.5 col-span-2 sm:col-span-1">
+            <div className="col-span-2 rounded-lg border border-border bg-card p-3.5 sm:col-span-1">
               <p className="text-[12px] text-muted-foreground">本子基准时间</p>
               <p className="mt-1 font-mono text-[14px] font-medium text-foreground">
                 {overview.as_of_time || "—"}
@@ -423,95 +713,182 @@ export default function LabAssetsPage() {
         ) : null}
 
         {/* Tabs & Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                ["people", t.tabPeople, people.length],
-                ["projects", t.tabProjects, projects.length],
-                ["achievements", t.tabAchievements, achievements.length],
-                ["facilities", t.tabFacilities, facilities.length],
-              ] as const
-            ).map(([key, label, count]) => (
-              <Button
-                key={key}
-                size="sm"
-                variant={activeTab === key ? "default" : "outline"}
-                className="h-8 px-3 text-[13px]"
-                onClick={() => {
-                  setActiveTab(key);
-                  setSearchQuery("");
-                }}
-              >
-                {label}
-                <span className="ml-1.5 font-mono text-[11px] opacity-80">({count})</span>
-              </Button>
-            ))}
-          </div>
+        <div className="space-y-2.5 border-b border-border pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  ["people", t.tabPeople, people.length],
+                  ["projects", t.tabProjects, projects.length],
+                  ["achievements", t.tabAchievements, achievements.length],
+                  ["facilities", t.tabFacilities, facilities.length],
+                ] as const
+              ).map(([key, label, count]) => (
+                <Button
+                  key={key}
+                  size="sm"
+                  variant={activeTab === key ? "default" : "outline"}
+                  className="h-8 px-3 text-[13px]"
+                  onClick={() => {
+                    setActiveTab(key);
+                    setSearchQuery("");
+                  }}
+                >
+                  {label}
+                  <span className="ml-1.5 font-mono text-[11px] opacity-80">
+                    ({count})
+                  </span>
+                </Button>
+              ))}
+            </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              type="search"
-              placeholder="搜索姓名、编号、题目、专长…"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-8 w-52 text-[13px]"
-            />
-            {activeTab === "people" ? (
-              <select
-                value={roleFilter}
-                onChange={(e) => setRoleFilter(e.target.value)}
-                className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
-              >
-                <option value="">全部角色</option>
-                <option value="applicant">课题负责人/申请人</option>
-                <option value="member">项目组成员</option>
-              </select>
-            ) : null}
-            {activeTab === "projects" ? (
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
-              >
-                <option value="">全部状态</option>
-                <option value="ongoing">在研</option>
-                <option value="completed">已结题</option>
-              </select>
-            ) : null}
-            {activeTab === "achievements" ? (
-              <select
-                value={kindFilter}
-                onChange={(e) => setKindFilter(e.target.value)}
-                className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
-              >
-                <option value="">全部类型</option>
-                <option value="report">研究报告/资政报告</option>
-                <option value="exhibition">成果展</option>
-                <option value="paper">论文</option>
-                <option value="patent">发明专利</option>
-                <option value="software">软件著作权</option>
-                <option value="book">学术专著</option>
-              </select>
-            ) : null}
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 px-2.5 text-[12px]"
-              onClick={toggleSelectAll}
-            >
-              全选/反选
-            </Button>
-            {selectedCount > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                type="search"
+                placeholder="搜索姓名、编号、题目、专长…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-8 w-52 text-[13px]"
+              />
+              {activeTab === "people" ? (
+                <select
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value)}
+                  className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
+                >
+                  <option value="">全部角色</option>
+                  <option value="applicant">课题负责人/申请人</option>
+                  <option value="member">项目组成员</option>
+                </select>
+              ) : null}
+              {activeTab === "projects" ? (
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
+                >
+                  <option value="">全部状态</option>
+                  <option value="ongoing">在研</option>
+                  <option value="completed">已结题</option>
+                </select>
+              ) : null}
+              {activeTab === "achievements" ? (
+                <select
+                  value={kindFilter}
+                  onChange={(e) => setKindFilter(e.target.value)}
+                  className="h-8 rounded-md border border-input bg-card px-2 text-[12px] text-foreground"
+                >
+                  <option value="">全部类型</option>
+                  <option value="report">研究报告/资政报告</option>
+                  <option value="exhibition">成果展</option>
+                  <option value="paper">论文</option>
+                  <option value="patent">发明专利</option>
+                  <option value="software">软件著作权</option>
+                  <option value="book">学术专著</option>
+                </select>
+              ) : null}
               <Button
                 size="sm"
-                className="h-8 px-3 text-[12px]"
-                onClick={handleBatchCopy}
+                variant="outline"
+                className="h-8 px-2.5 text-[12px]"
+                onClick={toggleSelectAll}
               >
-                {copiedId === "batch"
+                全选/反选
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-3 text-[12px]"
+                disabled={selectedCount === 0}
+                onClick={handleBatchCopySelected}
+              >
+                {copiedId === "batch-selected"
                   ? t.copiedGrantFormat
                   : `${t.copySelectedGrantFormat} (${selectedCount})`}
               </Button>
+              <Button
+                size="sm"
+                className="h-8 px-3 text-[12px]"
+                disabled={currentTabListLength === 0}
+                onClick={handleBatchCopyAllTab}
+              >
+                {copiedId === "batch-all"
+                  ? t.copiedGrantFormat
+                  : `${t.copyAllTabGrantFormat} (${currentTabListLength})`}
+              </Button>
+            </div>
+          </div>
+
+          {/* Spec §7A.3 Quick filter & formatting switches bar */}
+          <div className="flex flex-wrap items-center gap-4 text-[12px] text-muted-foreground">
+            <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+              <input
+                type="checkbox"
+                checked={autoNumber}
+                onChange={(e) => setAutoNumber(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-border"
+              />
+              批量复制自动编号{" "}
+              <span className="font-mono text-[11px] text-muted-foreground">
+                [1] [2] …
+              </span>
+            </label>
+
+            {activeTab === "projects" ? (
+              <>
+                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={onlyOngoingProjects}
+                    onChange={(e) => setOnlyOngoingProjects(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  仅在研
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={onlyRecentProjects}
+                    onChange={(e) => setOnlyRecentProjects(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  仅近 5 年
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includeProjectRel}
+                    onChange={(e) => setIncludeProjectRel(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  附带与本课题关系说明
+                </label>
+              </>
+            ) : null}
+
+            {activeTab === "achievements" ? (
+              <>
+                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={onlyRecentAchievements}
+                    onChange={(e) =>
+                      setOnlyRecentAchievements(e.target.checked)
+                    }
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  仅近 5 年
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5 text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={withSupportNote}
+                    onChange={(e) => setWithSupportNote(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-border"
+                  />
+                  附带支撑价值说明 (?with_support=1)
+                </label>
+              </>
             ) : null}
           </div>
         </div>
@@ -521,7 +898,9 @@ export default function LabAssetsPage() {
         ) : activeTab === "people" ? (
           <div className="grid gap-3">
             {filteredPeople.length === 0 ? (
-              <p className="text-[13px] text-muted-foreground">暂无匹配的团队成员记录。</p>
+              <p className="text-[13px] text-muted-foreground">
+                暂无匹配的团队成员记录。
+              </p>
             ) : (
               filteredPeople.map((person) => (
                 <div
@@ -547,9 +926,15 @@ export default function LabAssetsPage() {
                             {person.name}
                           </span>
                           <Badge
-                            variant={person.project_role === "applicant" ? "secondary" : "outline"}
+                            variant={
+                              person.project_role === "applicant"
+                                ? "secondary"
+                                : "outline"
+                            }
                           >
-                            {person.project_role === "applicant" ? "课题负责人" : "项目组成员"}
+                            {person.project_role === "applicant"
+                              ? "课题负责人"
+                              : "项目组成员"}
                           </Badge>
                           {person.degree ? (
                             <Badge variant="outline">{person.degree}</Badge>
@@ -588,7 +973,9 @@ export default function LabAssetsPage() {
                                 )
                               }
                             >
-                              {expandedBioId === person.id ? "收起学术简历" : "展开学术简历"}
+                              {expandedBioId === person.id
+                                ? "收起学术简历"
+                                : "展开学术简历"}
                             </button>
                             {expandedBioId === person.id ? (
                               <p className="mt-1.5 rounded-md bg-muted/40 p-2.5 font-serif text-[13px] leading-[1.6] text-foreground">
@@ -604,9 +991,13 @@ export default function LabAssetsPage() {
                         size="sm"
                         variant="outline"
                         className="h-7 px-2.5 text-[12px]"
-                        onClick={() => copyToClipboard(person.application_text, person.id)}
+                        onClick={() =>
+                          copyToClipboard(person.application_text, person.id)
+                        }
                       >
-                        {copiedId === person.id ? t.copiedGrantFormat : t.copyGrantFormat}
+                        {copiedId === person.id
+                          ? t.copiedGrantFormat
+                          : t.copyGrantFormat}
                       </Button>
                       {person.bio ? (
                         <Button
@@ -620,7 +1011,9 @@ export default function LabAssetsPage() {
                             )
                           }
                         >
-                          {copiedId === `${person.id}-bio` ? t.copiedGrantFormat : "复制学术简历"}
+                          {copiedId === `${person.id}-bio`
+                            ? t.copiedGrantFormat
+                            : "复制学术简历"}
                         </Button>
                       ) : null}
                     </div>
@@ -632,137 +1025,169 @@ export default function LabAssetsPage() {
         ) : activeTab === "projects" ? (
           <div className="grid gap-3">
             {filteredProjects.length === 0 ? (
-              <p className="text-[13px] text-muted-foreground">暂无匹配的承担项目记录。</p>
+              <p className="text-[13px] text-muted-foreground">
+                暂无匹配的承担项目记录。
+              </p>
             ) : (
-              filteredProjects.map((proj) => (
-                <div
-                  key={proj.id}
-                  className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="flex items-start gap-2.5">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selectedIds[proj.id])}
-                        onChange={(e) =>
-                          setSelectedIds((prev) => ({
-                            ...prev,
-                            [proj.id]: e.target.checked,
-                          }))
-                        }
-                        className="mt-1 h-4 w-4 rounded border-border"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-[15px] text-foreground">
-                            《{proj.title}》
-                          </span>
-                          {proj.grant_no ? (
-                            <Badge variant="outline" className="font-mono">
-                              {proj.grant_no}
+              filteredProjects.map((proj) => {
+                const displayAppText = getProjectText(proj);
+                return (
+                  <div
+                    key={proj.id}
+                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selectedIds[proj.id])}
+                          onChange={(e) =>
+                            setSelectedIds((prev) => ({
+                              ...prev,
+                              [proj.id]: e.target.checked,
+                            }))
+                          }
+                          className="mt-1 h-4 w-4 rounded border-border"
+                        />
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-[15px] text-foreground">
+                              《{proj.title}》
+                            </span>
+                            {proj.grant_no ? (
+                              <Badge variant="outline" className="font-mono">
+                                {proj.grant_no}
+                              </Badge>
+                            ) : null}
+                            <Badge
+                              variant={
+                                proj.status === "ongoing"
+                                  ? "secondary"
+                                  : "outline"
+                              }
+                            >
+                              {proj.status_label}
+                              {proj.status_source === "inferred"
+                                ? "（按基准期推断）"
+                                : ""}
                             </Badge>
-                          ) : null}
-                          <Badge variant={proj.status === "ongoing" ? "secondary" : "outline"}>
-                            {proj.status_label}
-                            {proj.status_source === "inferred" ? "（按基准期推断）" : ""}
-                          </Badge>
+                          </div>
+                          <p className="mt-1 text-[13px] text-muted-foreground">
+                            {[
+                              proj.pi_name ? `负责人：${proj.pi_name}` : null,
+                              proj.funder,
+                              proj.start_date
+                                ? `立项：${proj.start_date.slice(0, 7)}`
+                                : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                          <p className="mt-1.5 whitespace-pre-wrap font-serif text-[13px] text-foreground/90">
+                            {displayAppText}
+                          </p>
                         </div>
-                        <p className="mt-1 text-[13px] text-muted-foreground">
-                          {[
-                            proj.pi_name ? `负责人：${proj.pi_name}` : null,
-                            proj.funder,
-                            proj.start_date ? `立项：${proj.start_date.slice(0, 7)}` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </p>
-                        <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
-                          {proj.application_text}
-                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() =>
+                            copyToClipboard(displayAppText, proj.id)
+                          }
+                        >
+                          {copiedId === proj.id
+                            ? t.copiedGrantFormat
+                            : t.copyGrantFormat}
+                        </Button>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2.5 text-[12px]"
-                        onClick={() => copyToClipboard(proj.application_text, proj.id)}
-                      >
-                        {copiedId === proj.id ? t.copiedGrantFormat : t.copyGrantFormat}
-                      </Button>
-                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         ) : activeTab === "achievements" ? (
           <div className="grid gap-3">
             {filteredAchievements.length === 0 ? (
-              <p className="text-[13px] text-muted-foreground">暂无匹配的前期成果记录。</p>
+              <p className="text-[13px] text-muted-foreground">
+                暂无匹配的前期成果记录。
+              </p>
             ) : (
-              filteredAchievements.map((ach) => (
-                <div
-                  key={ach.id}
-                  className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="flex items-start gap-2.5">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selectedIds[ach.id])}
-                        onChange={(e) =>
-                          setSelectedIds((prev) => ({
-                            ...prev,
-                            [ach.id]: e.target.checked,
-                          }))
-                        }
-                        className="mt-1 h-4 w-4 rounded border-border"
-                      />
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="secondary">{ach.kind_label}</Badge>
-                          <span className="font-medium text-[15px] text-foreground">
-                            《{ach.title}》
-                          </span>
-                          {ach.year ? (
-                            <Badge variant="outline" className="font-mono">
-                              {ach.year}
-                            </Badge>
-                          ) : null}
+              filteredAchievements.map((ach) => {
+                const displayAchText = getAchievementText(ach);
+                return (
+                  <div
+                    key={ach.id}
+                    className="rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/10"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selectedIds[ach.id])}
+                          onChange={(e) =>
+                            setSelectedIds((prev) => ({
+                              ...prev,
+                              [ach.id]: e.target.checked,
+                            }))
+                          }
+                          className="mt-1 h-4 w-4 rounded border-border"
+                        />
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="secondary">{ach.kind_label}</Badge>
+                            <span className="font-medium text-[15px] text-foreground">
+                              《{ach.title}》
+                            </span>
+                            {ach.year ? (
+                              <Badge variant="outline" className="font-mono">
+                                {ach.year}
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <p className="mt-1 text-[13px] text-muted-foreground">
+                            {[
+                              ach.first_author
+                                ? `第一作者：${ach.first_author}`
+                                : null,
+                              ach.venue,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                          <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
+                            {displayAchText}
+                          </p>
                         </div>
-                        <p className="mt-1 text-[13px] text-muted-foreground">
-                          {[
-                            ach.first_author ? `第一作者：${ach.first_author}` : null,
-                            ach.venue,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </p>
-                        <p className="mt-1.5 font-serif text-[13px] text-foreground/90">
-                          {ach.application_text}
-                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[12px]"
+                          onClick={() =>
+                            copyToClipboard(displayAchText, ach.id)
+                          }
+                        >
+                          {copiedId === ach.id
+                            ? t.copiedGrantFormat
+                            : t.copyGrantFormat}
+                        </Button>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2.5 text-[12px]"
-                        onClick={() => copyToClipboard(ach.application_text, ach.id)}
-                      >
-                        {copiedId === ach.id ? t.copiedGrantFormat : t.copyGrantFormat}
-                      </Button>
-                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         ) : (
           <div className="grid gap-3">
             {filteredFacilities.length === 0 ? (
-              <p className="text-[13px] text-muted-foreground">暂无匹配的设备与支撑条件记录。</p>
+              <p className="text-[13px] text-muted-foreground">
+                暂无匹配的设备与支撑条件记录。
+              </p>
             ) : (
               filteredFacilities.map((fac) => (
                 <div
@@ -785,7 +1210,9 @@ export default function LabAssetsPage() {
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
                           <Badge variant="secondary">
-                            {fac.category === "compute" ? "算力设备" : "科研设备"}
+                            {fac.category === "compute"
+                              ? "算力设备"
+                              : "科研设备"}
                           </Badge>
                           <span className="font-medium text-[15px] text-foreground">
                             {fac.name}
@@ -805,9 +1232,13 @@ export default function LabAssetsPage() {
                       size="sm"
                       variant="outline"
                       className="h-7 px-2.5 text-[12px]"
-                      onClick={() => copyToClipboard(fac.application_text, fac.id)}
+                      onClick={() =>
+                        copyToClipboard(fac.application_text, fac.id)
+                      }
                     >
-                      {copiedId === fac.id ? t.copiedGrantFormat : t.copyGrantFormat}
+                      {copiedId === fac.id
+                        ? t.copiedGrantFormat
+                        : t.copyGrantFormat}
                     </Button>
                   </div>
                 </div>
@@ -817,7 +1248,16 @@ export default function LabAssetsPage() {
         )}
 
         {/* Admin 3-Step Cold-Start Import Wizard */}
-        <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
+        <Dialog
+          open={wizardOpen}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              tryCloseWizard();
+            } else {
+              setWizardOpen(true);
+            }
+          }}
+        >
           <DialogContent className="max-w-3xl max-h-[88vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>
@@ -845,19 +1285,27 @@ export default function LabAssetsPage() {
             {wizardStep === 1 ? (
               <form onSubmit={handleParseUpload} className="grid gap-4">
                 <div>
-                  <Label htmlFor="proposal-docx" className="text-[12px] font-medium text-muted-foreground">
+                  <Label
+                    htmlFor="proposal-docx"
+                    className="text-[12px] font-medium text-muted-foreground"
+                  >
                     申报书文件 (.docx，上限 20 MB)
                   </Label>
                   <Input
                     id="proposal-docx"
                     type="file"
                     accept=".docx"
-                    onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                    onChange={(e) =>
+                      handleFileChange(e.target.files?.[0] || null)
+                    }
                     required
                   />
                 </div>
                 <div>
-                  <Label htmlFor="upload-as-of" className="text-[12px] font-medium text-muted-foreground">
+                  <Label
+                    htmlFor="upload-as-of"
+                    className="text-[12px] font-medium text-muted-foreground"
+                  >
                     本子基准日期（选填，留空则从封面自动提取）
                   </Label>
                   <Input
@@ -868,10 +1316,14 @@ export default function LabAssetsPage() {
                   />
                 </div>
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={() => setWizardOpen(false)}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setWizardOpen(false)}
+                  >
                     {t.cancel}
                   </Button>
-                  <Button type="submit" disabled={parsing}>
+                  <Button type="submit" disabled={parsing || !uploadFile}>
                     {parsing ? "正在解析与脱敏…" : "上传并解析"}
                   </Button>
                 </DialogFooter>
@@ -904,9 +1356,22 @@ export default function LabAssetsPage() {
                   项。
                 </div>
 
+                {/* Spec §2.4 & §8.3.2 Default password non-dismissible warning */}
+                {initialPassword.trim() === DEFAULT_INITIAL_PASSWORD ? (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-destructive bg-destructive/10 px-3.5 py-2.5 text-[12px] font-semibold text-destructive"
+                  >
+                    ⚠ {t.defaultPasswordWarning}
+                  </div>
+                ) : null}
+
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div>
-                    <Label htmlFor="prov-as-of" className="text-[12px] text-muted-foreground">
+                    <Label
+                      htmlFor="prov-as-of"
+                      className="text-[12px] text-muted-foreground"
+                    >
                       本子基准日期 (as_of_time)
                     </Label>
                     <Input
@@ -918,7 +1383,10 @@ export default function LabAssetsPage() {
                     />
                   </div>
                   <div>
-                    <Label htmlFor="prov-pw" className="text-[12px] text-muted-foreground">
+                    <Label
+                      htmlFor="prov-pw"
+                      className="text-[12px] text-muted-foreground"
+                    >
                       全组统一初始口令（7天内有效）
                     </Label>
                     <Input
@@ -930,7 +1398,7 @@ export default function LabAssetsPage() {
                     />
                   </div>
                   <div className="flex items-end pb-2">
-                    <label className="flex items-center gap-2 text-[12px] text-foreground cursor-pointer">
+                    <label className="flex cursor-pointer items-center gap-2 text-[12px] text-foreground">
                       <input
                         type="checkbox"
                         checked={includePassword}
@@ -969,7 +1437,10 @@ export default function LabAssetsPage() {
                                 onChange={(e) =>
                                   setOverrides((prev) => ({
                                     ...prev,
-                                    [p.key]: { ...ov, exclude: !e.target.checked },
+                                    [p.key]: {
+                                      ...ov,
+                                      exclude: !e.target.checked,
+                                    },
                                   }))
                                 }
                               />
@@ -990,7 +1461,10 @@ export default function LabAssetsPage() {
                                 onChange={(e) =>
                                   setOverrides((prev) => ({
                                     ...prev,
-                                    [p.key]: { ...ov, login_name: e.target.value },
+                                    [p.key]: {
+                                      ...ov,
+                                      login_name: e.target.value,
+                                    },
                                   }))
                                 }
                                 className="h-7 font-mono text-[12px]"
@@ -1002,7 +1476,9 @@ export default function LabAssetsPage() {
                             <td className="px-2.5 py-2">
                               <Badge
                                 variant={
-                                  p.match?.status === "conflict" ? "outline" : "secondary"
+                                  p.match?.status === "conflict"
+                                    ? "outline"
+                                    : "secondary"
                                 }
                               >
                                 {p.match?.status === "existing"
@@ -1032,7 +1508,9 @@ export default function LabAssetsPage() {
                     disabled={provisioning || !provisionAsOf.trim()}
                     onClick={handleProvision}
                   >
-                    {provisioning ? "正在开号并写入知识库…" : "确认一键开号并入库"}
+                    {provisioning
+                      ? "正在开号并写入知识库…"
+                      : "确认一键开号并入库"}
                   </Button>
                 </DialogFooter>
               </div>
@@ -1040,6 +1518,14 @@ export default function LabAssetsPage() {
 
             {wizardStep === 3 && provisionResult ? (
               <div className="grid gap-4 text-[13px]">
+                {/* Spec §8.3.3 Yellow Warning Banner */}
+                <div
+                  role="alert"
+                  className="rounded-md border border-amber-500/50 bg-amber-500/15 px-3.5 py-2.5 text-[12px] font-semibold text-amber-900 dark:text-amber-200"
+                >
+                  ⚠ {t.credentialOnceBanner}
+                </div>
+
                 <div className="rounded-md border border-border bg-muted/30 p-3 text-[12px]">
                   已新建账号{" "}
                   <span className="font-mono font-semibold">
@@ -1066,7 +1552,10 @@ export default function LabAssetsPage() {
                     {provisionResult.stats.facilities_inserted}
                   </span>{" "}
                   项，并已生成 RAG 文档{" "}
-                  <span className="font-mono">{provisionResult.rag_doc_key}</span>。
+                  <span className="font-mono">
+                    {provisionResult.rag_doc_key}
+                  </span>
+                  。
                 </div>
 
                 <div>
@@ -1089,8 +1578,11 @@ export default function LabAssetsPage() {
                   <Button
                     type="button"
                     onClick={() => {
-                      void navigator.clipboard.writeText(provisionResult.roster_text);
+                      void navigator.clipboard.writeText(
+                        provisionResult.roster_text,
+                      );
                       setRosterCopied(true);
+                      setHasSavedCredentials(true);
                       setTimeout(() => setRosterCopied(false), 2000);
                     }}
                   >
@@ -1099,7 +1591,7 @@ export default function LabAssetsPage() {
                   <Button
                     type="button"
                     variant="ghost"
-                    onClick={() => setWizardOpen(false)}
+                    onClick={tryCloseWizard}
                   >
                     完成并关闭
                   </Button>
