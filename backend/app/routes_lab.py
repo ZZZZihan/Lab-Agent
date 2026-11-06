@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import write_audit
 from app.auth import Actor
 from app.db import get_session
-from app.importer.fingerprint import achievement_fp, facility_fp, project_fp
+from app.importer.fingerprint import achievement_fp, facility_fp, person_fp, project_fp
 from app.importer.formatters import (
     ACHIEVEMENT_KIND_LABELS,
     PROJECT_STATUS_LABELS,
@@ -27,7 +27,7 @@ from app.importer.formatters import (
     format_project_application,
     render_lab_profile_markdown,
 )
-from app.importer.parser import parse_proposal_docx
+from app.importer.parser import parse_proposal_docx, reparse_preview_payload
 from app.importer.people import assign_people_identities, clean_email, normalize_person_name
 from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
 from app.importer.provision import (
@@ -226,6 +226,7 @@ def _serialize_person(person: LabPerson) -> dict[str, object]:
         "affiliation": person.affiliation,
         "project_role": person.project_role,
         "bio": person.bio,
+        "entity_fingerprint": person.entity_fingerprint,
         "as_of_time": person.as_of_time.isoformat() if person.as_of_time else None,
         "source_import_id": (
             str(person.source_import_id) if person.source_import_id else None
@@ -251,6 +252,7 @@ def _serialize_project(project: LabProject) -> dict[str, object]:
         "status_source": project.status_source,
         "relationship_note": project.relationship_note,
         "raw_text": project.raw_text,
+        "entity_fingerprint": project.entity_fingerprint,
         "as_of_time": project.as_of_time.isoformat() if project.as_of_time else None,
         "source_import_id": (
             str(project.source_import_id) if project.source_import_id else None
@@ -277,6 +279,7 @@ def _serialize_achievement(achievement: LabAchievement) -> dict[str, object]:
         "support_note": achievement.support_note,
         "raw_text": achievement.raw_text,
         "parse_quality": achievement.parse_quality,
+        "entity_fingerprint": achievement.entity_fingerprint,
         "as_of_time": (
             achievement.as_of_time.isoformat() if achievement.as_of_time else None
         ),
@@ -301,6 +304,7 @@ def _serialize_facility(facility: LabFacility) -> dict[str, object]:
         "value_wan": str(facility.value_wan) if facility.value_wan is not None else None,
         "usage_scenario": facility.usage_scenario,
         "raw_text": facility.raw_text,
+        "entity_fingerprint": facility.entity_fingerprint,
         "as_of_time": facility.as_of_time.isoformat() if facility.as_of_time else None,
         "source_import_id": (
             str(facility.source_import_id) if facility.source_import_id else None
@@ -499,6 +503,32 @@ async def delete_import_job(
             409,
             "import_already_provisioned",
             "已开号或已合并的导入任务不可删除",
+        )
+    has_referenced_assets = (
+        await session.scalar(
+            select(LabPerson.id).where(LabPerson.source_import_id == job_id).limit(1)
+        )
+        is not None
+        or await session.scalar(
+            select(LabProject.id).where(LabProject.source_import_id == job_id).limit(1)
+        )
+        is not None
+        or await session.scalar(
+            select(LabAchievement.id)
+            .where(LabAchievement.source_import_id == job_id)
+            .limit(1)
+        )
+        is not None
+        or await session.scalar(
+            select(LabFacility.id).where(LabFacility.source_import_id == job_id).limit(1)
+        )
+        is not None
+    )
+    if has_referenced_assets:
+        raise APIError(
+            409,
+            "import_already_provisioned",
+            "该导入任务存在关联的实验室资产，不可删除",
         )
     filename = job.original_filename
     await session.delete(job)
@@ -715,6 +745,12 @@ async def reparse_import_job(
     effective_mode = (mode or (body.mode if body is not None else None) or "fsm").strip().lower()
     if effective_mode not in ("llm", "fsm"):
         raise APIError(400, "invalid_mode", "mode 仅支持 llm 或 fsm")
+    if effective_mode == "llm" and _settings(request).llm_provider == "fake":
+        raise APIError(
+            422,
+            "llm_reparse_unavailable",
+            "当前未配置在线大模型服务，无法使用 llm 模式重新解析，请使用 fsm 模式",
+        )
 
     job = await session.get(ImportJob, job_id)
     if job is None:
@@ -730,35 +766,19 @@ async def reparse_import_job(
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
 
-    raw_ppl = preview.get("people")
-    ppl_list: list[dict[str, Any]] = [
-        dict(p) for p in (raw_ppl if isinstance(raw_ppl, list) else []) if isinstance(p, dict)
-    ]
-    for p in ppl_list:
-        if p.get("tier") == "T1" and not p.get("cert"):
-            p["cert"] = p.get("login_name")
-    assign_people_identities(
-        ppl_list,
+    preview, recomputed_stats = reparse_preview_payload(
+        preview,
+        as_of_date=job.as_of_time,
+        mode=effective_mode,
         existing_users=existing_users,
         existing_people=existing_people,
     )
-    preview["people"] = ppl_list
-
-    raw_projs = preview.get("projects")
-    proj_list: list[dict[str, Any]] = [
-        dict(j) for j in (raw_projs if isinstance(raw_projs, list) else []) if isinstance(j, dict)
-    ]
-    _recompute_inferred_projects(proj_list, job.as_of_time)
-    preview["projects"] = proj_list
-
-    parser_ver = "v2.1-llm" if effective_mode == "llm" else "v2.1-fsm"
-    ext_mode = "rule+llm" if effective_mode == "llm" else "rule+regex_fsm"
+    parser_ver = str(preview.get("parser_version") or "v2.1-fsm")
     job.parser_version = parser_ver
-    preview["parser_version"] = parser_ver
-    preview["extraction_mode"] = ext_mode
-
-    assert_no_pii(preview)
     job.preview = preview
+    cur_stats = dict(job.stats or {})
+    cur_stats.update(recomputed_stats)
+    job.stats = cur_stats
     await session.flush()
     serialized = _serialize_import_job(job, include_preview=True)
     await session.commit()
@@ -1028,14 +1048,19 @@ async def _resolve_source_import_id(
 ) -> tuple[uuid.UUID, date]:
     if explicit_id is not None:
         job = await session.get(ImportJob, explicit_id)
-        if job is not None:
-            return job.id, job.as_of_time or as_of_date
+        if job is None:
+            raise APIError(404, "not_found", "关联的导入任务不存在")
+        if job.status not in ("provisioned", "merged"):
+            raise APIError(
+                409,
+                "import_not_provisioned",
+                "仅可关联已开号或已合并的导入任务",
+            )
+        return job.id, job.as_of_time or as_of_date
     latest_job = await session.scalar(
         select(ImportJob)
-        .order_by(
-            (ImportJob.status == "provisioned").desc(),
-            ImportJob.created_at.desc(),
-        )
+        .where(ImportJob.status.in_(("provisioned", "merged")))
+        .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
         .limit(1)
     )
     if latest_job is not None:
@@ -1062,22 +1087,45 @@ async def _require_lab_editor(
     actor: Actor,
     *,
     owner_name: str | None = None,
+    new_owner_name: str | None = None,
 ) -> User:
     user = await _user(session, actor)
     if actor.role == "admin":
         return user
     if actor.role != "member":
         raise APIError(403, "forbidden", "权限不足")
-    if owner_name is not None:
+    if owner_name is not None or new_owner_name is not None:
         person = await session.scalar(
             select(LabPerson).where(LabPerson.user_id == user.id)
         )
         allowed_names = {
-            normalize_person_name(user.display_name),
-            normalize_person_name(person.name) if person else "",
+            n
+            for n in (
+                normalize_person_name(user.display_name),
+                normalize_person_name(person.name) if person else "",
+            )
+            if n
         }
-        if normalize_person_name(owner_name) not in allowed_names:
-            raise APIError(403, "forbidden", "仅管理员或条目负责人可修改此记录")
+        if owner_name is not None:
+            norm_owner = normalize_person_name(owner_name)
+            if not norm_owner or norm_owner not in allowed_names:
+                raise APIError(403, "forbidden", "仅管理员或条目负责人可修改此记录")
+            all_people = list(await session.scalars(select(LabPerson)))
+            same_name_count = sum(
+                1
+                for p in all_people
+                if normalize_person_name(p.name) == norm_owner
+            )
+            if same_name_count > 1:
+                raise APIError(
+                    403,
+                    "forbidden",
+                    "存在同名成员歧义，仅管理员可修改此记录",
+                )
+        if new_owner_name is not None:
+            norm_new = normalize_person_name(new_owner_name)
+            if not norm_new or norm_new not in allowed_names:
+                raise APIError(403, "forbidden", "非管理员不可将条目负责人改为他人")
     return user
 
 
@@ -1120,6 +1168,8 @@ async def update_lab_person(
         cleaned_name = normalize_person_name(_scrub_str(body.name) or "")
         if not cleaned_name:
             raise APIError(422, "invalid_name", "姓名不能为空")
+        if actor.role != "admin" and cleaned_name != normalize_person_name(person.name):
+            raise APIError(403, "forbidden", "仅管理员可修改成员姓名或项目角色")
         person.name = cleaned_name
     if body.email is not None:
         person.email = clean_email(body.email)
@@ -1139,9 +1189,28 @@ async def update_lab_person(
         pr = body.project_role.strip().lower()
         if pr not in ("applicant", "member"):
             raise APIError(422, "invalid_project_role", "project_role 仅支持 applicant 或 member")
+        if actor.role != "admin" and pr != person.project_role:
+            raise APIError(403, "forbidden", "仅管理员可修改成员姓名或项目角色")
         person.project_role = pr
     if body.bio is not None:
         person.bio = _scrub_str(body.bio)
+
+    new_person_fp = person_fp(
+        tier="T3" if person.email else "T2",
+        login_name=None,
+        name=person.name,
+        affiliation=person.affiliation,
+        email=person.email,
+    )
+    dup_person_id = await session.scalar(
+        select(LabPerson.id).where(
+            LabPerson.entity_fingerprint == new_person_fp,
+            LabPerson.id != person.id,
+        )
+    )
+    if dup_person_id is not None:
+        raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
+    person.entity_fingerprint = new_person_fp
 
     serialized_person = _serialize_person(person)
     assert_no_pii(serialized_person)
@@ -1257,7 +1326,12 @@ async def update_lab_project(
     project = await session.get(LabProject, project_id)
     if project is None:
         raise APIError(404, "not_found", "项目记录不存在")
-    user = await _require_lab_editor(session, actor, owner_name=project.pi_name)
+    user = await _require_lab_editor(
+        session,
+        actor,
+        owner_name=project.pi_name,
+        new_owner_name=_scrub_str(body.pi_name) if body.pi_name is not None else None,
+    )
 
     if body.title is not None:
         t_clean = _scrub_str(body.title)
@@ -1292,6 +1366,21 @@ async def update_lab_project(
         project.relationship_note = _scrub_str(body.relationship_note)
     if body.raw_text is not None:
         project.raw_text = _scrub_str(body.raw_text) or project.title
+
+    new_proj_fp = project_fp(
+        grant_no=project.grant_no,
+        title=project.title,
+        funder=project.funder,
+    )
+    dup_proj_id = await session.scalar(
+        select(LabProject.id).where(
+            LabProject.entity_fingerprint == new_proj_fp,
+            LabProject.id != project.id,
+        )
+    )
+    if dup_proj_id is not None:
+        raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
+    project.entity_fingerprint = new_proj_fp
 
     await session.flush()
     assert_no_pii(_serialize_project(project))
@@ -1414,7 +1503,12 @@ async def update_lab_achievement(
     if achievement is None:
         raise APIError(404, "not_found", "成果记录不存在")
     user = await _require_lab_editor(
-        session, actor, owner_name=achievement.first_author
+        session,
+        actor,
+        owner_name=achievement.first_author,
+        new_owner_name=_scrub_str(body.first_author)
+        if body.first_author is not None
+        else None,
     )
 
     if body.kind is not None:
@@ -1438,6 +1532,23 @@ async def update_lab_achievement(
         achievement.support_note = _scrub_str(body.support_note)
     if body.raw_text is not None:
         achievement.raw_text = _scrub_str(body.raw_text) or achievement.title
+
+    new_ach_fp = achievement_fp(
+        kind=achievement.kind,
+        title=achievement.title,
+        year=achievement.year,
+        raw_text=achievement.raw_text,
+        parse_quality=achievement.parse_quality,
+    )
+    dup_ach_id = await session.scalar(
+        select(LabAchievement.id).where(
+            LabAchievement.entity_fingerprint == new_ach_fp,
+            LabAchievement.id != achievement.id,
+        )
+    )
+    if dup_ach_id is not None:
+        raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
+    achievement.entity_fingerprint = new_ach_fp
 
     await session.flush()
     assert_no_pii(_serialize_achievement(achievement))
@@ -1563,6 +1674,21 @@ async def update_lab_facility(
         facility.usage_scenario = _scrub_str(body.usage_scenario)
     if body.raw_text is not None:
         facility.raw_text = _scrub_str(body.raw_text) or facility.name
+
+    new_fac_fp = facility_fp(
+        category=facility.category,
+        name=facility.name,
+        spec=facility.spec,
+    )
+    dup_fac_id = await session.scalar(
+        select(LabFacility.id).where(
+            LabFacility.entity_fingerprint == new_fac_fp,
+            LabFacility.id != facility.id,
+        )
+    )
+    if dup_fac_id is not None:
+        raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
+    facility.entity_fingerprint = new_fac_fp
 
     await session.flush()
     assert_no_pii(_serialize_facility(facility))

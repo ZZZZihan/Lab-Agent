@@ -11,7 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from app.importer.people import (
 )
 from app.importer.pii import assert_no_pii
 from app.models import (
+    Chunk,
     Document,
     ImportJob,
     LabAchievement,
@@ -722,7 +723,7 @@ async def sync_lab_profile_rag(
     if target_job is None:
         target_job = await session.scalar(
             select(ImportJob)
-            .where(ImportJob.status == "provisioned")
+            .where(ImportJob.status.in_(("provisioned", "merged")))
             .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
             .limit(1)
         )
@@ -800,6 +801,24 @@ async def sync_lab_profile_rag(
     rag_doc = await session.scalar(select(Document).where(Document.doc_key == doc_key))
     if target_job is not None and rag_doc is not None:
         target_job.rag_document_id = rag_doc.id
+
+    stale_docs = list(
+        await session.scalars(
+            select(Document).where(
+                Document.doc_key.like("lab-profile-%"),
+                Document.doc_key != doc_key,
+                Document.deleted_at.is_(None),
+            )
+        )
+    )
+    if stale_docs:
+        retired_at = datetime.now(UTC)
+        for stale_doc in stale_docs:
+            await session.execute(
+                delete(Chunk).where(Chunk.document_id == stale_doc.id)
+            )
+            stale_doc.deleted_at = retired_at
+
     await session.flush()
     return doc_key, rag_doc
 

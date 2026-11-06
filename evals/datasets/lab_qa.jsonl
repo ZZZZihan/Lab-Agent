@@ -25,6 +25,6 @@
 {"id": "L25", "category": "format_reuse", "question": "请按申报书格式列出课题组实验室算力设备与支撑条件。", "expect_refused": false, "expected_facts": ["计算加速设备及配套部件", "8.00 万元", "2台图形工作站"], "forbidden_facts": []}
 {"id": "L26", "category": "format_reuse", "question": "请按申报书格式列出课题组负责人万振凯的个人申报书简介与学术简历。", "expect_refused": false, "expected_facts": ["万振凯", "天津天狮学院", "长期从事人工智能与智能评卷系统研究"], "forbidden_facts": []}
 {"id": "L27", "category": "format_reuse", "question": "请按申报书格式说明本课题与课题组已承担项目的关系。", "expect_refused": false, "expected_facts": ["AGE240005", "全国教育科学规划课题", "大模型安全对齐"], "forbidden_facts": []}
-{"id": "L28", "category": "out_of_kb_refusal", "question": "我们课题组有国家社科基金重大项目吗？批准号是多少？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["国家社科基金重大项目", "24&ZD"]}
-{"id": "L29", "category": "out_of_kb_refusal", "question": "课题组有量子通信卫星实验平台吗？设备原值多少万元？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["量子通信卫星实验平台", "墨子号"]}
-{"id": "L30", "category": "out_of_kb_refusal", "question": "诺贝尔物理学奖得主在课题组担任什么职务？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["诺贝尔物理学奖", "首席科学家"]}
+{"id": "L28", "category": "out_of_kb_refusal", "question": "国家社科基金重大项目 24&ZD088 的批准经费和研究周期是多少？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["国家社科基金重大项目", "24&ZD"]}
+{"id": "L29", "category": "out_of_kb_refusal", "question": "墨子号量子通信卫星地面光学望远镜的口径参数与建设造价是多少？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["量子通信卫星", "墨子号"]}
+{"id": "L30", "category": "out_of_kb_refusal", "question": "诺贝尔物理学奖得主担任首席科学家的聘任合同期限是哪几年？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["诺贝尔物理学奖", "首席科学家"]}

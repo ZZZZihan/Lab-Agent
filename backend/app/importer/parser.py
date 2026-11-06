@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from app.importer.fingerprint import achievement_fp, facility_fp, norm, project_fp
 from app.importer.people import assign_people_identities, normalize_person_name
@@ -155,6 +157,8 @@ def parse_proposal_docx(
                 person["bio"] = bio
                 break
 
+    people_snapshot = copy.deepcopy(people)
+
     assign_people_identities(
         people,
         existing_users=existing_users,
@@ -167,6 +171,18 @@ def parse_proposal_docx(
     if pii_dropped > 0:
         warnings.append({"code": "PII_DROPPED", "count": pii_dropped})
 
+    source_snapshot: dict[str, object] = {
+        "cover": copy.deepcopy(cover),
+        "people": people_snapshot,
+        "facilities": copy.deepcopy(facilities),
+        "t4": {
+            "bio": bio,
+            "relationship_note": relationship_note,
+            "achievement_raw_items": [str(a.get("raw_text") or "") for a in achievements],
+            "project_raw_items": [str(j.get("raw_text") or "") for j in projects],
+        },
+    }
+
     preview: dict[str, object] = {
         "parser_version": PARSER_VERSION,
         "extraction_mode": extraction_mode,
@@ -178,6 +194,7 @@ def parse_proposal_docx(
         "projects": projects,
         "facilities": facilities,
         "warnings": warnings,
+        "source_snapshot": source_snapshot,
     }
 
     assert_no_pii(preview)
@@ -196,6 +213,139 @@ def parse_proposal_docx(
         "preview": preview,
         "stats": stats,
     }
+
+
+def reparse_preview_payload(
+    preview: dict[str, Any],
+    *,
+    as_of_date: date | None,
+    mode: str,
+    existing_users: list[User] | None = None,
+    existing_people: list[LabPerson] | None = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Re-run extraction on `source_snapshot` (or fallback `raw_text`) and refresh identities."""
+    snapshot = preview.get("source_snapshot")
+    if isinstance(snapshot, dict):
+        raw_cover = snapshot.get("cover")
+        if isinstance(raw_cover, dict):
+            preview["cover"] = copy.deepcopy(raw_cover)
+        raw_people = snapshot.get("people")
+        people_list: list[dict[str, object]] = [
+            copy.deepcopy(p)
+            for p in (raw_people if isinstance(raw_people, list) else [])
+            if isinstance(p, dict)
+        ]
+        raw_facs = snapshot.get("facilities")
+        facilities_list: list[dict[str, object]] = [
+            copy.deepcopy(f)
+            for f in (raw_facs if isinstance(raw_facs, list) else [])
+            if isinstance(f, dict)
+        ]
+        t4 = snapshot.get("t4")
+        t4_dict = t4 if isinstance(t4, dict) else {}
+        rel_note = (
+            str(t4_dict.get("relationship_note") or "").strip() or None
+            if t4_dict.get("relationship_note")
+            else None
+        )
+        preview["relationship_note"] = rel_note
+        ach_raw_items = [
+            str(x)
+            for x in (t4_dict.get("achievement_raw_items") or [])
+            if str(x).strip()
+        ]
+        proj_raw_items = [
+            str(x)
+            for x in (t4_dict.get("project_raw_items") or [])
+            if str(x).strip()
+        ]
+        achievements_list = [
+            _parse_achievement_item(raw_item, index=idx)
+            for idx, raw_item in enumerate(ach_raw_items, start=1)
+        ]
+        projects_list = [
+            _parse_project_item(
+                raw_item,
+                index=idx,
+                as_of_date=as_of_date,
+                overall_relationship=rel_note,
+            )
+            for idx, raw_item in enumerate(proj_raw_items, start=1)
+        ]
+    else:
+        raw_people = preview.get("people")
+        people_list = [
+            copy.deepcopy(p)
+            for p in (raw_people if isinstance(raw_people, list) else [])
+            if isinstance(p, dict)
+        ]
+        for p in people_list:
+            if p.get("tier") == "T1" and not p.get("cert"):
+                p["cert"] = p.get("login_name")
+        raw_facs = preview.get("facilities")
+        facilities_list = [
+            copy.deepcopy(f)
+            for f in (raw_facs if isinstance(raw_facs, list) else [])
+            if isinstance(f, dict)
+        ]
+        rel_note = (
+            str(preview.get("relationship_note") or "").strip() or None
+            if preview.get("relationship_note")
+            else None
+        )
+        raw_achs = preview.get("achievements")
+        achievements_list = [
+            _parse_achievement_item(
+                str(a.get("raw_text") or a.get("title") or ""),
+                index=idx,
+            )
+            for idx, a in enumerate(
+                (raw_achs if isinstance(raw_achs, list) else []), start=1
+            )
+            if isinstance(a, dict) and str(a.get("raw_text") or a.get("title") or "").strip()
+        ]
+        raw_projs = preview.get("projects")
+        projects_list = [
+            _parse_project_item(
+                str(j.get("raw_text") or j.get("title") or ""),
+                index=idx,
+                as_of_date=as_of_date,
+                overall_relationship=rel_note,
+            )
+            for idx, j in enumerate(
+                (raw_projs if isinstance(raw_projs, list) else []), start=1
+            )
+            if isinstance(j, dict) and str(j.get("raw_text") or j.get("title") or "").strip()
+        ]
+
+    assign_people_identities(
+        people_list,
+        existing_users=existing_users,
+        existing_people=existing_people,
+    )
+    parser_ver = "v2.1-llm" if mode == "llm" else "v2.1-fsm"
+    ext_mode = "rule+llm" if mode == "llm" else "rule+regex_fsm"
+    preview["people"] = people_list
+    preview["achievements"] = achievements_list
+    preview["projects"] = projects_list
+    preview["facilities"] = facilities_list
+    preview["parser_version"] = parser_ver
+    preview["extraction_mode"] = ext_mode
+    if as_of_date is not None:
+        preview["as_of_time"] = as_of_date.isoformat()
+
+    assert_no_pii(preview)
+    recomputed_stats = {
+        "people": len(people_list),
+        "projects": len(projects_list),
+        "achievements": len(achievements_list),
+        "facilities": len(facilities_list),
+        "people_parsed": len(people_list),
+        "projects_parsed": len(projects_list),
+        "achievements_parsed": len(achievements_list),
+        "facilities_parsed": len(facilities_list),
+    }
+    return preview, recomputed_stats
 
 
 def _extract_cover(grids: list[list[list[str]]]) -> tuple[dict[str, object], int]:
