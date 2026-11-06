@@ -26,7 +26,7 @@ from app.rag.rerank import (
 )
 from app.rag.retrieve import MODES as RETRIEVE_MODES
 from app.rag.retrieve import search_knowledge
-from app.rag.rrf import Hit, decision_score
+from app.rag.rrf import Hit, decide, decision_score
 from evals.metrics import MODES as METRICS_MODES
 from evals.metrics import evaluate
 from evals.report import render_eval_block
@@ -637,5 +637,42 @@ def test_rerank_latency_isolation_rrf_k_freeze_and_report(tmp_path: Path) -> Non
     rendered = render_eval_block(tmp_path / "results", cal_dir)
     assert "hybrid RRF + API rerank (selected) | dev |" in rendered
     assert "hybrid RRF + API rerank (selected) | test |" in rendered
+
+
+def test_decide_hybrid_rrf_rerank_excludes_unscored_tail_candidates() -> None:
+    ranked: list[Hit] = [
+        Hit(key="head#0", cosine=0.80, bm25=1.5, rerank_score=0.2, rerank=0.2),
+        Hit(key="tail#1", cosine=0.75, bm25=1.2),
+        Hit(key="tail#2", cosine=0.70, bm25=1.0),
+    ]
+    decision = decide(
+        ranked,
+        mode="hybrid_rrf_rerank",
+        score_min=0.0,
+        rare_coverage=1.0,
+        rare_min=0.0,
+        margin=1.0,
+        cite_k=4,
+    )
+    assert decision["refused"] is False
+    assert [hit["key"] for hit in decision["citations"]] == ["head#0"]
+
+    unscored_only: list[Hit] = [
+        Hit(key="tail#1", cosine=0.75, bm25=1.2),
+        Hit(key="tail#2", cosine=0.70, bm25=1.0),
+    ]
+    refused = decide(
+        unscored_only,
+        mode="hybrid_rrf_rerank",
+        score_min=0.0,
+        rare_coverage=1.0,
+        rare_min=0.0,
+        margin=1.0,
+        cite_k=4,
+    )
+    assert refused["refused"] is True
+    assert refused["reason"] == "low_score"
+    assert refused["citations"] == []
+
 
 

@@ -7,6 +7,7 @@ reranking is the active mode).
 
 from __future__ import annotations
 
+import math
 from typing import TypedDict, cast
 
 
@@ -133,7 +134,9 @@ def decision_score(hit: Hit, mode: str) -> float:
     if mode == "hybrid_rrf_rerank":
         if hit.get("rerank_score") is not None:
             return float(hit["rerank_score"])
-        return float(hit.get("rerank") or 0.0)
+        if hit.get("rerank") is not None:
+            return float(hit["rerank"])
+        return float("-inf")
     if "rerank" in mode:
         return float(hit.get("rerank") or 0.0)
     return float(hit.get("cosine") or 0.0)
@@ -163,6 +166,16 @@ def decide(
     top = ranked[0]
     score = decision_score(top, mode)
     cosine = float(top.get("cosine") or 0.0)
+    if not math.isfinite(score):
+        return Decision(
+            refused=True,
+            reason="low_score",
+            score=0.0,
+            cosine=cosine,
+            coverage=rare_coverage,
+            citations=[],
+            neighbors=neighbors,
+        )
     if score < score_min or rare_coverage < rare_min:
         reason = "low_coverage" if rare_coverage < rare_min and score >= score_min else "low_score"
         return Decision(
@@ -177,7 +190,7 @@ def decide(
     citations: list[Hit] = []
     for hit in ranked:
         value = decision_score(hit, mode)
-        if value < score_min:
+        if not math.isfinite(value) or value < score_min:
             continue
         if citations and value < score - margin:
             continue
