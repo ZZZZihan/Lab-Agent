@@ -163,6 +163,8 @@ async def test_full_phase1_to_phase4_e2e_lifecycle(
     await seed()
     app.state.settings.evidence_score_min = 0.2475
     app.state.settings.calibration_source = "env"
+    limiter_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(app.state.limiter, "redis", limiter_redis)
 
     # ------------------------------------------------------------------
     # 1. Auth & CSRF & Health
@@ -729,24 +731,31 @@ async def test_full_phase1_to_phase4_e2e_lifecycle(
     assert admin_cli_main(["verify-audit"]) == 0
     assert "audit chain ok" in capsys.readouterr().out
     assert (await client.get("/api/v1/audit?limit=50", headers=viewer)).status_code == 403
+    await limiter_redis.aclose()
 
 
 async def test_live_smoke_s1_to_s9_against_real_asgi_and_web_proxy(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.main import app
 
     await seed()
     app.state.settings.evidence_score_min = 0.2475
     app.state.settings.calibration_source = "env"
-    web_app = _build_web_proxy(client)
-    transport = ASGITransport(app=web_app)
-    code, table = await run_smoke(
-        web_url="http://127.0.0.1:43123",
-        api_url="http://127.0.0.1:43124",
-        offline=True,
-        transport=transport,
-    )
+    limiter_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(app.state.limiter, "redis", limiter_redis)
+    try:
+        web_app = _build_web_proxy(client)
+        transport = ASGITransport(app=web_app)
+        code, table = await run_smoke(
+            web_url="http://127.0.0.1:43123",
+            api_url="http://127.0.0.1:43124",
+            offline=True,
+            transport=transport,
+        )
+    finally:
+        await limiter_redis.aclose()
     assert code == 0, table
     for step_prefix in (
         "S1 health",
@@ -764,7 +773,6 @@ async def test_live_smoke_s1_to_s9_against_real_asgi_and_web_proxy(
 
 async def test_run_e2e_v2_multiformat_acl_seeding_and_cli_model_promotion(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = repo_root()
     v2_corpus_dir = root / "evals" / "data" / "v2" / "corpus"
@@ -779,70 +787,76 @@ async def test_run_e2e_v2_multiformat_acl_seeding_and_cli_model_promotion(
     assert ("manual-bmc-ipmi", "第 1 段") in gold_map
 
     # 2. _resolve_model_settings loads dataset="v2" calibration from evals/calibrations/v2/
-    monkeypatch.delenv("EVIDENCE_SCORE_MIN", raising=False)
-    monkeypatch.delenv("RARE_COVERAGE_MIN", raising=False)
-    monkeypatch.delenv("CITE_MARGIN", raising=False)
-    monkeypatch.delenv("CITE_K", raising=False)
-    monkeypatch.delenv("RRF_K", raising=False)
-    monkeypatch.delenv("RETRIEVAL_MODE", raising=False)
-    monkeypatch.setenv("LOAD_TUNED_CONFIG", "true")
-    base_settings = Settings(
-        _env_file=None,  # type: ignore[call-arg]
-        database_url=get_settings().database_url,
-        jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
-        cors_origins="http://127.0.0.1:43123",
-        embedder="hashing",
-        embedding_dim=512,
-        llm_provider="fake",
-        llm_model="fake-grounded-v1",
-        calibration_dir=str(tmp_path / "empty_cals"),
-        load_tuned_config=True,
-    )
-    resolved_v2 = _resolve_model_settings(
-        base_settings,
-        "fake-grounded-v1",
-        corpus_dir=v2_corpus_dir,
-        questions_path=v2_questions_path,
-        dataset="v2",
-    )
-    assert resolved_v2.calibrated is True
-    assert resolved_v2.calibration_source is not None
-    assert "v2" in Path(resolved_v2.calibration_source).parts
-
-    # 3. _run on Dataset v2 with max_questions=10 stratifies across question types (including acl)
-    #    and enforces ACL refusal (zero leakage of seed_only private/restricted docs)
-    monkeypatch.setenv("EMBEDDER", "hashing")
-    monkeypatch.setenv("EMBEDDING_DIM", "512")
-    monkeypatch.setenv("EMBEDDING_STORAGE", "vector")
-    monkeypatch.setenv("LLM_PROVIDER", "fake")
-    monkeypatch.setenv("LLM_MODEL", "fake-grounded-v1")
-    reset_settings_cache()
-
-    maker = get_sessionmaker()
-    embedder = build_embedder(get_settings())
     try:
-        async with maker() as session:
-            rebuilt = await apply_reindex(session, get_settings(), embedder, if_needed=True)
-        if rebuilt:
-            while await process_next_pending(embedder, get_settings()) is not None:
-                pass
-    finally:
-        await embedder.aclose()
-        await dispose_engine()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv("EVIDENCE_SCORE_MIN", raising=False)
+            mp.delenv("RARE_COVERAGE_MIN", raising=False)
+            mp.delenv("CITE_MARGIN", raising=False)
+            mp.delenv("CITE_K", raising=False)
+            mp.delenv("RRF_K", raising=False)
+            mp.delenv("RETRIEVAL_MODE", raising=False)
+            mp.setenv("LOAD_TUNED_CONFIG", "true")
+            base_settings = Settings(
+                _env_file=None,  # type: ignore[call-arg]
+                database_url=get_settings().database_url,
+                jwt_secret="test-only-jwt-secret-value-0123456789-abcdef",  # type: ignore[arg-type]
+                cors_origins="http://127.0.0.1:43123",
+                embedder="hashing",
+                embedding_dim=512,
+                llm_provider="fake",
+                llm_model="fake-grounded-v1",
+                calibration_dir=str(tmp_path / "empty_cals"),
+                load_tuned_config=True,
+            )
+            resolved_v2 = _resolve_model_settings(
+                base_settings,
+                "fake-grounded-v1",
+                corpus_dir=v2_corpus_dir,
+                questions_path=v2_questions_path,
+                dataset="v2",
+            )
+            assert resolved_v2.calibrated is True
+            assert resolved_v2.calibration_source is not None
+            assert "v2" in Path(resolved_v2.calibration_source).parts
 
-    results = await _run(
-        dataset="v2",
-        split="test",
-        max_questions=12,
-        models=["fake-grounded-v1"],
-        use_judge=False,
-        commit=False,
-        check=False,
-    )
-    assert len(results) == 1
-    v2_payload = results[0]
-    q_types = {q["type"] for q in v2_payload["questions"]}
-    assert "acl" in q_types
-    assert "unanswerable" in q_types or "unanswerable_near" in q_types
-    acl_qs = [q for q in v2_payload["questions"] if q["type"] == "acl"]
-    assert all(q["refused"] is True for q in acl_qs)
+            # 3. _run on Dataset v2 with max_questions=12 stratifies across question types (including acl)
+            #    and enforces ACL refusal (zero leakage of seed_only private/restricted docs)
+            mp.setenv("EMBEDDER", "hashing")
+            mp.setenv("EMBEDDING_DIM", "512")
+            mp.setenv("EMBEDDING_STORAGE", "vector")
+            mp.setenv("LLM_PROVIDER", "fake")
+            mp.setenv("LLM_MODEL", "fake-grounded-v1")
+            reset_settings_cache()
+
+            maker = get_sessionmaker()
+            embedder = build_embedder(get_settings())
+            try:
+                async with maker() as session:
+                    rebuilt = await apply_reindex(
+                        session, get_settings(), embedder, if_needed=True
+                    )
+                if rebuilt:
+                    while await process_next_pending(embedder, get_settings()) is not None:
+                        pass
+            finally:
+                await embedder.aclose()
+                await dispose_engine()
+
+            results = await _run(
+                dataset="v2",
+                split="test",
+                max_questions=12,
+                models=["fake-grounded-v1"],
+                use_judge=False,
+                commit=False,
+                check=False,
+            )
+            assert len(results) == 1
+            v2_payload = results[0]
+            q_types = {q["type"] for q in v2_payload["questions"]}
+            assert "acl" in q_types
+            assert "unanswerable" in q_types or "unanswerable_near" in q_types
+            acl_qs = [q for q in v2_payload["questions"] if q["type"] == "acl"]
+            assert all(q["refused"] is True for q in acl_qs)
+    finally:
+        reset_settings_cache()
