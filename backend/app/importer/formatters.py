@@ -169,6 +169,17 @@ def format_facility_application(facility: Any) -> str:
     return "，".join(parts) + "。"
 
 
+def _brief_project_summary(project: Any) -> str:
+    pt = str(_get(project, "title") or "").strip()
+    gno = str(_get(project, "grant_no") or "").strip()
+    pi = str(_get(project, "pi_name") or "").strip()
+    role_lbl = "参与" if str(_get(project, "lab_role")) == "participant" else "主持"
+    st_lbl = PROJECT_STATUS_LABELS.get(str(_get(project, "status") or "unknown"), "状态未注明")
+    if gno:
+        return f"{pi}{role_lbl}《{pt}》（{gno}，{st_lbl}）"
+    return f"{pi}{role_lbl}《{pt}》（{st_lbl}）"
+
+
 def render_lab_profile_markdown(
     *,
     project_title: str | None,
@@ -205,74 +216,47 @@ def render_lab_profile_markdown(
         f"承担项目（{len(projects)}项，其中在研{len(ongoing_projects)}项、已结题{len(completed_projects)}项）、"
         f"前期成果（{len(achievements)}项）及设备与支撑条件（{len(facilities)}项）。",
         "",
-        "## 课题组概况与项目清单",
+        "## 课题组概况与项目清单 · 在研与已结题清单",
         "",
     ]
     if ongoing_projects:
         lines.append(
             f"课题组概况与项目清单之在研项目清单（共{len(ongoing_projects)}项）："
-            + "；".join(format_project_application(p).rstrip("。") for p in ongoing_projects)
+            + "；".join(_brief_project_summary(p) for p in ongoing_projects)
             + "。"
         )
         lines.append("")
     if completed_projects:
         lines.append(
             f"课题组概况与项目清单之已结题项目清单（共{len(completed_projects)}项）："
-            + "；".join(format_project_application(p).rstrip("。") for p in completed_projects)
-            + "。"
-        )
-        lines.append("")
-    if rel_text:
-        lines.append(
-            f"课题组概况与项目清单之本课题与已承担项目的关系：{rel_text.rstrip('。')}。"
-        )
-        lines.append("")
-
-    if projects:
-        lines.append("## 课题组概况与项目清单（承担全部项目汇总）")
-        lines.append("")
-        brief_items: list[str] = []
-        for p in projects:
-            pt = str(_get(p, "title") or "").strip()
-            gno = str(_get(p, "grant_no") or "").strip()
-            pi = str(_get(p, "pi_name") or "").strip()
-            role_lbl = "参与" if str(_get(p, "lab_role")) == "participant" else "主持"
-            st_lbl = PROJECT_STATUS_LABELS.get(str(_get(p, "status") or "unknown"), "状态未注明")
-            brief_items.append(f"{pi}{role_lbl}《{pt}》（{gno}，{st_lbl}）")
-        lines.append(
-            f"课题组概况与项目清单之课题组承担全部项目汇总（共{len(projects)}项）："
-            + "；".join(brief_items)
+            + "；".join(_brief_project_summary(p) for p in completed_projects)
             + "。"
         )
         lines.append("")
 
-    if people:
-        lines.append("## 团队成员")
+    if projects or rel_text:
+        lines.append("## 全部清单与延伸关系")
         lines.append("")
-        for person in people:
-            pname = str(_get(person, "name") or "")
-            prole = (
-                "课题负责人/申请人"
-                if _get(person, "project_role") == "applicant"
-                else "项目组成员"
+        if projects:
+            lines.append(
+                f"课题组概况与项目清单之课题组一共承担全部项目汇总（共{len(projects)}项）："
+                + "；".join(_brief_project_summary(p) for p in projects)
+                + "。"
             )
-            base_line = format_person_application(person).rstrip("。")
-            bio = str(_get(person, "bio") or "").strip()
-            if bio:
-                bio_clean = bio.replace("。", "；").rstrip("；")
-                lines.append(
-                    f"团队成员 {pname}（{prole}）：{base_line}；个人申报书简介与学术简历：{bio_clean}。"
-                )
-            else:
-                lines.append(f"团队成员 {pname}（{prole}）：{base_line}。")
+            lines.append("")
+        if rel_text:
+            lines.append(
+                f"按申报书格式说明本课题与课题组已承担项目的关系：{rel_text.rstrip('。')}。"
+            )
             lines.append("")
 
     if projects:
-        lines.append("## 承担项目")
-        lines.append("")
         emitted_rel_notes: set[str] = set()
         for idx, proj in enumerate(projects):
             gno = str(_get(proj, "grant_no") or "").strip()
+            ptitle = str(_get(proj, "title") or "").strip()
+            lines.append(f"## {gno or ptitle or f'项目{idx + 1}'}")
+            lines.append("")
             amt = _get(proj, "amount_wan")
             p_line = format_project_application(proj, include_relationship=False).rstrip("。")
             if amt is not None and str(amt).strip():
@@ -287,35 +271,77 @@ def render_lab_profile_markdown(
             lines.append(f"{prefix}{p_line}。")
             lines.append("")
 
-    if achievements:
-        lines.append("## 前期成果")
+    for person in people:
+        pname = str(_get(person, "name") or "").strip()
+        spec = str(_get(person, "research_specialty") or "").strip()
+        spec_heading = spec.replace("研究", "").strip()
+        prole = (
+            "课题负责人/申请人"
+            if _get(person, "project_role") == "applicant"
+            else "项目组成员"
+        )
+        h_parts = [p for p in (pname, spec_heading) if p]
+        lines.append(f"## {' · '.join(h_parts) or '成员'}")
         lines.append("")
-        papers = [a for a in achievements if str(_get(a, "kind")) == "paper"]
-        for ach in achievements:
-            akind = ACHIEVEMENT_KIND_LABELS.get(
-                str(_get(ach, "kind") or "other"), "其他成果"
+        base_line = format_person_application(person).rstrip("。")
+        bio = str(_get(person, "bio") or "").strip()
+        if bio:
+            bio_clean = bio.replace("。", "；").rstrip("；")
+            lines.append(
+                f"团队成员 {pname}（{prole}）：{base_line}；个人申报书简介与学术简历：{bio_clean}。"
             )
+        else:
+            lines.append(f"团队成员 {pname}（{prole}）：{base_line}。")
+        lines.append("")
+
+    if achievements:
+        non_papers = [a for a in achievements if str(_get(a, "kind")) != "paper"]
+        papers = [a for a in achievements if str(_get(a, "kind")) == "paper"]
+        for ach in non_papers:
+            raw_kind = str(_get(ach, "kind") or "other")
+            akind = ACHIEVEMENT_KIND_LABELS.get(raw_kind, "其他成果")
+            if raw_kind == "report":
+                ach_heading = "资政报告"
+            elif raw_kind == "exhibition":
+                ach_heading = "动态展 · 名称"
+            elif raw_kind == "software":
+                ach_heading = "软件著作权 · 登记号"
+            else:
+                ach_heading = akind
+            lines.append(f"## {ach_heading}")
+            lines.append("")
             a_base = format_achievement_application(ach, include_support=False).rstrip("。")
             sup = str(_get(ach, "support_note") or "").strip().rstrip("。")
             if sup:
-                lines.append(f"前期成果（{akind}）：{a_base}；{sup}。")
+                lines.append(f"前期成果（{akind}名称）：{a_base}；{sup}。")
             else:
-                lines.append(f"前期成果（{akind}）：{a_base}。")
+                lines.append(f"前期成果（{akind}名称）：{a_base}。")
             lines.append("")
-        if len(papers) > 1:
-            paper_items = [
-                format_achievement_application(p, include_support=False).rstrip("。")
-                for p in papers
-            ]
-            lines.append(
-                f"前期成果之发表学术论文成果汇总（共{len(papers)}篇）："
-                + "；".join(paper_items)
-                + "。"
-            )
+        if papers:
+            lines.append("## 发表学术论文 · 论文期刊与第一作者")
             lines.append("")
+            if len(papers) <= 5:
+                paper_items = [
+                    format_achievement_application(p, include_support=False).rstrip("。")
+                    for p in papers
+                ]
+                lines.append(
+                    f"前期成果之发表学术论文成果汇总（共{len(papers)}篇，含期刊与第一作者）："
+                    + "；".join(paper_items)
+                    + "。"
+                )
+                lines.append("")
+            for ach in papers:
+                a_base = format_achievement_application(ach, include_support=False).rstrip("。")
+                sup = str(_get(ach, "support_note") or "").strip().rstrip("。")
+                if sup:
+                    lines.append(f"前期成果（论文）：{a_base}；{sup}。")
+                else:
+                    lines.append(f"前期成果（论文）：{a_base}。")
+                lines.append("")
 
     if facilities:
-        lines.append("## 设备与支撑条件")
+        lines.append("## 设备与支撑条件 · 算力设备与工作站")
         lines.append("")
         for fac in facilities:
             lines.append(f"设备与支撑条件（实验室算力设备）：{format_facility_application(fac)}")

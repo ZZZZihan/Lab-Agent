@@ -1813,7 +1813,7 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     )
     assert len(large_md) > 4500
     large_chunks = chunk_markdown(large_md, max_chars=800)
-    assert len(large_chunks) <= 20
+    assert len(large_chunks) <= 30
     for ch in large_chunks:
         assert len(ch.text) <= 800, (
             f"Chunk {ch.index} ({ch.heading}) exceeded 800 chars: {len(ch.text)}"
@@ -1821,6 +1821,13 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
         first_para = ch.text.split("\n\n", 1)[0]
         if first_para.startswith("## "):
             assert "\n" not in first_para
+    member9_chunks = [c for c in large_chunks if "成员9" in c.heading]
+    assert len(member9_chunks) == 1
+    assert "团队成员" not in member9_chunks[0].heading
+    assert "成员8" not in member9_chunks[0].text
+    proj9_chunks = [c for c in large_chunks if "AGE2026-009" in c.heading]
+    assert len(proj9_chunks) == 1
+    assert "承担项目" not in proj9_chunks[0].heading
 
     # --- Round 6 Regression A: Recompute inferred project status when end_date changes or is cleared ---
     r_inf_proj = await client.post(
