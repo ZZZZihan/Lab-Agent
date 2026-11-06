@@ -24,6 +24,7 @@ from app.rag.index_meta import check_index, read_meta
 from app.ratelimit import RateLimiter
 from app.routes import install_exception_handler, router
 from app.routes_admin import router as admin_router
+from app.routes_lab import router as lab_router
 
 log = get_logger("api")
 
@@ -153,6 +154,7 @@ def create_app() -> FastAPI:
     setup_telemetry(app, settings)
     app.include_router(router)
     app.include_router(admin_router)
+    app.include_router(lab_router)
     install_exception_handler(app)
     return app
 

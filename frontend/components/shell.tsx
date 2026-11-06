@@ -5,8 +5,18 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { cn } from "cn";
-import { api, currentUser, logout, type User } from "@/lib/api";
+import { ApiError, api, changePassword, currentUser, logout, type User } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 export function Shell({ children }: { children: React.ReactNode }) {
@@ -17,6 +27,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [calibrated, setCalibrated] = useState<boolean | null>(null);
 
+  const [pwOpen, setPwOpen] = useState(false);
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [bindEmail, setBindEmail] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+
   useEffect(() => {
     currentUser()
       .then((found) => {
@@ -25,6 +42,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           return;
         }
         setUser(found);
+        if (found.must_change_password) {
+          setPwOpen(true);
+        }
         setReady(true);
         api<{ calibrated?: boolean }>("health")
           .then((health) => {
@@ -40,6 +60,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const links = [
     { href: "/chat", label: t.chat },
     { href: "/documents", label: t.documents },
+    { href: "/lab", label: t.labAssets },
     { href: "/settings", label: t.settings },
     ...(user?.role === "admin"
       ? [
@@ -49,6 +70,24 @@ export function Shell({ children }: { children: React.ReactNode }) {
         ]
       : []),
   ];
+
+  async function handleChangePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setPwError("");
+    setPwSaving(true);
+    try {
+      const updated = await changePassword(oldPw, newPw, bindEmail);
+      setUser(updated);
+      setPwOpen(false);
+      setOldPw("");
+      setNewPw("");
+      setBindEmail("");
+    } catch (err) {
+      setPwError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setPwSaving(false);
+    }
+  }
 
   return (
     <div className="min-h-screen">
@@ -97,6 +136,28 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ) : null}
         </div>
       </header>
+      {user?.must_change_password ? (
+        <div
+          role="alert"
+          className="border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive font-medium"
+        >
+          <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-2">
+            <span>
+              {t.mustChangePasswordTitle}
+              {user.must_change_password_by
+                ? `（截止：${user.must_change_password_by.slice(0, 10)}）`
+                : ""}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPwOpen(true)}
+            >
+              {t.saveNewPassword}
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {calibrated === false ? (
         <div
           role="alert"
@@ -108,6 +169,54 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <main className="mx-auto w-full max-w-5xl px-4 py-6">
         {ready ? children : <p className="text-sm text-muted-foreground">{t.loading}</p>}
       </main>
+      <Dialog open={pwOpen} onOpenChange={setPwOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.mustChangePasswordTitle}</DialogTitle>
+            <DialogDescription>{t.mustChangePasswordDesc}</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleChangePassword} className="grid gap-3">
+            <div>
+              <Label htmlFor="old-pw">{t.oldPassword}</Label>
+              <Input
+                id="old-pw"
+                type="password"
+                value={oldPw}
+                onChange={(e) => setOldPw(e.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <Label htmlFor="new-pw">{t.newPassword}</Label>
+              <Input
+                id="new-pw"
+                type="password"
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                required
+              />
+            </div>
+            {!user?.email ? (
+              <div>
+                <Label htmlFor="bind-email">{t.bindEmailOptional}</Label>
+                <Input
+                  id="bind-email"
+                  type="email"
+                  placeholder="请输入常用邮箱（选填）"
+                  value={bindEmail}
+                  onChange={(e) => setBindEmail(e.target.value)}
+                />
+              </div>
+            ) : null}
+            {pwError ? <p className="text-sm text-destructive">{pwError}</p> : null}
+            <DialogFooter>
+              <Button type="submit" disabled={pwSaving}>
+                {pwSaving ? t.saving : t.saveNewPassword}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

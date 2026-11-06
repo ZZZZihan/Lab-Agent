@@ -66,6 +66,7 @@ function mapErrorCode(code: string | undefined, t: Copy): string {
 
 function mapToolPhase(name: string | undefined, t: Copy): string {
   if (name === "search_knowledge_base") return t.toolSearchKnowledgeBase;
+  if (name === "query_lab_assets") return t.toolQueryLabAssets;
   if (name === "search_papers") return t.toolSearchPapers;
   if (name === "fetch_document") return t.toolFetchDocument;
   return t.asking;

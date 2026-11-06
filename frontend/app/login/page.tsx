@@ -21,7 +21,7 @@ export default function LoginPage() {
   const { t, toggle } = useI18n();
   const router = useRouter();
   const showHints = process.env.NEXT_PUBLIC_DEMO_HINTS === "true";
-  const [email, setEmail] = useState(showHints ? "member@lab.local" : "");
+  const [identifier, setIdentifier] = useState(showHints ? "member@lab.local" : "");
   const [password, setPassword] = useState(showHints ? "LabAgent-Demo-2026-Member" : "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -51,17 +51,35 @@ export default function LoginPage() {
               setPending(true);
               setError("");
               try {
-                await login(email, password);
+                await login(identifier, password);
                 router.replace("/chat");
               } catch (err) {
-                setError(err instanceof ApiError ? err.message : t.loginError);
+                if (err instanceof ApiError) {
+                  if (err.code === "ambiguous_name") {
+                    setError(t.ambiguousNameError || err.message);
+                  } else if (err.code === "initial_password_expired") {
+                    setError(t.initialPasswordExpiredError || err.message);
+                  } else {
+                    setError(err.message);
+                  }
+                } else {
+                  setError(t.loginError);
+                }
               } finally {
                 setPending(false);
               }
             }}
           >
-            <Label htmlFor="email">{t.email}</Label>
-            <Input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+            <Label htmlFor="identifier">{t.loginIdentifier}</Label>
+            <Input
+              id="identifier"
+              type="text"
+              autoComplete="username"
+              placeholder={t.loginIdentifierHint}
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+              required
+            />
             <Label htmlFor="password">{t.password}</Label>
             <Input
               id="password"
@@ -88,7 +106,7 @@ export default function LoginPage() {
                   type="button"
                   className="w-full rounded-lg border border-border px-3 py-2 text-left hover:bg-muted"
                   onClick={() => {
-                    setEmail(account);
+                    setIdentifier(account);
                     setPassword(secret);
                   }}
                 >

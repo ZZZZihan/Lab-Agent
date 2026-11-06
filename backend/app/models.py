@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CHAR,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -34,14 +37,26 @@ def _uuid() -> uuid.UUID:
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('admin', 'member', 'viewer')", name="users_role"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('admin', 'member', 'viewer')", name="users_role"),
+        CheckConstraint(
+            "email IS NOT NULL OR login_name IS NOT NULL",
+            name="users_login_identity",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+    login_name: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, nullable=True
+    )
     display_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password_by: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -248,4 +263,164 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text)
     refused: Mapped[bool] = mapped_column(Boolean, default=False)
     citations: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ImportJob(Base):
+    __tablename__ = "import_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('parsed', 'provisioned', 'failed')",
+            name="import_jobs_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    uploaded_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    content_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    parser_version: Mapped[str] = mapped_column(String(32), default="v2.1-hybrid")
+    as_of_time: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="parsed")
+    preview: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    stats: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rag_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    provisioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provisioned_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
+
+class LabPerson(Base):
+    __tablename__ = "lab_people"
+    __table_args__ = (
+        UniqueConstraint("entity_fingerprint", name="lab_people_fingerprint"),
+        CheckConstraint(
+            "project_role IN ('applicant', 'member')",
+            name="lab_people_project_role",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(64))
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    admin_duty: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tutor_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    research_specialty: Mapped[str | None] = mapped_column(Text, nullable=True)
+    degree: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    affiliation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    project_role: Mapped[str] = mapped_column(String(16), default="member")
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    as_of_time: Mapped[date] = mapped_column(Date)
+    source_import_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class LabAchievement(Base):
+    __tablename__ = "lab_achievements"
+    __table_args__ = (
+        UniqueConstraint("entity_fingerprint", name="lab_achievements_fingerprint"),
+        CheckConstraint(
+            "kind IN ('paper', 'report', 'exhibition', 'patent', 'software', 'award', 'book', 'other')",
+            name="lab_achievements_kind",
+        ),
+        CheckConstraint(
+            "parse_quality IN ('structured', 'raw')",
+            name="lab_achievements_parse_quality",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String(16))
+    title: Mapped[str] = mapped_column(Text)
+    first_author: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    authors_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    venue: Mapped[str | None] = mapped_column(Text, nullable=True)
+    year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    support_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    parse_quality: Mapped[str] = mapped_column(String(16), default="structured")
+    entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    as_of_time: Mapped[date] = mapped_column(Date)
+    source_import_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LabProject(Base):
+    __tablename__ = "lab_projects"
+    __table_args__ = (
+        UniqueConstraint("entity_fingerprint", name="lab_projects_fingerprint"),
+        CheckConstraint(
+            "status IN ('ongoing', 'completed', 'unknown')",
+            name="lab_projects_status",
+        ),
+        CheckConstraint(
+            "status_source IN ('explicit', 'inferred')",
+            name="lab_projects_status_source",
+        ),
+        CheckConstraint(
+            "lab_role IN ('host', 'participant', 'unknown')",
+            name="lab_projects_lab_role",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(Text)
+    funder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    grant_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pi_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lab_role: Mapped[str] = mapped_column(String(16), default="host")
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount_wan: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="unknown")
+    status_source: Mapped[str] = mapped_column(String(16), default="explicit")
+    relationship_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    as_of_time: Mapped[date] = mapped_column(Date)
+    source_import_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class LabFacility(Base):
+    __tablename__ = "lab_facilities"
+    __table_args__ = (UniqueConstraint("entity_fingerprint", name="lab_facilities_fingerprint"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    category: Mapped[str] = mapped_column(String(32), default="equipment")
+    name: Mapped[str] = mapped_column(String(255))
+    spec: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value_wan: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    usage_scenario: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    as_of_time: Mapped[date] = mapped_column(Date)
+    source_import_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

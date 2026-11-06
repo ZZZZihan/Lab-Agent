@@ -53,9 +53,14 @@ def _serialize_user(user: User) -> dict[str, object]:
     return {
         "id": str(user.id),
         "email": user.email,
+        "login_name": user.login_name,
         "display_name": user.display_name,
         "role": user.role,
         "is_active": bool(user.is_active),
+        "must_change_password": user.must_change_password_by is not None,
+        "must_change_password_by": (
+            user.must_change_password_by.isoformat() if user.must_change_password_by else None
+        ),
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -78,7 +83,8 @@ async def _serialize_group(session: AsyncSession, group: Group) -> dict[str, obj
         "members": [
             {
                 "id": str(member.id),
-                "email": member.email,
+                "email": member.email or member.login_name or str(member.id),
+                "login_name": member.login_name,
                 "display_name": member.display_name,
                 "role": member.role,
             }
@@ -257,6 +263,7 @@ async def reset_user_password(
         raise APIError(400, "weak_password", str(exc)) from exc
 
     user.password_hash = hash_password(body.password)
+    user.must_change_password_by = None
     await session.flush()
     await session.commit()
 

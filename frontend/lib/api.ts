@@ -1,4 +1,12 @@
-export type User = { id: string; display_name: string; role: "admin" | "member" | "viewer" };
+export type User = {
+  id: string;
+  display_name: string;
+  role: "admin" | "member" | "viewer";
+  email?: string | null;
+  login_name?: string | null;
+  must_change_password?: boolean;
+  must_change_password_by?: string | null;
+};
 
 export type Citation = {
   index?: number;
@@ -122,17 +130,208 @@ export async function currentUser(): Promise<User | null> {
   return body.user;
 }
 
-export async function login(email: string, password: string): Promise<User> {
+export async function login(identifier: string, password: string): Promise<User> {
   const response = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ identifier, email: identifier, password }),
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
   return body.user;
 }
 
+export async function changePassword(
+  old_password: string,
+  new_password: string,
+  email?: string,
+): Promise<User> {
+  const res = await api<{ status: string; user: User }>("auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({
+      old_password,
+      new_password,
+      ...(email && email.trim() ? { email: email.trim() } : {}),
+    }),
+  });
+  return res.user;
+}
+
 export async function logout(): Promise<void> {
   await fetch("/api/session", { method: "DELETE" });
 }
+
+export type LabPersonItem = {
+  id: string;
+  user_id?: string | null;
+  name: string;
+  email?: string | null;
+  title?: string | null;
+  admin_duty?: string | null;
+  tutor_role?: string | null;
+  research_specialty?: string | null;
+  degree?: string | null;
+  affiliation?: string | null;
+  project_role: "applicant" | "member" | string;
+  bio?: string | null;
+  as_of_time?: string | null;
+  application_text: string;
+  application_text_with_bio: string;
+};
+
+export type LabProjectItem = {
+  id: string;
+  title: string;
+  funder?: string | null;
+  grant_no?: string | null;
+  pi_name?: string | null;
+  lab_role: "host" | "participant" | "unknown" | string;
+  start_date?: string | null;
+  end_date?: string | null;
+  amount_wan?: string | null;
+  status: "ongoing" | "completed" | "unknown" | string;
+  status_label: string;
+  status_source: "explicit" | "inferred" | string;
+  relationship_note?: string | null;
+  raw_text: string;
+  as_of_time?: string | null;
+  application_text: string;
+  application_text_with_rel: string;
+};
+
+export type LabAchievementItem = {
+  id: string;
+  kind: string;
+  kind_label: string;
+  title: string;
+  first_author?: string | null;
+  authors_text?: string | null;
+  venue?: string | null;
+  year?: number | null;
+  support_note?: string | null;
+  raw_text: string;
+  parse_quality: string;
+  as_of_time?: string | null;
+  application_text: string;
+  application_text_plain: string;
+};
+
+export type LabFacilityItem = {
+  id: string;
+  category: string;
+  name: string;
+  spec?: string | null;
+  value_wan?: string | null;
+  usage_scenario?: string | null;
+  raw_text: string;
+  as_of_time?: string | null;
+  application_text: string;
+};
+
+export type LabOverview = {
+  counts: {
+    people: number;
+    projects: number;
+    projects_ongoing: number;
+    projects_completed: number;
+    achievements: number;
+    facilities: number;
+  };
+  as_of_time?: string | null;
+  latest_import?: {
+    id: string;
+    original_filename: string;
+    as_of_time?: string | null;
+    provisioned_at?: string | null;
+  } | null;
+};
+
+export type ImportPreviewPerson = {
+  key: string;
+  name: string;
+  project_role: string;
+  tier: "T1" | "T2" | "T3" | string;
+  login_name: string;
+  email?: string | null;
+  title?: string | null;
+  admin_duty?: string | null;
+  tutor_role?: string | null;
+  research_specialty?: string | null;
+  degree?: string | null;
+  affiliation?: string | null;
+  match?: { status: "new" | "existing" | "conflict" | string; user_id?: string };
+  warnings?: string[];
+};
+
+export type ImportJobResponse = {
+  id: string;
+  job_id: string;
+  original_filename: string;
+  as_of_time?: string | null;
+  status: string;
+  stats: {
+    people_parsed?: number;
+    achievements_parsed?: number;
+    projects_parsed?: number;
+    facilities_parsed?: number;
+    pii_dropped?: number;
+  };
+  preview: {
+    as_of_time?: string | null;
+    cover?: {
+      project_title?: string | null;
+      applicant_name?: string | null;
+      affiliation?: string | null;
+      as_of_time?: string | null;
+    };
+    people?: ImportPreviewPerson[];
+    projects?: Array<{
+      key: string;
+      title: string;
+      grant_no?: string | null;
+      funder?: string | null;
+      pi_name?: string | null;
+      status: string;
+      status_source: string;
+    }>;
+    achievements?: Array<{
+      key: string;
+      kind: string;
+      title: string;
+      first_author?: string | null;
+      venue?: string | null;
+      year?: number | null;
+    }>;
+    facilities?: Array<{
+      key: string;
+      category: string;
+      name: string;
+      spec?: string | null;
+      value_wan?: string | null;
+    }>;
+    warnings?: Array<{ code: string; count?: number; section?: string }>;
+  };
+};
+
+export type ProvisionResult = {
+  job_id: string;
+  status: string;
+  as_of_time: string;
+  deadline: string;
+  rag_document_id?: string | null;
+  rag_doc_key: string;
+  stats: {
+    users_created: number;
+    users_linked: number;
+    people_inserted: number;
+    people_skipped: number;
+    achievements_inserted: number;
+    achievements_skipped: number;
+    projects_inserted: number;
+    projects_skipped: number;
+    facilities_inserted: number;
+    facilities_skipped: number;
+  };
+  roster_text: string;
+  roster_csv: string;
+};

@@ -8,7 +8,7 @@ import concurrent.futures
 import sys
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.audit import verify_audit_chain, write_audit
 from app.auth import hash_password, validate_password
@@ -38,8 +38,9 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 for user in rows:
                     status = "active" if user.is_active else "inactive"
                     created = user.created_at.isoformat() if user.created_at else ""
+                    ident = user.email or user.login_name or str(user.id)
                     print(
-                        f"{user.id}\t{user.email}\t{user.display_name}\t{user.role}\t{status}\t{created}"
+                        f"{user.id}\t{ident}\t{user.display_name}\t{user.role}\t{status}\t{created}"
                     )
                 return 0
 
@@ -52,11 +53,14 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 return 0
 
             email = str(args.email).strip().lower()
-            if not email or "@" not in email:
+            if not email:
                 print("Error: invalid email address", file=sys.stderr)
                 return 1
 
             if cmd == "create-user":
+                if "@" not in email:
+                    print("Error: invalid email address", file=sys.stderr)
+                    return 1
                 name = str(args.name).strip()
                 role = str(args.role).strip()
                 if not name:
@@ -96,7 +100,14 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 print(f"created {user_id} {email} ({role})")
                 return 0
 
-            target_user = await session.scalar(select(User).where(User.email == email))
+            target_user = await session.scalar(
+                select(User).where(
+                    or_(
+                        func.lower(User.email) == email,
+                        func.lower(User.login_name) == email,
+                    )
+                )
+            )
             if target_user is None:
                 print(f"Error: user not found: {email}", file=sys.stderr)
                 return 1
@@ -143,11 +154,14 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     print("Error: --password-stdin is required", file=sys.stderr)
                     return 1
                 try:
-                    validate_password(password, target_user.email)
+                    validate_password(
+                        password, target_user.email or target_user.login_name
+                    )
                 except ValueError as exc:
                     print(f"Error: {exc}", file=sys.stderr)
                     return 1
                 target_user.password_hash = hash_password(password)
+                target_user.must_change_password_by = None
                 await session.commit()
                 await write_audit(
                     settings=settings,

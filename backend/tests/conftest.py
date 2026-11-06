@@ -94,6 +94,7 @@ async def clean_db() -> AsyncIterator[None]:
         await session.execute(
             text(
                 "TRUNCATE audit_events, messages, conversations, api_tokens, revoked_tokens, "
+                "lab_facilities, lab_projects, lab_achievements, lab_people, import_jobs, "
                 "embedding_index_meta, chunks, document_acl, documents, group_members, groups, users RESTART IDENTITY CASCADE"
             )
         )
