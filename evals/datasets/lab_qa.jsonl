@@ -1,0 +1,30 @@
+{"id": "L01", "category": "pi_lookup", "question": "课题组承担的项目 AGE240005《基于人工智能的智能评卷系统关键技术研究》是由谁主持的？", "expect_refused": false, "expected_facts": ["万振凯", "AGE240005", "全国教育科学规划课题"], "forbidden_facts": []}
+{"id": "L02", "category": "pi_lookup", "question": "课题组承担的项目 TJYGZ59《高考综合改革下命题质量智能评估研究》的主持人是谁？", "expect_refused": false, "expected_facts": ["万振凯", "TJYGZ59", "天津市教育科学规划重大课题"], "forbidden_facts": []}
+{"id": "L03", "category": "pi_lookup", "question": "课题组承担的项目 2023JWZD17《新工科背景下人工智能课程群建设》由谁主持？", "expect_refused": false, "expected_facts": ["郭建民", "2023JWZD17", "天津市教委重点教改项目"], "forbidden_facts": []}
+{"id": "L04", "category": "pi_lookup", "question": "课题组承担的项目 2019G49《智能自适应学习诊断平台研发》是谁主持的？", "expect_refused": false, "expected_facts": ["万振凯", "2019G49", "天津市科技计划项目"], "forbidden_facts": []}
+{"id": "L05", "category": "pi_lookup", "question": "课题组承担的津科智2025-08项目与 2017139 项目分别由谁主持或参与？", "expect_refused": false, "expected_facts": ["曾令伟", "津科智2025-08", "单立飞", "2017139"], "forbidden_facts": []}
+{"id": "L06", "category": "status_enum", "question": "课题组目前有哪些在研项目？请列出在研项目清单。", "expect_refused": false, "expected_facts": ["AGE240005", "TJYGZ59", "2023JWZD17", "津科智2025-08"], "forbidden_facts": []}
+{"id": "L07", "category": "status_enum", "question": "课题组有哪些已结题项目？请列出已结题项目清单。", "expect_refused": false, "expected_facts": ["2019G49", "2017139", "已结题"], "forbidden_facts": []}
+{"id": "L08", "category": "status_enum", "question": "课题组一共承担过哪些项目？请列出课题组承担全部项目汇总。", "expect_refused": false, "expected_facts": ["AGE240005", "TJYGZ59", "2023JWZD17", "2019G49", "2017139", "津科智2025-08"], "forbidden_facts": []}
+{"id": "L09", "category": "status_enum", "question": "课题组承担的 2019G49《智能自适应学习诊断平台研发》目前处于在研还是已结题状态？", "expect_refused": false, "expected_facts": ["2019G49", "已结题", "万振凯"], "forbidden_facts": []}
+{"id": "L10", "category": "status_enum", "question": "课题组承担的津科智2025-08《大模型安全对齐基准测试集构建》项目状态与经费是多少？", "expect_refused": false, "expected_facts": ["津科智2025-08", "在研", "15.00万元"], "forbidden_facts": []}
+{"id": "L11", "category": "member_specialty", "question": "课题组负责人万振凯的职称、学位和研究专长是什么？", "expect_refused": false, "expected_facts": ["万振凯", "教授", "博士", "人工智能"], "forbidden_facts": []}
+{"id": "L12", "category": "member_specialty", "question": "课题组团队成员郭建民的职称、职务和研究专长是什么？", "expect_refused": false, "expected_facts": ["郭建民", "教授", "院长", "大数据与云计算"], "forbidden_facts": []}
+{"id": "L13", "category": "member_specialty", "question": "课题组团队成员单立飞的职称、学位和研究专长是什么？", "expect_refused": false, "expected_facts": ["单立飞", "副教授", "硕士", "计算机技术"], "forbidden_facts": []}
+{"id": "L14", "category": "member_specialty", "question": "课题组团队成员曾令伟的职称、学位和研究专长是什么？", "expect_refused": false, "expected_facts": ["曾令伟", "副教授", "博士", "网络安全"], "forbidden_facts": []}
+{"id": "L15", "category": "member_specialty", "question": "课题组团队成员杨硕的职称、学位和研究专长是什么？", "expect_refused": false, "expected_facts": ["杨硕", "讲师", "硕士", "知识图谱"], "forbidden_facts": []}
+{"id": "L16", "category": "semantic_match", "question": "课题组团队成员中谁的研究专长是网络安全方向？", "expect_refused": false, "expected_facts": ["曾令伟", "网络安全", "副教授"], "forbidden_facts": []}
+{"id": "L17", "category": "semantic_match", "question": "课题组团队成员中谁负责知识图谱方向的研究专长？", "expect_refused": false, "expected_facts": ["杨硕", "知识图谱", "讲师"], "forbidden_facts": []}
+{"id": "L18", "category": "semantic_match", "question": "课题组团队成员中哪位研究生负责多模态大模型研究专长？", "expect_refused": false, "expected_facts": ["王诗涵", "多模态大模型", "天津工业大学"], "forbidden_facts": []}
+{"id": "L19", "category": "semantic_match", "question": "课题组团队成员中谁从事自然语言处理方向的研究专长？", "expect_refused": false, "expected_facts": ["李佳静", "自然语言处理", "讲师"], "forbidden_facts": []}
+{"id": "L20", "category": "achievement_kind", "question": "课题组前期成果中有哪些研究报告或资政报告？第一完成人是谁？", "expect_refused": false, "expected_facts": ["万振凯", "数智融合赋能天津制造业高质量发展的对策建议", "研究报告/资政报告"], "forbidden_facts": []}
+{"id": "L21", "category": "achievement_kind", "question": "课题组前期成果中有哪些成果展？请说明名称与第一完成人。", "expect_refused": false, "expected_facts": ["万振凯", "基于深度学习的图像识别动态成果展", "成果展"], "forbidden_facts": []}
+{"id": "L22", "category": "achievement_kind", "question": "课题组前期成果中有哪些软件著作权？登记号和第一完成人是什么？", "expect_refused": false, "expected_facts": ["杨硕", "学科知识图谱自动对齐系统V1.0", "2024SR001234"], "forbidden_facts": []}
+{"id": "L23", "category": "achievement_kind", "question": "课题组前期成果中发表学术论文成果汇总有哪些？期刊与第一作者分别是什么？", "expect_refused": false, "expected_facts": ["单立飞", "教育考试智能题库构建方法研究", "探索科学", "郭建民", "大规模在线考试异常行为检测算法", "时代教育"], "forbidden_facts": []}
+{"id": "L24", "category": "format_reuse", "question": "请按申报书格式列出课题组承担的 AGE240005 项目条目。", "expect_refused": false, "expected_facts": ["万振凯主持", "《基于人工智能的智能评卷系统关键技术研究》（AGE240005）", "全国教育科学规划课题", "在研"], "forbidden_facts": []}
+{"id": "L25", "category": "format_reuse", "question": "请按申报书格式列出课题组实验室算力设备与支撑条件。", "expect_refused": false, "expected_facts": ["计算加速设备及配套部件", "8.00 万元", "2台图形工作站"], "forbidden_facts": []}
+{"id": "L26", "category": "format_reuse", "question": "请按申报书格式列出课题组负责人万振凯的个人申报书简介与学术简历。", "expect_refused": false, "expected_facts": ["万振凯", "天津天狮学院", "长期从事人工智能与智能评卷系统研究"], "forbidden_facts": []}
+{"id": "L27", "category": "format_reuse", "question": "请按申报书格式说明本课题与课题组已承担项目的关系。", "expect_refused": false, "expected_facts": ["AGE240005", "全国教育科学规划课题", "大模型安全对齐"], "forbidden_facts": []}
+{"id": "L28", "category": "out_of_kb_refusal", "question": "我们课题组有国家社科基金重大项目吗？批准号是多少？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["国家社科基金重大项目", "24&ZD"]}
+{"id": "L29", "category": "out_of_kb_refusal", "question": "课题组有量子通信卫星实验平台吗？设备原值多少万元？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["量子通信卫星实验平台", "墨子号"]}
+{"id": "L30", "category": "out_of_kb_refusal", "question": "诺贝尔物理学奖得主在课题组担任什么职务？", "expect_refused": true, "expected_facts": [], "forbidden_facts": ["诺贝尔物理学奖", "首席科学家"]}

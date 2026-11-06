@@ -1004,3 +1004,273 @@ async def test_oidc_mode_provisioning_and_login_name_claim_matching(
         settings.oidc_issuer = orig_issuer
         settings.oidc_audience = orig_audience
         settings.oidc_jwks_json = orig_jwks
+
+
+async def test_import_job_mgmt_roster_lab_crud_autoreindex_batch_and_export(
+    client: AsyncClient,
+) -> None:
+    from app.models import Chunk, Document
+
+    await _seed_admin()
+    headers = await _login_headers(client, ADMIN_EMAIL)
+    raw_docx = build_synthetic_proposal_docx()
+
+    # 1. Upload via alias POST /api/v1/admin/imports & verify deduplication on unprovisioned parsed job
+    r_up1 = await client.post(
+        "/api/v1/admin/imports",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up1.status_code == 200, r_up1.text
+    temp_job_id = r_up1.json()["job_id"]
+    assert r_up1.json()["deduplicated"] is False
+
+    r_up_dup = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up_dup.status_code == 200
+    assert r_up_dup.json()["job_id"] == temp_job_id
+    assert r_up_dup.json()["deduplicated"] is True
+
+    # 2. List imports, get import detail & preview alias, patch preview, reparse, and delete parsed job
+    r_list = await client.get("/api/v1/admin/imports", headers=headers)
+    assert r_list.status_code == 200
+    assert any(j["job_id"] == temp_job_id for j in r_list.json()["imports"])
+    assert "preview" not in r_list.json()["imports"][0]
+
+    r_detail = await client.get(f"/api/v1/admin/imports/{temp_job_id}", headers=headers)
+    assert r_detail.status_code == 200
+    assert "preview" in r_detail.json()
+
+    r_prev_alias = await client.get(
+        f"/api/v1/admin/imports/{temp_job_id}/preview", headers=headers
+    )
+    assert r_prev_alias.status_code == 200
+    assert r_prev_alias.json()["job_id"] == temp_job_id
+
+    # Patch preview (update as_of_time to 2028-01-01 so inferred project j6 becomes completed)
+    r_patch_prev = await client.patch(
+        f"/api/v1/admin/imports/{temp_job_id}/preview",
+        json={
+            "as_of_time": "2028-01-01",
+            "relationship_note": f"拓展说明（联系电话：{SYNTH_MOBILE_1}）",
+        },
+        headers=headers,
+    )
+    assert r_patch_prev.status_code == 200, r_patch_prev.text
+    patched_prev = r_patch_prev.json()["preview"]
+    assert r_patch_prev.json()["as_of_time"] == "2028-01-01"
+    assert SYNTH_MOBILE_1 not in json.dumps(patched_prev, ensure_ascii=False)
+    assert "[已脱敏]" in patched_prev["relationship_note"]
+    j6_after_patch = next(j for j in patched_prev["projects"] if j["key"] == "j6")
+    assert j6_after_patch["status"] == "completed"
+
+    # Reparse with mode="llm"
+    r_reparse = await client.post(
+        f"/api/v1/admin/imports/{temp_job_id}/reparse",
+        json={"mode": "llm"},
+        headers=headers,
+    )
+    assert r_reparse.status_code == 200, r_reparse.text
+    assert r_reparse.json()["parser_version"] == "v2.1-llm"
+    assert r_reparse.json()["preview"]["extraction_mode"] == "rule+llm"
+
+    # Delete parsed job -> 200 deleted, then 404 on subsequent GET
+    r_del_parsed = await client.delete(
+        f"/api/v1/admin/imports/{temp_job_id}", headers=headers
+    )
+    assert r_del_parsed.status_code == 200
+    assert r_del_parsed.json()["status"] == "deleted"
+
+    r_after_del = await client.get(
+        f"/api/v1/admin/imports/{temp_job_id}", headers=headers
+    )
+    assert r_after_del.status_code == 404
+
+    # 3. Upload fresh job, provision it, verify DELETE returns 409 & roster endpoint has zero plaintext password
+    r_up2 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal.docx", raw_docx, "application/octet-stream")},
+        headers=headers,
+    )
+    assert r_up2.status_code == 200
+    job_id = r_up2.json()["job_id"]
+
+    r_roster_before = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster", headers=headers
+    )
+    assert r_roster_before.status_code == 409
+    assert r_roster_before.json()["error"]["code"] == "import_not_provisioned"
+
+    r_prov = await client.post(
+        f"/api/v1/admin/imports/{job_id}/provision",
+        json={"initial_password": INITIAL_PW, "include_password": True},
+        headers=headers,
+    )
+    assert r_prov.status_code == 200, r_prov.text
+
+    # Deleting a provisioned job must fail with 409 import_already_provisioned
+    r_del_prov = await client.delete(
+        f"/api/v1/admin/imports/{job_id}", headers=headers
+    )
+    assert r_del_prov.status_code == 409
+    assert r_del_prov.json()["error"]["code"] == "import_already_provisioned"
+
+    # Roster endpoint returns login names but NEVER plaintext password
+    r_roster_txt = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster?format=text", headers=headers
+    )
+    assert r_roster_txt.status_code == 200
+    roster_payload = r_roster_txt.json()
+    assert "wanzhenkai" in roster_payload["roster_text"]
+    assert "2431101262" in roster_payload["roster_text"]
+    assert "初始口令：（见开号时的通知）" in roster_payload["roster_text"]
+    assert INITIAL_PW not in roster_payload["roster_text"]
+    assert INITIAL_PW not in roster_payload["roster_csv"]
+    assert "初始口令" not in roster_payload["roster_csv"]
+
+    r_roster_bad = await client.get(
+        f"/api/v1/admin/imports/{job_id}/roster?format=xml", headers=headers
+    )
+    assert r_roster_bad.status_code == 400
+    assert r_roster_bad.json()["error"]["code"] == "invalid_format"
+
+    # 4. Modify lab person & create lab project -> verify auto-reindex updates lab-profile-* immediately
+    people_list = (await client.get("/api/v1/lab/people", headers=headers)).json()[
+        "people"
+    ]
+    yang_person = next(p for p in people_list if p["name"] == "杨硕")
+    r_patch_person = await client.patch(
+        f"/api/v1/lab/people/{yang_person['id']}",
+        json={"research_specialty": "知识图谱与大模型对齐评测"},
+        headers=headers,
+    )
+    assert r_patch_person.status_code == 200, r_patch_person.text
+    assert (
+        r_patch_person.json()["person"]["research_specialty"]
+        == "知识图谱与大模型对齐评测"
+    )
+
+    r_new_proj = await client.post(
+        "/api/v1/lab/projects",
+        json={
+            "title": "教育智能体可信推理关键技术研究",
+            "grant_no": "TJAI2026-99",
+            "funder": "天津市自然科学基金重点项目",
+            "pi_name": "杨硕",
+            "lab_role": "host",
+            "start_date": "2026-01-01",
+            "status": "ongoing",
+            "amount_wan": "30.00",
+        },
+        headers=headers,
+    )
+    assert r_new_proj.status_code == 200, r_new_proj.text
+    new_proj_id = r_new_proj.json()["project"]["id"]
+    rag_doc_key = r_new_proj.json()["rag_doc_key"]
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        prof_doc = await session.scalar(
+            select(Document).where(Document.doc_key == rag_doc_key)
+        )
+        assert prof_doc is not None
+        assert "知识图谱与大模型对齐评测" in prof_doc.content_text
+        assert "TJAI2026-99" in prof_doc.content_text
+        prof_chunks = list(
+            await session.scalars(
+                select(Chunk).where(Chunk.document_id == prof_doc.id)
+            )
+        )
+        joined_chunks = "\n".join(c.content for c in prof_chunks)
+        assert "知识图谱与大模型对齐评测" in joined_chunks
+        assert "TJAI2026-99" in joined_chunks
+
+    # Chat stream immediately reflects newly added project TJAI2026-99 without manual reindex
+    r_chat_new = await client.post(
+        "/api/v1/chat/stream",
+        json={"message": "课题组承担的 TJAI2026-99 项目由谁主持？"},
+        headers=headers,
+    )
+    assert r_chat_new.status_code == 200
+    chat_events = [
+        json.loads(block.split("data:", 1)[1].strip())
+        for block in r_chat_new.text.split("\n\n")
+        if "data:" in block
+    ]
+    streamed_answer = "".join(
+        str(e.get("text") or "") for e in chat_events if e.get("type") == "token"
+    )
+    assert "TJAI2026-99" in streamed_answer
+    assert "杨硕" in streamed_answer
+
+    # Delete the newly added project so counts return to 6
+    r_del_proj = await client.delete(
+        f"/api/v1/lab/projects/{new_proj_id}", headers=headers
+    )
+    assert r_del_proj.status_code == 200
+
+    # Manual reindex endpoint works
+    r_reindex = await client.post("/api/v1/lab/reindex", headers=headers)
+    assert r_reindex.status_code == 200
+    assert r_reindex.json()["status"] == "ok"
+
+    # 5. Batch formatting (/api/v1/lab/format/batch)
+    r_batch_proj = await client.post(
+        "/api/v1/lab/format/batch",
+        json={
+            "tab": "projects",
+            "numbered": True,
+            "only_ongoing": True,
+            "recent_years": 5,
+            "include_relationship": True,
+        },
+        headers=headers,
+    )
+    assert r_batch_proj.status_code == 200, r_batch_proj.text
+    bp_data = r_batch_proj.json()
+    assert bp_data["count"] == 4
+    assert bp_data["items"][0].startswith("[1] ")
+    assert bp_data["items"][1].startswith("[2] ")
+    assert "与本课题关系：" in bp_data["text"]
+
+    r_batch_fac = await client.post(
+        "/api/v1/lab/format/batch",
+        json={"tab": "facilities", "numbered": True},
+        headers=headers,
+    )
+    assert r_batch_fac.status_code == 200
+    assert r_batch_fac.json()["count"] == 1
+    assert r_batch_fac.json()["items"][0].startswith("[1] ")
+
+    r_batch_ach = await client.post(
+        "/api/v1/lab/format/batch",
+        json={"tab": "achievements", "numbered": True, "with_support": False},
+        headers=headers,
+    )
+    assert r_batch_ach.status_code == 200
+    assert r_batch_ach.json()["count"] == 5
+    assert "成果为大模型安全治理提供支撑" not in r_batch_ach.json()["text"]
+
+    # 6. Export Markdown & Word (.docx)
+    r_exp_md = await client.get("/api/v1/lab/export?format=md", headers=headers)
+    assert r_exp_md.status_code == 200
+    assert "text/markdown" in r_exp_md.headers["content-type"]
+    md_text = r_exp_md.content.decode("utf-8")
+    assert "AGE240005" in md_text
+    assert_no_pii(md_text)
+
+    r_exp_docx = await client.get("/api/v1/lab/export?format=docx", headers=headers)
+    assert r_exp_docx.status_code == 200
+    assert (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        in r_exp_docx.headers["content-type"]
+    )
+    exported_doc = docx.Document(io.BytesIO(r_exp_docx.content))
+    doc_full_text = "\n".join(p.text for p in exported_doc.paragraphs)
+    assert "万振凯" in doc_full_text
+    assert "AGE240005" in doc_full_text
+    assert_no_pii(doc_full_text)
+

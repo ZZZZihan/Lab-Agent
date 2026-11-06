@@ -91,6 +91,7 @@ def render_roster_text(
     new_accounts: list[dict[str, object]],
     existing_accounts: list[dict[str, object]],
     oidc_mode: bool = False,
+    password_notice: str | None = None,
 ) -> str:
     if oidc_mode:
         lines = [
@@ -100,11 +101,12 @@ def render_roster_text(
             "",
         ]
     else:
-        pw_line = (
-            f"初始口令：{initial_password}"
-            if (include_password and initial_password)
-            else "初始口令：另行私发"
-        )
+        if password_notice is not None:
+            pw_line = f"初始口令：{password_notice}"
+        elif include_password and initial_password:
+            pw_line = f"初始口令：{initial_password}"
+        else:
+            pw_line = "初始口令：另行私发"
         lines = [
             "【LabAgent 账号已开通】",
             f"登录地址：{base_url}",
@@ -596,60 +598,17 @@ async def provision_import_job(
             "开号过程中登录名或邮箱发生并发冲突，请刷新后重试",
         ) from exc
 
-    # Render canonical Markdown from all lab_* rows and index into RAG
-    all_people = list(
-        await session.scalars(
-            select(LabPerson).order_by(
-                LabPerson.project_role.asc(), LabPerson.created_at.asc()
-            )
-        )
-    )
-    all_projects = list(
-        await session.scalars(select(LabProject).order_by(LabProject.created_at.asc()))
-    )
-    all_achievements = list(
-        await session.scalars(
-            select(LabAchievement).order_by(LabAchievement.created_at.asc())
-        )
-    )
-    all_facilities = list(
-        await session.scalars(select(LabFacility).order_by(LabFacility.created_at.asc()))
-    )
+    job.as_of_time = as_of_date
+    job.status = "provisioned"
+    job.provisioned_at = now_utc
+    job.provisioned_by = actor_id
 
-    raw_cover = preview.get("cover")
-    cover_dict: dict[str, Any] = raw_cover if isinstance(raw_cover, dict) else {}
-    project_title = str(cover_dict.get("project_title") or "") or job.original_filename
-    rel_note = str(preview.get("relationship_note") or "").strip() or None
-
-    profile_md = render_lab_profile_markdown(
-        project_title=project_title,
-        as_of_time=as_of_date,
-        people=all_people,
-        projects=all_projects,
-        achievements=all_achievements,
-        facilities=all_facilities,
-        relationship_note=rel_note,
-    )
-    doc_key = f"lab-profile-{job.id}"
-    await upsert_source(
+    doc_key, rag_doc = await sync_lab_profile_rag(
         session,
         embedder=embedder,
-        owner_id=actor_id,
-        source=f"import-{job.id.hex[:24]}",
-        records=[
-            (
-                {
-                    "key": doc_key,
-                    "title": f"课题组资料库 · {project_title}",
-                    "collection": "project",
-                    "visibility": "lab",
-                    "source_format": "markdown",
-                },
-                profile_md,
-            )
-        ],
+        actor_id=actor_id,
+        job=job,
     )
-    rag_doc = await session.scalar(select(Document).where(Document.doc_key == doc_key))
 
     stats_payload: dict[str, object] = {
         "users_created": users_created,
@@ -665,10 +624,6 @@ async def provision_import_job(
         "rag_doc_key": doc_key,
     }
 
-    job.as_of_time = as_of_date
-    job.status = "provisioned"
-    job.provisioned_at = now_utc
-    job.provisioned_by = actor_id
     job.rag_document_id = rag_doc.id if rag_doc is not None else None
     job.stats = stats_payload
 
@@ -732,3 +687,221 @@ def _parse_decimal(val: object) -> Decimal | None:
         return Decimal(s)
     except InvalidOperation:
         return None
+
+
+async def sync_lab_profile_rag(
+    session: AsyncSession,
+    *,
+    embedder: Embedder,
+    actor_id: uuid.UUID,
+    job: ImportJob | None = None,
+) -> tuple[str, Document | None]:
+    """Render canonical Markdown from all `lab_*` rows and upsert into RAG index."""
+    all_people = list(
+        await session.scalars(
+            select(LabPerson).order_by(
+                LabPerson.project_role.asc(), LabPerson.created_at.asc()
+            )
+        )
+    )
+    all_projects = list(
+        await session.scalars(select(LabProject).order_by(LabProject.created_at.asc()))
+    )
+    all_achievements = list(
+        await session.scalars(
+            select(LabAchievement).order_by(LabAchievement.created_at.asc())
+        )
+    )
+    all_facilities = list(
+        await session.scalars(
+            select(LabFacility).order_by(LabFacility.created_at.asc())
+        )
+    )
+
+    target_job = job
+    if target_job is None:
+        target_job = await session.scalar(
+            select(ImportJob)
+            .where(ImportJob.status == "provisioned")
+            .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
+            .limit(1)
+        )
+
+    as_of_dates = [
+        d
+        for d in (
+            [p.as_of_time for p in all_people]
+            + [j.as_of_time for j in all_projects]
+            + [a.as_of_time for a in all_achievements]
+            + [f.as_of_time for f in all_facilities]
+        )
+        if d is not None
+    ]
+    fallback_as_of = max(as_of_dates) if as_of_dates else date.today()
+
+    if target_job is not None:
+        preview: dict[str, Any] = dict(target_job.preview or {})
+        raw_cover = preview.get("cover")
+        cover_dict: dict[str, Any] = raw_cover if isinstance(raw_cover, dict) else {}
+        project_title = (
+            str(cover_dict.get("project_title") or "").strip()
+            or target_job.original_filename
+            or "课题组资料库档案"
+        )
+        rel_note = str(preview.get("relationship_note") or "").strip() or None
+        as_of_date = target_job.as_of_time or fallback_as_of
+        doc_key = f"lab-profile-{target_job.id}"
+        source = f"import-{target_job.id.hex[:24]}"
+    else:
+        project_title = "课题组资料库档案"
+        rel_note = None
+        as_of_date = fallback_as_of
+        doc_key = "lab-profile-current"
+        source = "lab-profile-current"
+
+    if rel_note is None:
+        for proj in all_projects:
+            if proj.relationship_note and proj.relationship_note.strip():
+                rel_note = proj.relationship_note.strip()
+                break
+
+    profile_md = render_lab_profile_markdown(
+        project_title=project_title,
+        as_of_time=as_of_date,
+        people=all_people,
+        projects=all_projects,
+        achievements=all_achievements,
+        facilities=all_facilities,
+        relationship_note=rel_note,
+    )
+    existing_doc = await session.scalar(
+        select(Document).where(Document.doc_key == doc_key)
+    )
+    visibility = existing_doc.visibility if existing_doc is not None else "lab"
+
+    await upsert_source(
+        session,
+        embedder=embedder,
+        owner_id=actor_id,
+        source=source,
+        records=[
+            (
+                {
+                    "key": doc_key,
+                    "title": f"课题组资料库 · {project_title}",
+                    "collection": "project",
+                    "visibility": visibility,
+                    "source_format": "markdown",
+                },
+                profile_md,
+            )
+        ],
+    )
+    rag_doc = await session.scalar(select(Document).where(Document.doc_key == doc_key))
+    if target_job is not None and rag_doc is not None:
+        target_job.rag_document_id = rag_doc.id
+    await session.flush()
+    return doc_key, rag_doc
+
+
+async def build_job_roster(
+    session: AsyncSession,
+    *,
+    job: ImportJob,
+    settings: Settings,
+) -> tuple[str, str]:
+    """Re-render password-free text & CSV rosters for a provisioned ImportJob."""
+    preview: dict[str, Any] = dict(job.preview or {})
+    raw_people_list = preview.get("people")
+    raw_people: list[dict[str, Any]] = [
+        dict(p)
+        for p in (raw_people_list if isinstance(raw_people_list, list) else [])
+        if isinstance(p, dict)
+    ]
+
+    users = list(await session.scalars(select(User)))
+    by_login = {
+        u.login_name.lower(): u
+        for u in users
+        if u.login_name is not None and u.login_name.strip()
+    }
+    by_email = {
+        u.email.lower(): u for u in users if u.email is not None and u.email.strip()
+    }
+
+    new_roster_items: list[dict[str, object]] = []
+    existing_roster_items: list[dict[str, object]] = []
+
+    for person in raw_people:
+        pname = normalize_person_name(str(person.get("name") or ""))
+        p_login = str(person.get("login_name") or "").strip().lower()
+        p_email = str(person.get("email") or "").strip().lower() or None
+        p_aff = str(person.get("affiliation") or "").strip() or None
+        raw_w = person.get("warnings")
+        p_warnings = [str(w) for w in (raw_w if isinstance(raw_w, list) else [])]
+
+        matched_user = by_login.get(p_login) if p_login else None
+        if matched_user is None and p_email:
+            matched_user = by_email.get(p_email)
+
+        effective_login = (
+            (matched_user.login_name or matched_user.email or p_login)
+            if matched_user is not None
+            else p_login
+        )
+        has_email = (
+            (matched_user.email is not None)
+            if matched_user is not None
+            else (p_email is not None)
+        )
+
+        raw_match = person.get("match")
+        match_info = raw_match if isinstance(raw_match, dict) else {}
+        if str(match_info.get("status") or "new") == "existing":
+            existing_roster_items.append(
+                {
+                    "name": pname,
+                    "login_name": effective_login,
+                    "has_email": has_email,
+                    "affiliation": p_aff,
+                }
+            )
+        else:
+            new_roster_items.append(
+                {
+                    "name": pname,
+                    "login_name": effective_login,
+                    "has_email": has_email,
+                    "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
+                    "affiliation": p_aff,
+                }
+            )
+
+    oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
+    base_time = job.provisioned_at or job.created_at or datetime.now(UTC)
+    deadline_utc = base_time + timedelta(days=max(1, settings.initial_password_ttl_days))
+    try:
+        tz = ZoneInfo(settings.display_tz)
+    except Exception:
+        tz = ZoneInfo("Asia/Shanghai")
+    deadline_display = deadline_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
+    roster_text = render_roster_text(
+        base_url=settings.public_base_url,
+        initial_password=None,
+        include_password=False,
+        deadline_str=deadline_display,
+        new_accounts=new_roster_items,
+        existing_accounts=existing_roster_items,
+        oidc_mode=oidc_mode,
+        password_notice="（见开号时的通知）",
+    )
+    roster_csv = render_roster_csv(
+        initial_password=None,
+        include_password=False,
+        deadline_str=deadline_display,
+        new_accounts=new_roster_items,
+        existing_accounts=existing_roster_items,
+        oidc_mode=oidc_mode,
+    )
+    return roster_text, roster_csv
