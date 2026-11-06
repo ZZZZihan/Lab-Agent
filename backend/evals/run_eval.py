@@ -302,6 +302,7 @@ async def _featurize(
                         "embed_ms": embedder.last_query_ms,
                         "df": bundle.df,
                         "n_docs": bundle.n_docs,
+                        "rerank_failed": bool(bundle.rerank_failed),
                         "hits": [
                             {
                                 "key": hit["key"],

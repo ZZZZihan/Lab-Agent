@@ -130,9 +130,11 @@ def order_for_mode(
 
 
 def decision_score(hit: Hit, mode: str) -> float:
-    if "rerank" in mode:
+    if mode == "hybrid_rrf_rerank":
         if hit.get("rerank_score") is not None:
             return float(hit["rerank_score"])
+        return float(hit.get("rerank") or 0.0)
+    if "rerank" in mode:
         return float(hit.get("rerank") or 0.0)
     return float(hit.get("cosine") or 0.0)
 

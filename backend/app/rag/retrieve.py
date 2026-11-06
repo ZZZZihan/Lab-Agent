@@ -97,8 +97,6 @@ async def search_knowledge(
     if storage not in ALLOWED_STORAGES:
         raise ValueError(f"Unsupported embedding storage: {storage!r}")
     active_mode = mode or settings.retrieval_mode or "dense"
-    if settings.reranker == "api" and mode is None:
-        active_mode = "hybrid_rrf_rerank"
     query_tokens = content_tokens(query)
     params = {
         "is_admin": user.role == "admin",
@@ -278,10 +276,7 @@ async def search_knowledge(
             b=settings.bm25_b,
         )
     rerank_failed = False
-    use_api_rerank = (
-        active_mode == "hybrid_rrf_rerank"
-        or (settings.reranker == "api" and mode is None)
-    )
+    use_api_rerank = active_mode == "hybrid_rrf_rerank"
     if use_api_rerank:
         rrf_ranked = order_for_mode(
             hits,

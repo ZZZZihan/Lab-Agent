@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from app.rag.bm25 import rare_coverage
-from app.rag.rrf import Hit, decide, order_for_mode
+from app.rag.rrf import Decision, Hit, decide, order_for_mode
 
 MODES = (
     "dense",
@@ -119,12 +119,13 @@ def _ranked_keys(row: dict[str, Any], mode: str, rrf_k: int) -> list[Hit]:
             title=str(item.get("title") or ""),
             chunk_index=int(item.get("chunk_index") or 0),
         )
-        if item.get("rerank_score") is not None:
-            hit["rerank_score"] = float(item["rerank_score"])
-            hit["rerank"] = float(item["rerank_score"])
-        elif item.get("rerank") is not None:
-            hit["rerank"] = float(item["rerank"])
-            hit["rerank_score"] = float(item["rerank"])
+        if mode == "hybrid_rrf_rerank":
+            if item.get("rerank_score") is not None:
+                hit["rerank_score"] = float(item["rerank_score"])
+                hit["rerank"] = float(item["rerank_score"])
+            elif item.get("rerank") is not None:
+                hit["rerank"] = float(item["rerank"])
+                hit["rerank_score"] = float(item["rerank"])
         hits.append(hit)
     return order_for_mode(
         hits,
@@ -208,6 +209,16 @@ def evaluate(
             margin=float(params["cite_margin"]),
             cite_k=int(params["cite_k"]),
         )
+        if mode == "hybrid_rrf_rerank" and bool(row.get("rerank_failed")):
+            decision = Decision(
+                refused=True,
+                reason="rerank_failed",
+                score=decision["score"],
+                cosine=decision["cosine"],
+                coverage=decision["coverage"],
+                citations=[],
+                neighbors=decision["neighbors"],
+            )
         gold = _gold(row)
         cited = {str(hit["key"]) for hit in decision["citations"]}
         latencies.append(float(row["elapsed_ms"]))

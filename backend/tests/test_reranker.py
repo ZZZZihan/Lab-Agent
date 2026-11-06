@@ -25,7 +25,9 @@ from app.rag.rerank import (
 )
 from app.rag.retrieve import MODES as RETRIEVE_MODES
 from app.rag.retrieve import search_knowledge
+from app.rag.rrf import Hit, decision_score
 from evals.metrics import MODES as METRICS_MODES
+from evals.metrics import evaluate
 from sqlalchemy import select
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
@@ -46,6 +48,7 @@ def _settings(**overrides: Any) -> Settings:
         "embedding_dim": 512,
         "embedding_storage": "vector",
         "embedding_index": "auto",
+        "retrieval_mode": None,
     }
     params.update(overrides)
     return Settings(**params)
@@ -245,12 +248,23 @@ async def test_search_knowledge_and_agent_rerank_success_and_failure_fallback() 
         reranker="api",
         rerank_base_url="http://rerank.internal:3425/v1",
         rerank_model="bge-reranker-v2-m3",
-        retrieval_mode="hybrid_rrf_rerank",
         evidence_score_min=0.50,
         rare_coverage_min=0.0,
         cite_margin=0.15,
         cite_k=2,
     )
+    assert s_rerank.retrieval_mode == "hybrid_rrf_rerank"
+    s_rerank_explicit_dense = _settings(
+        reranker="api",
+        rerank_base_url="http://rerank.internal:3425/v1",
+        rerank_model="bge-reranker-v2-m3",
+        retrieval_mode="dense",
+        evidence_score_min=0.50,
+        rare_coverage_min=0.0,
+        cite_margin=0.15,
+        cite_k=2,
+    )
+    assert s_rerank_explicit_dense.retrieval_mode == "dense"
 
     try:
         set_rerank_client(ok_client)
@@ -267,6 +281,18 @@ async def test_search_knowledge_and_agent_rerank_success_and_failure_fallback() 
             assert len(bundle.hits) >= 2
             assert bundle.hits[0]["document_id"] == doc_b_id
             assert bundle.hits[0]["rerank_score"] == pytest.approx(0.96)
+
+            # Explicit retrieval_mode="dense" is honored even when reranker="api"
+            bundle_explicit_dense = await search_knowledge(
+                session,
+                settings=s_rerank_explicit_dense,
+                embedder=embedder,
+                user=Principal(id=user_id, role="admin"),
+                query="清衡实验室量子低温柜的巡检周期是多久？",
+            )
+            assert bundle_explicit_dense.mode == "dense"
+            assert bundle_explicit_dense.rerank_failed is False
+            assert bundle_explicit_dense.hits[0].get("rerank_score") is None
 
             events_ok: list[dict[str, object]] = []
 
@@ -373,3 +399,120 @@ async def test_search_knowledge_and_agent_rerank_success_and_failure_fallback() 
     finally:
         set_rerank_client(None)
         del doc_a
+
+
+def test_decision_score_and_eval_rerank_failed_refusal() -> None:
+    # 1. decision_score only uses rerank_score for hybrid_rrf_rerank, not hybrid_lexical_rerank*
+    hit = Hit(
+        key="doc-1#0",
+        cosine=0.45,
+        bm25=1.2,
+        rerank=0.35,
+        rerank_score=0.95,
+    )
+    assert decision_score(hit, "hybrid_rrf_rerank") == pytest.approx(0.95)
+    assert decision_score(hit, "hybrid_lexical_rerank") == pytest.approx(0.35)
+    assert decision_score(hit, "hybrid_lexical_rerank15") == pytest.approx(0.35)
+    assert decision_score(hit, "hybrid_rrf") == pytest.approx(0.45)
+
+    # 2. evaluate() on hybrid_lexical_rerank ignores item["rerank_score"] and computes lexical coverage
+    lex_row: dict[str, Any] = {
+        "id": "q-lex",
+        "split": "test",
+        "type": "fact",
+        "answerable": True,
+        "gold": ["doc-1#0"],
+        "query_tokens": ["低温", "巡检"],
+        "elapsed_ms": 10.0,
+        "df": {"低温": 1, "巡检": 1},
+        "n_docs": 10,
+        "rerank_failed": False,
+        "hits": [
+            {
+                "key": "doc-1#0",
+                "cosine": 0.40,
+                "bm25": 1.0,
+                "rerank_score": 0.99,
+                "tokens": ["无关"],
+                "chunk_id": "c1",
+                "document_id": "d1",
+                "heading": "H1",
+                "title": "T1",
+                "chunk_index": 0,
+            }
+        ],
+    }
+    # Lexical coverage of ["低温", "巡检"] against ["无关"] is 0.0 < score_min=0.50 -> refused
+    # (Whereas if rerank_score=0.99 leaked into hybrid_lexical_rerank, it would falsely answer!)
+    lex_metrics = evaluate(
+        [lex_row],
+        mode="hybrid_lexical_rerank",
+        params={
+            "rrf_k": 60,
+            "evidence_score_min": 0.50,
+            "rare_coverage_min": 0.0,
+            "cite_margin": 0.15,
+            "cite_k": 2,
+        },
+        include_ci=False,
+    )
+    assert float(lex_metrics["false_refusal_rate"]) == pytest.approx(1.0)
+
+    # 3. evaluate() on hybrid_rrf_rerank enforces refusal when rerank_failed=True
+    failed_row: dict[str, Any] = {
+        "id": "q-fail",
+        "split": "test",
+        "type": "fact",
+        "answerable": True,
+        "gold": ["doc-1#0"],
+        "query_tokens": ["低温"],
+        "elapsed_ms": 12.0,
+        "df": {"低温": 1},
+        "n_docs": 10,
+        "rerank_failed": True,
+        "hits": [
+            {
+                "key": "doc-1#0",
+                "cosine": 0.92,
+                "bm25": 2.5,
+                "rerank_score": None,
+                "tokens": ["低温"],
+                "chunk_id": "c1",
+                "document_id": "d1",
+                "heading": "H1",
+                "title": "T1",
+                "chunk_index": 0,
+            }
+        ],
+    }
+    rerank_fail_metrics = evaluate(
+        [failed_row],
+        mode="hybrid_rrf_rerank",
+        params={
+            "rrf_k": 60,
+            "evidence_score_min": 0.0,
+            "rare_coverage_min": 0.0,
+            "cite_margin": 0.15,
+            "cite_k": 2,
+        },
+        include_ci=False,
+    )
+    assert float(rerank_fail_metrics["false_refusal_rate"]) == pytest.approx(1.0)
+    assert float(rerank_fail_metrics["citation_f1"]) == pytest.approx(0.0)
+
+    # Non-API mode (hybrid_rrf) on the same row is not forced to refuse
+    rrf_metrics = evaluate(
+        [failed_row],
+        mode="hybrid_rrf",
+        params={
+            "rrf_k": 60,
+            "evidence_score_min": 0.50,
+            "rare_coverage_min": 0.0,
+            "cite_margin": 0.15,
+            "cite_k": 2,
+        },
+        include_ci=False,
+    )
+    assert float(rrf_metrics["false_refusal_rate"]) == pytest.approx(0.0)
+    assert float(rrf_metrics["citation_f1"]) == pytest.approx(1.0)
+
