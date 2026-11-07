@@ -730,7 +730,7 @@ export default function LabAssetsPage() {
     if (me.role !== "member") return false;
     if (type === "people") {
       const p = item as LabPersonItem;
-      return p.user_id === me.id || myAllowedNames.has((p.name || "").trim());
+      return Boolean(p.user_id && p.user_id === me.id);
     }
     if (type === "projects") {
       const proj = item as LabProjectItem;
