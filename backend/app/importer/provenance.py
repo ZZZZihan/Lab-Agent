@@ -530,6 +530,7 @@ async def restore_entity_imported_fields(
 ) -> list[str]:
     """Supersede active manual overrides on `fields` and restore effective imported values."""
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    await session.refresh(entity)
     prior_affiliation = getattr(entity, "affiliation", None)
     prior_email = getattr(entity, "email", None)
     target_fields = list(fields)

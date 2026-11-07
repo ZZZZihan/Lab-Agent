@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 import docx
 from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
@@ -2209,11 +2209,15 @@ async def restore_lab_entity_imported(
     if not fields_to_restore:
         raise APIError(422, "field_required", "请提供需要恢复为导入值的字段名 field")
 
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+
     entity: Any
     user: User
     if norm_type == "person":
         user = await _user(session, actor)
-        entity = await session.get(LabPerson, entity_id)
+        entity = await session.scalar(
+            select(LabPerson).where(LabPerson.id == entity_id).with_for_update()
+        )
         if entity is None:
             raise APIError(404, "not_found", "成员档案不存在")
         if actor.role != "admin" and entity.user_id != user.id:
@@ -2227,21 +2231,29 @@ async def restore_lab_entity_imported(
                 resource_id=str(entity_id),
             )
     elif norm_type == "project":
-        entity = await session.get(LabProject, entity_id)
+        entity = await session.scalar(
+            select(LabProject).where(LabProject.id == entity_id).with_for_update()
+        )
         if entity is None:
             raise APIError(404, "not_found", "项目记录不存在")
         user = await _require_lab_editor(
             session, actor, owner_name=entity.pi_name, require_owner=True
         )
     elif norm_type == "achievement":
-        entity = await session.get(LabAchievement, entity_id)
+        entity = await session.scalar(
+            select(LabAchievement)
+            .where(LabAchievement.id == entity_id)
+            .with_for_update()
+        )
         if entity is None:
             raise APIError(404, "not_found", "成果记录不存在")
         user = await _require_lab_editor(
             session, actor, owner_name=entity.first_author, require_owner=True
         )
     else:
-        entity = await session.get(LabFacility, entity_id)
+        entity = await session.scalar(
+            select(LabFacility).where(LabFacility.id == entity_id).with_for_update()
+        )
         if entity is None:
             raise APIError(404, "not_found", "设备记录不存在")
         user = await _require_lab_editor(session, actor, admin_only=True)

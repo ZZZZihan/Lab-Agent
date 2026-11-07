@@ -850,17 +850,26 @@ async def sync_lab_profile_rag(
         .order_by(Document.updated_at.desc(), Document.created_at.desc())
         .limit(1)
     )
-    visibility = (
-        existing_doc.visibility
-        if existing_doc is not None
-        else (prev_profile_doc.visibility if prev_profile_doc is not None else "lab")
-    )
+    if existing_doc is not None and existing_doc.deleted_at is None:
+        visibility = existing_doc.visibility
+    elif prev_profile_doc is not None:
+        visibility = prev_profile_doc.visibility
+    elif existing_doc is not None:
+        visibility = existing_doc.visibility
+    else:
+        visibility = "lab"
 
     effective_owner_id: uuid.UUID | None = None
-    if existing_doc is not None and existing_doc.owner_id is not None:
+    if (
+        existing_doc is not None
+        and existing_doc.deleted_at is None
+        and existing_doc.owner_id is not None
+    ):
         effective_owner_id = existing_doc.owner_id
     elif prev_profile_doc is not None and prev_profile_doc.owner_id is not None:
         effective_owner_id = prev_profile_doc.owner_id
+    elif existing_doc is not None and existing_doc.owner_id is not None:
+        effective_owner_id = existing_doc.owner_id
     elif target_job is not None and (
         target_job.provisioned_by is not None or target_job.uploaded_by is not None
     ):
