@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import uuid
 from collections.abc import Sequence
@@ -12,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 
 from app.importer.fingerprint import (
     achievement_fp,
@@ -31,6 +33,7 @@ from app.importer.provision import (
     _parse_iso_date,
     sync_lab_profile_rag,
 )
+from app.importer.signature import persist_import_signatures
 from app.models import (
     FieldProvenance,
     ImportJob,
@@ -127,6 +130,8 @@ class MergeRequest(BaseModel):
 
     as_of_time: date | None = None
     decisions: list[MergeDecision] = Field(default_factory=list)
+    skip_signature_ids: list[str] = Field(default_factory=list)
+    exclude_keys: list[str] = Field(default_factory=list)
 
 
 def _kind_rank(source_kind: str) -> int:
@@ -861,8 +866,19 @@ def _has_login_conflict(person_dict: dict[str, Any]) -> bool:
     return False
 
 
-def _is_person_excluded(p: dict[str, Any]) -> bool:
-    return bool(p.get("exclude") is True or p.get("override_mode") == "exclude")
+def _is_person_excluded(
+    p: dict[str, Any], exclude_key_set: set[str] | None = None
+) -> bool:
+    pkey = str(p.get("temp_id") or p.get("key") or "").strip()
+    if exclude_key_set and pkey and pkey in exclude_key_set:
+        return True
+    return bool(
+        p.get("exclude") is True
+        or p.get("excluded") is True
+        or p.get("include") is False
+        or p.get("imported") is False
+        or p.get("override_mode") == "exclude"
+    )
 
 
 def _ach_reg_id(kind: str, raw_text: str) -> str:
@@ -1551,6 +1567,7 @@ async def build_merge_preview(
     *,
     job_id: uuid.UUID,
     as_of_time_override: date | None = None,
+    exclude_keys: Sequence[str] | set[str] | None = None,
 ) -> dict[str, object]:
     """Compute Phase 2 temporal merge preview without mutating entity tables (Spec §10.5)."""
     job = await session.get(ImportJob, job_id)
@@ -1598,12 +1615,15 @@ async def build_merge_preview(
         by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(row_obj)
 
     preview: dict[str, Any] = dict(job.preview or {})
+    exclude_key_set = {
+        str(k).strip() for k in (exclude_keys or []) if str(k).strip()
+    }
 
     raw_ppl = preview.get("people")
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict) and not _is_person_excluded(p)
+        if isinstance(p, dict) and not _is_person_excluded(p, exclude_key_set)
     ]
     if ppl_list:
         _assign_people_preserving_explicit_links(
@@ -1904,6 +1924,44 @@ def _lookup_decision(
     return None
 
 
+def _find_tail_writer_job_id(
+    other_jobs: list[ImportJob],
+    pid_str: str,
+    current_sha: str | None,
+) -> str | None:
+    chain_jobs: list[tuple[ImportJob, dict[str, Any]]] = []
+    for oj in other_jobs:
+        oj_stats = oj.stats if isinstance(oj.stats, dict) else {}
+        oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+        if isinstance(oj_pre_sigs, dict):
+            oj_snap = oj_pre_sigs.get(pid_str)
+            if isinstance(oj_snap, dict):
+                chain_jobs.append((oj, oj_snap))
+    if not chain_jobs:
+        return None
+    referenced_prev_ids: set[str] = set()
+    for _, oj_snap in chain_jobs:
+        prev_id = oj_snap.get("prev_writer_job_id")
+        if isinstance(prev_id, str) and prev_id:
+            referenced_prev_ids.add(prev_id)
+    tails = [
+        (oj, oj_snap)
+        for oj, oj_snap in chain_jobs
+        if str(oj.id) not in referenced_prev_ids
+    ]
+    if not tails:
+        return str(chain_jobs[-1][0].id)
+    if current_sha:
+        matching = [
+            oj
+            for oj, oj_snap in tails
+            if oj_snap.get("applied_sha256") == current_sha
+        ]
+        if matching:
+            return str(matching[-1].id)
+    return str(tails[-1][0].id)
+
+
 async def execute_merge(
     session: AsyncSession,
     *,
@@ -1923,11 +1981,13 @@ async def execute_merge(
         raise ProvisionError(409, "import_invalid_status", "该导入任务当前状态不可合并")
 
     as_of_date = _resolve_job_as_of(job, body.as_of_time)
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     await _reconcile_job_existing_provenance(session, job.id, as_of_date)
     preview_result = await build_merge_preview(
         session,
         job_id=job_id,
         as_of_time_override=as_of_date,
+        exclude_keys=exclude_key_set,
     )
     raw_changes = preview_result.get("changes")
     changes_list: list[dict[str, object]] = (
@@ -1992,7 +2052,7 @@ async def execute_merge(
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict) and not _is_person_excluded(p)
+        if isinstance(p, dict) and not _is_person_excluded(p, exclude_key_set)
     ]
     if ppl_list:
         _assign_people_preserving_explicit_links(
@@ -2136,7 +2196,18 @@ async def execute_merge(
 
     # 1. People (NEVER create or mutate User accounts during Phase 2 merge!)
     matched_people_map: dict[uuid.UUID, tuple[LabPerson, dict[str, object]]] = {}
+    imported_people_by_key: dict[str, LabPerson] = {}
+    new_people_by_fp: dict[str, LabPerson] = {}
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     for p in ppl_list:
+        pkey = str(p.get("temp_id") or p.get("key") or "")
+        if (
+            pkey in exclude_key_set
+            or p.get("excluded") is True
+            or p.get("include") is False
+            or p.get("imported") is False
+        ):
+            continue
         pname, fp_val, p_fields = _extract_person_incoming(p)
         if not pname:
             continue
@@ -2151,6 +2222,8 @@ async def execute_merge(
         )
         if matched_p is None:
             if fp_val in used_person_fps:
+                if pkey and fp_val in new_people_by_fp:
+                    imported_people_by_key[pkey] = new_people_by_fp[fp_val]
                 continue
             linked_uid: uuid.UUID | None = None
             raw_match = p.get("match")
@@ -2209,8 +2282,13 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
+            new_people_by_fp[fp_val] = new_person
+            if pkey:
+                imported_people_by_key[pkey] = new_person
             added_count += 1
         else:
+            if pkey:
+                imported_people_by_key[pkey] = matched_p
             raw_inc_email = p_fields.get("email")
             inc_email = raw_inc_email if isinstance(raw_inc_email, str) else None
             inc_aff = str(p_fields.get("affiliation") or "") or None
@@ -2443,11 +2521,192 @@ async def execute_merge(
     for matched_f, acc_f in matched_fac_map.values():
         await _merge_existing_entity("facility", matched_f, acc_f)
 
+    new_people_ids = {p_ent.id for p_ent in new_people_by_fp.values()}
+    existing_target_ids = {
+        p_ent.id
+        for p_ent in imported_people_by_key.values()
+        if p_ent.id not in new_people_ids
+    }
+    existing_target_people: list[LabPerson] = []
+    pre_sig_snapshots: dict[uuid.UUID, dict[str, str | None]] = {}
+    if existing_target_ids:
+        existing_target_people = list(
+            await session.scalars(
+                select(LabPerson)
+                .options(undefer(LabPerson.signature_data))
+                .where(LabPerson.id.in_(existing_target_ids))
+                .with_for_update()
+            )
+        )
+        for p_existing in existing_target_people:
+            await session.refresh(
+                p_existing,
+                attribute_names=[
+                    "signature_data",
+                    "signature_mime",
+                    "signature_sha256",
+                    "signature_updated_at",
+                    "signature_source",
+                ],
+            )
+            pre_sig_snapshots[p_existing.id] = {
+                "signature_data_b64": (
+                    base64.b64encode(p_existing.signature_data).decode("ascii")
+                    if p_existing.signature_data is not None
+                    else None
+                ),
+                "signature_mime": p_existing.signature_mime,
+                "signature_sha256": p_existing.signature_sha256,
+                "signature_updated_at": (
+                    p_existing.signature_updated_at.isoformat()
+                    if p_existing.signature_updated_at is not None
+                    else None
+                ),
+                "signature_source": p_existing.signature_source,
+            }
+
     cur_stats = dict(job.stats or {})
+    raw_preview_blobs = preview.get("_signature_blobs")
+    raw_stats_blobs = cur_stats.get("_signature_blobs")
+    effective_sig_blobs: dict[str, object] = {}
+    if isinstance(raw_preview_blobs, dict) and raw_preview_blobs:
+        effective_sig_blobs = dict(raw_preview_blobs)
+    elif isinstance(raw_stats_blobs, dict) and raw_stats_blobs:
+        effective_sig_blobs = dict(raw_stats_blobs)
+    sig_preview = (
+        {**preview, "_signature_blobs": effective_sig_blobs}
+        if effective_sig_blobs
+        and not (isinstance(raw_preview_blobs, dict) and raw_preview_blobs)
+        else preview
+    )
+    sig_result, sig_extra_warnings = persist_import_signatures(
+        preview=sig_preview,
+        imported_people_by_key=imported_people_by_key,
+        skip_signature_ids=body.skip_signature_ids,
+    )
+    cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}
+    cleaned_preview["as_of_time"] = as_of_date.isoformat()
+    if sig_extra_warnings:
+        cur_prev_warnings = list(cleaned_preview.get("warnings") or [])
+        cur_prev_warnings.extend(sig_extra_warnings)
+        cleaned_preview["warnings"] = cur_prev_warnings
+    job.preview = cleaned_preview
+
+    if effective_sig_blobs:
+        cur_stats["_signature_blobs"] = effective_sig_blobs
+    prior_job_sig_snaps: dict[str, dict[str, str | None]] = {}
+    raw_prior_snaps = cur_stats.get("_pre_merge_signatures")
+    if isinstance(raw_prior_snaps, dict):
+        for k_pid, v_snap in raw_prior_snaps.items():
+            if isinstance(v_snap, dict):
+                prior_job_sig_snaps[str(k_pid)] = dict(v_snap)
+    other_merged_jobs = list(
+        await session.scalars(
+            select(ImportJob)
+            .where(
+                ImportJob.id != job.id,
+                ImportJob.status.in_(("merged", "provisioned")),
+            )
+            .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
+            .with_for_update()
+        )
+    )
+    for p_existing in existing_target_people:
+        pid_str = str(p_existing.id)
+        snap = pre_sig_snapshots.get(p_existing.id)
+        sig_bound_by_this_job = bool(
+            getattr(p_existing, "_sig_bound_by_import", False)
+        ) or (
+            snap is not None
+            and (
+                p_existing.signature_sha256 != snap["signature_sha256"]
+                or p_existing.signature_source != snap["signature_source"]
+            )
+        )
+        if pid_str in prior_job_sig_snaps:
+            if sig_bound_by_this_job and snap is not None:
+                old_snap = prior_job_sig_snaps[pid_str]
+                old_applied_sha = old_snap.get("applied_sha256")
+                has_successor = False
+                for oj in other_merged_jobs:
+                    oj_stats = dict(oj.stats or {})
+                    oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+                    if not isinstance(oj_pre_sigs, dict):
+                        continue
+                    oj_snap = oj_pre_sigs.get(pid_str)
+                    if not isinstance(oj_snap, dict):
+                        continue
+                    if oj_snap.get("prev_writer_job_id") == str(job.id) or (
+                        "prev_writer_job_id" not in oj_snap
+                        and isinstance(old_applied_sha, str)
+                        and old_applied_sha
+                        and oj_snap.get("signature_sha256") == old_applied_sha
+                    ):
+                        has_successor = True
+                        new_oj_pre_sigs = dict(oj_pre_sigs)
+                        new_oj_pre_sigs[pid_str] = {
+                            "signature_data_b64": old_snap.get(
+                                "signature_data_b64"
+                            ),
+                            "signature_mime": old_snap.get("signature_mime"),
+                            "signature_sha256": old_snap.get("signature_sha256"),
+                            "signature_updated_at": old_snap.get(
+                                "signature_updated_at"
+                            ),
+                            "signature_source": old_snap.get("signature_source"),
+                            "prev_writer_job_id": old_snap.get(
+                                "prev_writer_job_id"
+                            ),
+                            "applied_sha256": oj_snap.get("applied_sha256"),
+                        }
+                        oj_stats["_pre_merge_signatures"] = new_oj_pre_sigs
+                        oj.stats = oj_stats
+                if has_successor:
+                    tail_id = (
+                        _find_tail_writer_job_id(
+                            other_merged_jobs, pid_str, snap["signature_sha256"]
+                        )
+                        if snap["signature_source"] == "docx_import"
+                        else None
+                    )
+                    prior_job_sig_snaps[pid_str] = {
+                        **snap,
+                        "prev_writer_job_id": tail_id,
+                        "applied_sha256": p_existing.signature_sha256,
+                    }
+                else:
+                    prior_job_sig_snaps[pid_str] = {
+                        **old_snap,
+                        "applied_sha256": p_existing.signature_sha256,
+                    }
+        elif sig_bound_by_this_job and snap is not None:
+            tail_id = (
+                _find_tail_writer_job_id(
+                    other_merged_jobs, pid_str, snap["signature_sha256"]
+                )
+                if snap["signature_source"] == "docx_import"
+                else None
+            )
+            prior_job_sig_snaps[pid_str] = {
+                **snap,
+                "prev_writer_job_id": tail_id,
+                "applied_sha256": p_existing.signature_sha256,
+            }
+    for p_new in new_people_by_fp.values():
+        if p_new.signature_sha256 is not None:
+            prior_job_sig_snaps[str(p_new.id)] = {
+                "signature_data_b64": None,
+                "signature_mime": None,
+                "signature_sha256": None,
+                "signature_updated_at": None,
+                "signature_source": None,
+                "prev_writer_job_id": None,
+                "applied_sha256": p_new.signature_sha256,
+            }
+    if prior_job_sig_snaps:
+        cur_stats["_pre_merge_signatures"] = prior_job_sig_snaps
     if job.status in ("parsed", "provisioned"):
         cur_stats["pre_merge_status"] = job.status
-    preview["as_of_time"] = as_of_date.isoformat()
-    job.preview = preview
     job.as_of_time = as_of_date
     job.status = "merged"
     await session.flush()
@@ -2465,6 +2724,7 @@ async def execute_merge(
         "kept_fields": kept_fields_count,
         "forced_fields": forced_fields_count,
         "rag_doc_key": doc_key,
+        "signature_result": sig_result,
     }
     cur_stats.update(merge_stats)
     job.stats = cur_stats
@@ -2479,6 +2739,8 @@ async def execute_merge(
         "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
         "rag_doc_key": doc_key,
         "stats": merge_stats,
+        "signature_result": sig_result,
+        "warnings": sig_extra_warnings,
     }
 
 
@@ -2532,6 +2794,33 @@ async def revert_import_merge(
 
     await session.flush()
 
+    other_jobs = list(
+        await session.scalars(
+            select(ImportJob)
+            .where(
+                ImportJob.id != job.id,
+                ImportJob.status.in_(("merged", "provisioned")),
+            )
+            .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
+            .with_for_update()
+        )
+    )
+    other_sig_owner_by_pid: dict[str, uuid.UUID] = {}
+    for oj in other_jobs:
+        oj_stats = oj.stats if isinstance(oj.stats, dict) else {}
+        oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+        if isinstance(oj_pre_sigs, dict):
+            for pid_str, oj_snap in oj_pre_sigs.items():
+                if isinstance(oj_snap, dict):
+                    other_sig_owner_by_pid[str(pid_str)] = oj.id
+    for pid_str in list(other_sig_owner_by_pid.keys()):
+        tail_job_id_str = _find_tail_writer_job_id(other_jobs, pid_str, None)
+        if tail_job_id_str is not None:
+            try:
+                other_sig_owner_by_pid[pid_str] = uuid.UUID(tail_job_id_str)
+            except ValueError:
+                pass
+
     reverted_fields = 0
     deleted_entities = 0
 
@@ -2554,13 +2843,56 @@ async def revert_import_merge(
         prior_affiliation = getattr(ent, "affiliation", None)
         prior_email = getattr(ent, "email", None)
         if ent.source_import_id == job.id and not remaining_live:
-            if etype == "person" and ent.user_id is not None:
-                # Spec §10.6: Never delete LabPerson linked to a User account!
+            if etype == "person":
+                await session.refresh(
+                    ent,
+                    attribute_names=[
+                        "signature_data",
+                        "signature_mime",
+                        "signature_sha256",
+                        "signature_updated_at",
+                        "signature_source",
+                    ],
+                )
+            other_sig_job_id = (
+                other_sig_owner_by_pid.get(str(ent.id))
+                if etype == "person"
+                else None
+            )
+            if etype == "person" and (
+                ent.user_id is not None
+                or ent.signature_source == "upload"
+                or other_sig_job_id is not None
+            ):
+                # Spec §10.6 & v2.2: Never delete LabPerson linked to a User account, holding a manual signature upload, or owned by another active import's signature snapshot!
+                if other_sig_job_id is not None:
+                    ent.source_import_id = other_sig_job_id
                 for field in MANAGED_FIELDS[etype]:
                     cur_val = get_entity_json_value(etype, ent, field)
-                    if not _is_blank(cur_val) and field != "project_role":
+                    if not _is_blank(cur_val) and field not in ("name", "project_role"):
                         set_entity_field_from_json(etype, ent, field, None)
                         reverted_fields += 1
+                raw_job_pre_sigs = (
+                    (job.stats or {}).get("_pre_merge_signatures")
+                    if isinstance(job.stats, dict)
+                    else None
+                )
+                has_pre_sig_entry = (
+                    isinstance(raw_job_pre_sigs, dict)
+                    and str(ent.id) in raw_job_pre_sigs
+                )
+                if (
+                    not has_pre_sig_entry
+                    and other_sig_job_id is None
+                    and ent.signature_source == "docx_import"
+                    and ent.signature_sha256 is not None
+                ):
+                    ent.signature_data = None
+                    ent.signature_mime = None
+                    ent.signature_sha256 = None
+                    ent.signature_updated_at = None
+                    ent.signature_source = None
+                    reverted_fields += 1
             else:
                 await session.delete(ent)
                 deleted_entities += 1
@@ -2598,14 +2930,135 @@ async def revert_import_merge(
             ]
             if rem_jobs:
                 ent.source_import_id = rem_jobs[-1]
+            elif etype == "person" and str(ent.id) in other_sig_owner_by_pid:
+                ent.source_import_id = other_sig_owner_by_pid[str(ent.id)]
 
     cur_stats = dict(job.stats or {})
+    raw_pre_sigs = cur_stats.pop("_pre_merge_signatures", None)
+    if isinstance(raw_pre_sigs, dict):
+        for pid_str, snap in raw_pre_sigs.items():
+            if not isinstance(snap, dict):
+                continue
+            try:
+                pid = uuid.UUID(str(pid_str))
+            except ValueError:
+                continue
+            p_ent = await session.scalar(
+                select(LabPerson)
+                .options(undefer(LabPerson.signature_data))
+                .where(LabPerson.id == pid)
+                .with_for_update()
+            )
+            if p_ent is None:
+                continue
+            await session.refresh(
+                p_ent,
+                attribute_names=[
+                    "signature_data",
+                    "signature_mime",
+                    "signature_sha256",
+                    "signature_updated_at",
+                    "signature_source",
+                ],
+            )
+            applied_sha = snap.get("applied_sha256")
+            successor_jobs: list[ImportJob] = []
+            for oj in other_jobs:
+                oj_stats = dict(oj.stats or {})
+                oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+                if not isinstance(oj_pre_sigs, dict):
+                    continue
+                oj_snap = oj_pre_sigs.get(pid_str)
+                if not isinstance(oj_snap, dict):
+                    continue
+                if oj_snap.get("prev_writer_job_id") == str(job.id) or (
+                    "prev_writer_job_id" not in oj_snap
+                    and isinstance(applied_sha, str)
+                    and applied_sha
+                    and oj_snap.get("signature_sha256") == applied_sha
+                ):
+                    successor_jobs.append(oj)
+
+            if (
+                successor_jobs
+                or p_ent.signature_source == "upload"
+                or (
+                    isinstance(applied_sha, str)
+                    and applied_sha
+                    and p_ent.signature_sha256 != applied_sha
+                )
+            ):
+                for oj in successor_jobs:
+                    oj_stats = dict(oj.stats or {})
+                    oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+                    if not isinstance(oj_pre_sigs, dict):
+                        continue
+                    oj_snap = oj_pre_sigs.get(pid_str)
+                    if not isinstance(oj_snap, dict):
+                        continue
+                    new_oj_pre_sigs = dict(oj_pre_sigs)
+                    new_oj_pre_sigs[pid_str] = {
+                        "signature_data_b64": snap.get("signature_data_b64"),
+                        "signature_mime": snap.get("signature_mime"),
+                        "signature_sha256": snap.get("signature_sha256"),
+                        "signature_updated_at": snap.get(
+                            "signature_updated_at"
+                        ),
+                        "signature_source": snap.get("signature_source"),
+                        "prev_writer_job_id": snap.get("prev_writer_job_id"),
+                        "applied_sha256": oj_snap.get("applied_sha256"),
+                    }
+                    oj_stats["_pre_merge_signatures"] = new_oj_pre_sigs
+                    oj.stats = oj_stats
+                continue
+            b64_data = snap.get("signature_data_b64")
+            prev_sha = snap.get("signature_sha256")
+            prev_mime = snap.get("signature_mime")
+            prev_upd = snap.get("signature_updated_at")
+            prev_src = snap.get("signature_source")
+            if (
+                isinstance(b64_data, str)
+                and b64_data
+                and isinstance(prev_sha, str)
+                and prev_sha
+            ):
+                p_ent.signature_data = base64.b64decode(b64_data)
+                p_ent.signature_mime = (
+                    prev_mime if isinstance(prev_mime, str) else None
+                )
+                p_ent.signature_sha256 = prev_sha
+                p_ent.signature_updated_at = (
+                    datetime.fromisoformat(prev_upd)
+                    if isinstance(prev_upd, str) and prev_upd
+                    else datetime.now(UTC)
+                )
+                p_ent.signature_source = (
+                    prev_src if isinstance(prev_src, str) else "docx_import"
+                )
+            else:
+                p_ent.signature_data = None
+                p_ent.signature_mime = None
+                p_ent.signature_sha256 = None
+                p_ent.signature_updated_at = None
+                p_ent.signature_source = None
+            reverted_fields += 1
+
     pre_status = cur_stats.get("pre_merge_status")
     restored_status = (
         str(pre_status)
         if isinstance(pre_status, str) and pre_status in ("parsed", "provisioned")
         else ("provisioned" if job.provisioned_at is not None else "parsed")
     )
+    saved_sig_blobs = cur_stats.get("_signature_blobs")
+    if (
+        isinstance(saved_sig_blobs, dict)
+        and saved_sig_blobs
+        and isinstance(job.preview, dict)
+    ):
+        restored_preview = dict(job.preview)
+        restored_preview["_signature_blobs"] = dict(saved_sig_blobs)
+        job.preview = restored_preview
+    job.stats = cur_stats
     job.status = restored_status
     await session.flush()
 

@@ -10,13 +10,26 @@ from typing import Annotated, Any, Literal
 
 import docx
 from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Response, UploadFile
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
+from starlette.exceptions import HTTPException
 
 from app.audit import write_audit
 from app.auth import Actor
 from app.db import get_session
+from app.importer.basket import (
+    MIME_TO_EXT,
+    BasketError,
+    build_rfc5987_content_disposition,
+    build_selected_docx,
+    fetch_and_format_batch_items,
+    iter_bytes_chunks,
+    prepare_signatures_zip,
+    sanitize_filename_part,
+)
 from app.importer.fingerprint import achievement_fp, facility_fp, person_fp, project_fp
 from app.importer.formatters import (
     ACHIEVEMENT_KIND_LABELS,
@@ -26,6 +39,14 @@ from app.importer.formatters import (
     format_person_application,
     format_project_application,
     render_lab_profile_markdown,
+)
+from app.importer.matching import (
+    build_ilike_patterns,
+    classify_achievement_for_person,
+    classify_project_for_person,
+)
+from app.importer.matching import (
+    normalize_person_name as normalize_dossier_name,
 )
 from app.importer.parser import parse_proposal_docx, reparse_preview_payload
 from app.importer.people import assign_people_identities, clean_email, normalize_person_name
@@ -58,6 +79,7 @@ from app.importer.provision import (
     sync_lab_profile_rag,
 )
 from app.importer.reader import DocxValidationError
+from app.importer.signature import validate_signature_image
 from app.models import (
     ImportJob,
     LabAchievement,
@@ -153,10 +175,33 @@ class FacilityBody(BaseModel):
     source_import_id: uuid.UUID | None = None
 
 
+class BatchFormatItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity: str
+    id: uuid.UUID | int | str
+
+
+class BatchFormatOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    style: str = "nsfc_standard"
+    numbering: str = "bracket"
+    group_by_entity: bool = True
+    include_person_bio: bool = False
+    include_support_note: bool = True
+    include_signatures_annex: bool = False
+
+
 class BatchFormatBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tab: Literal["people", "projects", "achievements", "facilities"]
+    # v2.2 basket items + options
+    items: list[BatchFormatItem] | None = None
+    options: BatchFormatOptions | None = None
+
+    # v2.0 tab-based backward compatibility
+    tab: Literal["people", "projects", "achievements", "facilities"] | None = None
     ids: list[uuid.UUID] | None = None
     numbered: bool = True
     only_ongoing: bool = False
@@ -164,6 +209,34 @@ class BatchFormatBody(BaseModel):
     with_support: bool = True
     include_bio: bool = False
     include_relationship: bool = False
+
+
+class SignaturesZipBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    person_ids: list[uuid.UUID | int | str] = Field(default_factory=list)
+    filename_template: str = "seq_name"
+
+
+class ExportSelectedBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    items: list[BatchFormatItem] = Field(default_factory=list)
+    options: BatchFormatOptions = Field(default_factory=BatchFormatOptions)
+
+
+def _lab_v22_error(
+    status: int, code: str, message: str, **extra: Any
+) -> JSONResponse:
+    err_obj: dict[str, Any] = {"code": code, "message": message}
+    for k, v in extra.items():
+        if v is not None:
+            err_obj[k] = v
+    return JSONResponse(
+        status_code=status,
+        content={"error": err_obj, "detail": err_obj},
+    )
 
 
 class RestoreImportedBody(BaseModel):
@@ -185,7 +258,10 @@ def _scrub_obj(obj: Any) -> Any:
         scrubbed, _ = scrub_free_text(obj)
         return scrubbed
     if isinstance(obj, dict):
-        return {k: _scrub_obj(v) for k, v in obj.items()}
+        return {
+            k: (v if str(k).startswith("_") else _scrub_obj(v))
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
         return [_scrub_obj(item) for item in obj]
     return obj
@@ -219,6 +295,10 @@ def _recompute_inferred_projects(
 def _serialize_import_job(
     job: ImportJob, *, include_preview: bool = True
 ) -> dict[str, object]:
+    raw_stats = job.stats or {}
+    clean_stats = {
+        k: v for k, v in raw_stats.items() if not str(k).startswith("_")
+    }
     payload: dict[str, object] = {
         "id": str(job.id),
         "job_id": str(job.id),
@@ -228,7 +308,7 @@ def _serialize_import_job(
         "parser_version": job.parser_version,
         "as_of_time": job.as_of_time.isoformat() if job.as_of_time else None,
         "status": job.status,
-        "stats": job.stats or {},
+        "stats": clean_stats,
         "error_code": job.error_code,
         "rag_document_id": str(job.rag_document_id) if job.rag_document_id else None,
         "created_at": job.created_at.isoformat() if job.created_at else None,
@@ -236,7 +316,10 @@ def _serialize_import_job(
         "provisioned_by": str(job.provisioned_by) if job.provisioned_by else None,
     }
     if include_preview:
-        payload["preview"] = job.preview or {}
+        raw_prev = job.preview or {}
+        payload["preview"] = {
+            k: v for k, v in raw_prev.items() if not str(k).startswith("_")
+        }
     return payload
 
 
@@ -244,6 +327,8 @@ def _serialize_person(
     person: LabPerson,
     provenance: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    has_sig = bool(person.signature_sha256 and person.signature_mime)
+    copy_txt = format_person_application(person, include_bio=False)
     return {
         "id": str(person.id),
         "user_id": str(person.user_id) if person.user_id else None,
@@ -255,14 +340,30 @@ def _serialize_person(
         "research_specialty": person.research_specialty,
         "degree": person.degree,
         "affiliation": person.affiliation,
+        "org": person.affiliation,
         "project_role": person.project_role,
+        "role": "pi" if person.project_role == "applicant" else "member",
         "bio": person.bio,
+        "bio_text": person.bio,
+        "copy_text": copy_txt,
+        "has_signature": has_sig,
+        "signature_mime": person.signature_mime,
+        "signature_sha256": person.signature_sha256,
+        "signature_updated_at": (
+            person.signature_updated_at.isoformat()
+            if person.signature_updated_at
+            else None
+        ),
+        "signature_source": person.signature_source,
+        "signature_url": (
+            f"/api/v1/lab/people/{person.id}/signature" if has_sig else None
+        ),
         "entity_fingerprint": person.entity_fingerprint,
         "as_of_time": person.as_of_time.isoformat() if person.as_of_time else None,
         "source_import_id": (
             str(person.source_import_id) if person.source_import_id else None
         ),
-        "application_text": format_person_application(person, include_bio=False),
+        "application_text": copy_txt,
         "application_text_with_bio": format_person_application(person, include_bio=True),
         "provenance": (
             provenance
@@ -857,13 +958,15 @@ async def reparse_import_job(
 
 
 @router.post("/admin/imports/{job_id}/provision")
+@router.post("/admin/imports/{job_id}/confirm")
 async def provision_import(
     job_id: uuid.UUID,
-    body: ProvisionRequest,
     request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
+    body: ProvisionRequest | None = Body(default=None),
 ) -> dict[str, object]:
+    effective_body = body if body is not None else ProvisionRequest()
     await _require_admin(
         request,
         actor,
@@ -878,7 +981,7 @@ async def provision_import(
             session,
             job_id=job_id,
             actor_id=actor.id,
-            body=body,
+            body=effective_body,
             settings=settings,
             embedder=embedder,
         )
@@ -903,7 +1006,7 @@ async def provision_import(
             "achievements_inserted": int(stats.get("achievements_inserted") or 0),
             "projects_inserted": int(stats.get("projects_inserted") or 0),
             "facilities_inserted": int(stats.get("facilities_inserted") or 0),
-            "include_password": bool(body.include_password),
+            "include_password": bool(effective_body.include_password),
         },
     )
     return result
@@ -2346,13 +2449,52 @@ async def delete_lab_facility(
     return {"status": "deleted", "id": str(facility_id), "rag_doc_key": doc_key}
 
 
-@router.post("/lab/format/batch")
+@router.post("/lab/format/batch", response_model=None)
 async def batch_format_lab_assets(
     body: BatchFormatBody,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict[str, object]:
+) -> dict[str, object] | JSONResponse:
     await _user(session, actor)
+
+    # v2.2 Basket items + options mode
+    if body.items is not None:
+        opts = body.options or BatchFormatOptions()
+        raw_items = [{"entity": it.entity, "id": it.id} for it in body.items]
+        try:
+            res = await fetch_and_format_batch_items(
+                session,
+                raw_items=raw_items,
+                style=opts.style,
+                numbering=opts.numbering,
+                group_by_entity=opts.group_by_entity,
+                include_person_bio=opts.include_person_bio,
+                include_support_note=opts.include_support_note,
+            )
+        except BasketError as exc:
+            return _lab_v22_error(
+                exc.status,
+                exc.code,
+                exc.message,
+                missing=exc.missing,
+            )
+        combined = str(res["combined_text"] or "")
+        assert_no_pii(combined)
+        items_out: list[dict[str, object]] = res["items"]  # type: ignore[assignment]
+        return {
+            "items": items_out,
+            "combined_text": combined,
+            "text": combined,
+            "count": len(items_out),
+        }
+
+    if body.tab is None:
+        return _lab_v22_error(
+            400,
+            "BATCH_LIMIT_EXCEEDED",
+            "请提供 items 或 tab 参数",
+        )
+
     id_filter = set(body.ids) if body.ids is not None else None
     raw_lines: list[str] = []
 
@@ -2562,3 +2704,675 @@ async def export_lab_assets(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": 'attachment; filename="lab-assets.docx"'},
     )
+
+
+def _parse_person_uuid(raw_id: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(raw_id).strip())
+    except ValueError:
+        return None
+
+
+def _serialize_dossier_project(
+    project: LabProject, relation_role: str, match_kind: str = "exact"
+) -> dict[str, object]:
+    base = _serialize_project(project, provenance={})
+    copy_txt = str(base.get("application_text") or "")
+    return {
+        **base,
+        "code": project.grant_no,
+        "source": project.funder,
+        "relation_role": relation_role,
+        "match": match_kind,
+        "copy_text": copy_txt,
+    }
+
+
+def _serialize_dossier_achievement(
+    ach: LabAchievement,
+    relation_role: str,
+    author_position: int,
+    match_kind: str = "exact",
+) -> dict[str, object]:
+    base = _serialize_achievement(ach, provenance={})
+    copy_txt = str(base.get("application_text") or "")
+    return {
+        **base,
+        "type": ach.kind,
+        "authors": ach.authors_text or ach.first_author,
+        "relation_role": relation_role,
+        "author_position": author_position,
+        "match": match_kind,
+        "copy_text": copy_txt,
+    }
+
+
+@router.get("/lab/people/{person_id}/dossier", response_model=None)
+async def get_person_dossier(
+    person_id: str,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object] | JSONResponse:
+    uid = _parse_person_uuid(person_id)
+    if uid is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    person = await session.get(LabPerson, uid)
+    if person is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    can_edit = bool(
+        actor.role == "admin"
+        or (person.user_id is not None and person.user_id == actor.id)
+    )
+    target_norm = normalize_dossier_name(person.name)
+    ilike_pats = build_ilike_patterns(person.name)
+
+    same_name_rows = list(
+        await session.execute(
+            select(LabPerson.id, LabPerson.name).where(
+                or_(*[LabPerson.name.ilike(p, escape="\\") for p in ilike_pats])
+            )
+        )
+    )
+    same_name_count = sum(
+        1
+        for _, cand_name in same_name_rows
+        if normalize_dossier_name(cand_name) == target_norm
+    )
+    name_ambiguous = same_name_count >= 2
+    match_kind = "ambiguous" if name_ambiguous else "exact"
+
+    proj_stmt = select(LabProject).where(
+        or_(
+            *[
+                col.ilike(p, escape="\\")
+                for p in ilike_pats
+                for col in (
+                    LabProject.pi_name,
+                    LabProject.raw_text,
+                    LabProject.relationship_note,
+                )
+            ]
+        )
+    )
+    cand_projects = list(await session.scalars(proj_stmt))
+
+    matched_proj_tuples: list[tuple[LabProject, str]] = []
+    for proj in cand_projects:
+        rel_role = classify_project_for_person(proj, target_norm)
+        if rel_role is not None:
+            matched_proj_tuples.append((proj, rel_role))
+
+    matched_proj_tuples.sort(
+        key=lambda item: (
+            0 if item[1] == "pi" else 1,
+            0 if item[0].start_date is not None else 1,
+            -(item[0].start_date.toordinal() if item[0].start_date is not None else 0),
+            -item[0].id.int,
+        )
+    )
+    projects_total = len(matched_proj_tuples)
+    pi_count = sum(1 for _, rl in matched_proj_tuples if rl == "pi")
+    part_count = sum(1 for _, rl in matched_proj_tuples if rl == "participant")
+    projects_truncated = projects_total > 100
+    matched_proj_tuples = matched_proj_tuples[:100]
+    serialized_projects = [
+        _serialize_dossier_project(proj, rel_role, match_kind)
+        for proj, rel_role in matched_proj_tuples
+    ]
+
+    ach_stmt = select(LabAchievement).where(
+        or_(
+            *[
+                col.ilike(p, escape="\\")
+                for p in ilike_pats
+                for col in (
+                    LabAchievement.first_author,
+                    LabAchievement.authors_text,
+                    LabAchievement.raw_text,
+                )
+            ]
+        )
+    )
+    cand_achievements = list(await session.scalars(ach_stmt))
+
+    matched_ach_tuples: list[tuple[LabAchievement, str, int]] = []
+    for ach in cand_achievements:
+        classified = classify_achievement_for_person(ach, target_norm)
+        if classified is not None:
+            matched_ach_tuples.append((ach, classified[0], classified[1]))
+
+    matched_ach_tuples.sort(
+        key=lambda item: (
+            0 if item[0].year is not None else 1,
+            -(item[0].year if item[0].year is not None else 0),
+            0 if item[1] == "first_author" else 1,
+            item[2],
+            -item[0].id.int,
+        )
+    )
+    outputs_total = len(matched_ach_tuples)
+    first_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "first_author")
+    co_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "coauthor")
+    outputs_truncated = outputs_total > 200
+    matched_ach_tuples = matched_ach_tuples[:200]
+    serialized_outputs = [
+        _serialize_dossier_achievement(ach, rel_role, pos, match_kind)
+        for ach, rel_role, pos in matched_ach_tuples
+    ]
+
+    person_payload = _serialize_person(person, provenance={})
+    person_payload["can_edit"] = can_edit
+    person_payload["name_ambiguous"] = name_ambiguous
+
+    return {
+        "person": person_payload,
+        "can_edit": can_edit,
+        "name_ambiguous": name_ambiguous,
+        "counts": {
+            "projects_total": projects_total,
+            "projects_as_pi": pi_count,
+            "projects_as_participant": part_count,
+            "outputs_total": outputs_total,
+            "outputs_first_author": first_count,
+            "outputs_coauthor": co_count,
+            "achievements_total": outputs_total,
+            "achievements_first_author": first_count,
+            "achievements_coauthor": co_count,
+        },
+        "projects": serialized_projects,
+        "outputs": serialized_outputs,
+        "achievements": serialized_outputs,
+        "truncated": {
+            "projects": projects_truncated,
+            "outputs": outputs_truncated,
+            "achievements": outputs_truncated,
+        },
+    }
+
+
+def _etag_matches(header_val: str | None, sha256_hex: str) -> bool:
+    if not header_val:
+        return False
+    target = sha256_hex.lower()
+    for raw_tag in header_val.split(","):
+        tag = raw_tag.strip()
+        if tag == "*":
+            return True
+        if tag.startswith("W/"):
+            tag = tag[2:].strip()
+        if tag.strip('"').lower() == target:
+            return True
+    return False
+
+
+@router.get("/lab/people/{person_id}/signature", response_model=None)
+async def download_person_signature(
+    person_id: str,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    user = await _user(session, actor)
+    uid = _parse_person_uuid(person_id)
+    if uid is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    person = await session.scalar(
+        select(LabPerson)
+        .options(undefer(LabPerson.signature_data))
+        .where(LabPerson.id == uid)
+    )
+    if person is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    if (
+        person.signature_data is None
+        or not person.signature_sha256
+        or not person.signature_mime
+    ):
+        return _lab_v22_error(404, "SIGNATURE_NOT_FOUND", "该成员尚未录入电子签名")
+
+    etag = f'"{person.signature_sha256}"'
+    if _etag_matches(request.headers.get("if-none-match"), person.signature_sha256):
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=str(person.id),
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": str(person.id),
+                "sha256": person.signature_sha256,
+                "channel": "single",
+            },
+        )
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "private, max-age=0, must-revalidate",
+            },
+        )
+
+    sig_bytes = bytes(person.signature_data)
+    check = validate_signature_image(sig_bytes)
+    if not check.ok or check.mime is None:
+        return _lab_v22_error(
+            500,
+            "SIGNATURE_CORRUPT_IN_STORAGE",
+            "存储中的电子签名数据异常",
+        )
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab.signature.read",
+        resource_type="lab_person",
+        resource_id=str(person.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "person_id": str(person.id),
+            "sha256": check.sha256,
+            "channel": "single",
+        },
+    )
+
+    ext = MIME_TO_EXT.get(check.mime, "bin")
+    safe_name = sanitize_filename_part(person.name)
+    content_disp = build_rfc5987_content_disposition(
+        f"signature-{person.id}.{ext}",
+        f"{safe_name}_签名.{ext}",
+    )
+    headers = {
+        "Content-Type": check.mime,
+        "Content-Length": str(len(sig_bytes)),
+        "Content-Disposition": content_disp,
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    }
+    return StreamingResponse(
+        iter_bytes_chunks(sig_bytes),
+        media_type=check.mime,
+        headers=headers,
+    )
+
+
+@router.put("/lab/people/{person_id}/signature", response_model=None)
+async def upload_person_signature(
+    person_id: str,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object] | JSONResponse:
+    user = await _user(session, actor)
+    uid = _parse_person_uuid(person_id)
+    if uid is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    person_pre = await session.scalar(
+        select(LabPerson).where(LabPerson.id == uid)
+    )
+    if person_pre is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    if actor.role != "admin" and (
+        person_pre.user_id is None or person_pre.user_id != user.id
+    ):
+        return _lab_v22_error(
+            403,
+            "FORBIDDEN",
+            "仅管理员或本人可上传或替换电子签名",
+        )
+
+    if_match = request.headers.get("if-match")
+    if if_match is not None and if_match.strip():
+        pre_sha = person_pre.signature_sha256 or ""
+        if not pre_sha or not _etag_matches(if_match, pre_sha):
+            return _lab_v22_error(
+                412,
+                "PRECONDITION_FAILED",
+                "电子签名已被其他请求更新，请刷新后重试",
+            )
+
+    max_multipart_bytes = 2_621_440  # 2.5 MiB (§4.3 Content-Length & stream cap)
+    content_length_hdr = request.headers.get("content-length")
+    if content_length_hdr is not None and content_length_hdr.strip():
+        try:
+            if int(content_length_hdr) > max_multipart_bytes:
+                return _lab_v22_error(
+                    413,
+                    "SIGNATURE_TOO_LARGE",
+                    "签名图片大小必须在 1 字节到 2 MiB 之间",
+                )
+        except ValueError:
+            return _lab_v22_error(
+                400,
+                "INVALID_CONTENT_LENGTH",
+                "非法的 Content-Length 请求头",
+            )
+
+    body_chunks: list[bytes] = []
+    total_received = 0
+    async for chunk in request.stream():
+        total_received += len(chunk)
+        if total_received > max_multipart_bytes:
+            return _lab_v22_error(
+                413,
+                "SIGNATURE_TOO_LARGE",
+                "签名图片大小必须在 1 字节到 2 MiB 之间",
+            )
+        body_chunks.append(chunk)
+    request._body = b"".join(body_chunks)
+
+    try:
+        form = await request.form(
+            max_files=1,
+            max_fields=4,
+            max_part_size=2_097_153,
+        )
+    except HTTPException as exc:
+        if "exceeded maximum size" in str(exc.detail).lower() or exc.status_code == 413:
+            return _lab_v22_error(
+                413,
+                "SIGNATURE_TOO_LARGE",
+                "签名图片大小必须在 1 字节到 2 MiB 之间",
+            )
+        return _lab_v22_error(
+            422,
+            "SIGNATURE_FILE_MISSING",
+            "未提供签名图片文件或表单格式非法",
+        )
+
+    try:
+        uploaded = form.get("file")
+        if uploaded is None or isinstance(uploaded, str) or not hasattr(uploaded, "read"):
+            return _lab_v22_error(
+                422,
+                "SIGNATURE_FILE_MISSING",
+                "未提供签名图片文件或文件为空",
+            )
+        raw_bytes = await uploaded.read(2_097_153)
+    finally:
+        await form.close()
+    check = validate_signature_image(raw_bytes)
+    if not check.ok or check.mime is None or check.sha256 is None:
+        err_code = check.error_code or "SIGNATURE_CORRUPT"
+        if err_code == "SIGNATURE_TOO_LARGE":
+            return _lab_v22_error(
+                413,
+                "SIGNATURE_TOO_LARGE",
+                "签名图片大小必须在 1 字节到 2 MiB 之间",
+            )
+        if err_code == "SIGNATURE_REJECTED_FORMAT":
+            return _lab_v22_error(
+                415,
+                "SIGNATURE_REJECTED_FORMAT",
+                "仅支持 PNG、JPEG 或 WebP 格式的电子签名图片",
+            )
+        return _lab_v22_error(
+            422,
+            err_code,
+            "签名图片文件损坏或尺寸不在允许范围内（8×8 至 6000×6000）",
+        )
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    person = await session.scalar(
+        select(LabPerson)
+        .where(LabPerson.id == uid)
+        .options(undefer(LabPerson.signature_data))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if person is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+    if actor.role != "admin" and (person.user_id is None or person.user_id != user.id):
+        return _lab_v22_error(
+            403,
+            "FORBIDDEN",
+            "仅管理员或本人可上传或替换电子签名",
+        )
+    if if_match is not None and if_match.strip():
+        cur_sha = person.signature_sha256 or ""
+        if not cur_sha or not _etag_matches(if_match, cur_sha):
+            return _lab_v22_error(
+                412,
+                "PRECONDITION_FAILED",
+                "电子签名已被其他请求更新，请刷新后重试",
+            )
+
+    now_utc = datetime.now(UTC)
+    person.signature_data = raw_bytes
+    person.signature_mime = check.mime
+    person.signature_sha256 = check.sha256
+    person.signature_updated_at = now_utc
+    person.signature_source = "upload"
+    await session.flush()
+    await session.commit()
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab.signature.upload",
+        resource_type="lab_person",
+        resource_id=str(person.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "person_id": str(person.id),
+            "sha256": check.sha256,
+            "size": check.size,
+            "mime": check.mime,
+            "width": check.width,
+            "height": check.height,
+        },
+    )
+    return {
+        "person_id": str(person.id),
+        "has_signature": True,
+        "signature_mime": check.mime,
+        "signature_sha256": check.sha256,
+        "signature_updated_at": now_utc.isoformat(),
+        "signature_source": "upload",
+        "signature_url": f"/api/v1/lab/people/{person.id}/signature",
+        "width": check.width,
+        "height": check.height,
+        "size": check.size,
+    }
+
+
+@router.delete("/lab/people/{person_id}/signature", response_model=None)
+async def delete_person_signature(
+    person_id: str,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object] | JSONResponse:
+    user = await _user(session, actor)
+    uid = _parse_person_uuid(person_id)
+    if uid is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    person = await session.scalar(
+        select(LabPerson)
+        .options(undefer(LabPerson.signature_data))
+        .where(LabPerson.id == uid)
+        .with_for_update()
+    )
+    if person is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+
+    if actor.role != "admin" and (person.user_id is None or person.user_id != user.id):
+        return _lab_v22_error(
+            403,
+            "FORBIDDEN",
+            "仅管理员或本人可删除电子签名",
+        )
+
+    if_match = request.headers.get("if-match")
+    if if_match is not None and if_match.strip():
+        cur_sha = person.signature_sha256 or ""
+        if not cur_sha or not _etag_matches(if_match, cur_sha):
+            return _lab_v22_error(
+                412,
+                "PRECONDITION_FAILED",
+                "电子签名已被其他请求更新，请刷新后重试",
+            )
+
+    prev_sha = person.signature_sha256
+    person.signature_data = None
+    person.signature_mime = None
+    person.signature_sha256 = None
+    person.signature_updated_at = None
+    person.signature_source = None
+    await session.flush()
+    await session.commit()
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab.signature.delete",
+        resource_type="lab_person",
+        resource_id=str(person.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "person_id": str(person.id),
+            "previous_sha256": prev_sha,
+        },
+    )
+    return {
+        "person_id": str(person.id),
+        "has_signature": False,
+        "signature_mime": None,
+        "signature_sha256": None,
+        "signature_updated_at": None,
+        "signature_source": None,
+        "signature_url": None,
+    }
+
+
+@router.post("/lab/people/signatures:zip", response_model=None)
+async def download_people_signatures_zip(
+    body: SignaturesZipBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    user = await _user(session, actor)
+    try:
+        (
+            zip_bytes,
+            included_count,
+            missing_count,
+            included_signatures,
+        ) = await prepare_signatures_zip(
+            session,
+            raw_person_ids=body.person_ids,
+            filename_template=body.filename_template,
+        )
+    except BasketError as exc:
+        return _lab_v22_error(exc.status, exc.code, exc.message)
+
+    for sig_item in included_signatures:
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=sig_item["person_id"],
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": sig_item["person_id"],
+                "sha256": sig_item["sha256"],
+                "channel": "zip",
+            },
+        )
+
+    content_disp = build_rfc5987_content_disposition(
+        "lab-signatures.zip",
+        "项目组签名.zip",
+    )
+    headers = {
+        "Content-Disposition": content_disp,
+        "Cache-Control": "no-store",
+        "X-Signature-Count-Included": str(included_count),
+        "X-Signature-Count-Missing": str(missing_count),
+    }
+    return StreamingResponse(
+        iter_bytes_chunks(zip_bytes),
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
+@router.post("/lab/export:selected", response_model=None)
+async def export_selected_basket_docx(
+    body: ExportSelectedBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    user = await _user(session, actor)
+    raw_items = [{"entity": it.entity, "id": it.id} for it in body.items]
+    opts = body.options
+    try:
+        docx_bytes, warnings_count, embedded_signatures = await build_selected_docx(
+            session,
+            title=body.title,
+            raw_items=raw_items,
+            style=opts.style,
+            numbering=opts.numbering,
+            group_by_entity=opts.group_by_entity,
+            include_person_bio=opts.include_person_bio,
+            include_support_note=opts.include_support_note,
+            include_signatures_annex=opts.include_signatures_annex,
+        )
+    except BasketError as exc:
+        return _lab_v22_error(
+            exc.status,
+            exc.code,
+            exc.message,
+            missing=exc.missing,
+        )
+
+    for sig_item in embedded_signatures:
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=sig_item["person_id"],
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": sig_item["person_id"],
+                "sha256": sig_item["sha256"],
+                "channel": "docx_export",
+            },
+        )
+
+    doc_title_safe = sanitize_filename_part(body.title or "课题申报素材汇编")
+    content_disp = build_rfc5987_content_disposition(
+        "proposal-materials.docx",
+        f"{doc_title_safe}.docx",
+    )
+    headers = {
+        "Content-Disposition": content_disp,
+        "Cache-Control": "no-store",
+        "X-Export-Warnings-Count": str(warnings_count),
+    }
+    return StreamingResponse(
+        iter_bytes_chunks(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=headers,
+    )
+

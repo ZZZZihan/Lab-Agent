@@ -14,9 +14,14 @@ from app.importer.people import assign_people_identities, normalize_person_name
 from app.importer.pii import assert_no_pii, is_pii_id_or_phone, scrub_free_text
 from app.importer.reader import (
     DocxValidationError,
+    extract_body_blocks_and_images,
     extract_table_grid,
+    iter_document_tables,
     normalize_label,
     validate_and_load_docx,
+)
+from app.importer.signature import (
+    bind_proposal_signatures,
 )
 from app.models import LabPerson, User
 
@@ -118,7 +123,7 @@ def parse_proposal_docx(
         max_uncompressed_mb=max_uncompressed_mb,
     )
     sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
-    grids = [extract_table_grid(tbl) for tbl in doc.tables]
+    grids = [extract_table_grid(tbl) for tbl in iter_document_tables(doc)]
 
     pii_dropped = 0
     warnings: list[dict[str, object]] = []
@@ -165,6 +170,15 @@ def parse_proposal_docx(
         existing_people=existing_people,
     )
 
+    body_blocks, embedded_images = extract_body_blocks_and_images(raw_bytes)
+    signatures, sig_blobs, sig_warnings = bind_proposal_signatures(
+        people=people,
+        grids=grids,
+        embedded_images=embedded_images,
+        body_blocks=body_blocks,
+    )
+    warnings.extend(sig_warnings)
+
     facilities, fac_pii = _extract_facilities(grids)
     pii_dropped += fac_pii
 
@@ -190,6 +204,8 @@ def parse_proposal_docx(
         "cover": cover,
         "relationship_note": relationship_note,
         "people": people,
+        "signatures": signatures,
+        "_signature_blobs": sig_blobs,
         "achievements": achievements,
         "projects": projects,
         "facilities": facilities,
@@ -201,6 +217,7 @@ def parse_proposal_docx(
 
     stats: dict[str, object] = {
         "people": len(people),
+        "signatures": len(signatures),
         "achievements": len(achievements),
         "projects": len(projects),
         "facilities": len(facilities),
@@ -511,7 +528,7 @@ def _extract_people(
     pii_count = 0
     people: list[dict[str, object]] = []
 
-    for grid in grids:
+    for tbl_idx, grid in enumerate(grids):
         header_row_idx: int | None = None
         for r_idx, row in enumerate(grid):
             if _is_member_header_row(row):
@@ -528,6 +545,7 @@ def _extract_people(
 
         # 1) Parse Applicant KV rows before header_row_idx
         kv_end = header_row_idx if header_row_idx is not None else len(grid)
+        applicant_row_idx = 0
         applicant: dict[str, object] = {
             "name": "",
             "title": None,
@@ -543,7 +561,7 @@ def _extract_people(
             "warnings": [],
         }
         applicant_warnings: list[str] = []
-        for row in grid[:kv_end]:
+        for r_idx, row in enumerate(grid[:kv_end]):
             i = 0
             while i < len(row):
                 lbl = normalize_label(row[i]).lower()
@@ -569,6 +587,7 @@ def _extract_people(
                     if val:
                         if target == "name":
                             applicant["name"] = normalize_person_name(val)
+                            applicant_row_idx = r_idx
                         else:
                             applicant[target] = val
                     i += 2
@@ -578,6 +597,7 @@ def _extract_people(
                     i += 1
 
         applicant["warnings"] = applicant_warnings
+        applicant["source"] = {"table_index": tbl_idx, "row_index": applicant_row_idx}
         if applicant.get("name"):
             people.append(applicant)
 
@@ -590,7 +610,8 @@ def _extract_people(
                 if lbl in MEMBER_HEADER_MAP:
                     col_map[c_idx] = MEMBER_HEADER_MAP[lbl]
 
-            for row in grid[header_row_idx + 1 :]:
+            for r_idx in range(header_row_idx + 1, len(grid)):
+                row = grid[r_idx]
                 joined_row = " ".join(row)
                 if any(kw in joined_row for kw in SKIP_ROW_KEYWORDS):
                     continue
@@ -607,6 +628,12 @@ def _extract_people(
                     "project_role": "member",
                     "bio": None,
                     "warnings": [],
+                    "source": {"table_index": tbl_idx, "row_index": r_idx},
+                    "member_source": {
+                        "table_index": tbl_idx,
+                        "row_index": r_idx,
+                        "header_row_index": header_row_idx,
+                    },
                 }
                 mem_warnings: list[str] = []
                 # Handle possible shift if row has fewer cells than header_row due to missing leading merged group cell
@@ -705,6 +732,8 @@ def _dedup_people(people: list[dict[str, object]]) -> list[dict[str, object]]:
                 "student_id",
                 "birth_year",
                 "bio",
+                "source",
+                "member_source",
             ):
                 if not matched_existing.get(field) and person.get(field):
                     matched_existing[field] = person[field]
