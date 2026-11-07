@@ -99,6 +99,12 @@ function buildInitialOverrides(
   return init;
 }
 
+let retainedUnsavedCredentialState: {
+  importJob: ImportJobResponse | null;
+  provisionResult: ProvisionResult;
+  includePassword: boolean;
+} | null = null;
+
 export default function AdminImportsPage() {
   const { t } = useI18n();
   const [me, setMe] = useState<User | null>(null);
@@ -108,24 +114,34 @@ export default function AdminImportsPage() {
   const [infoMessage, setInfoMessage] = useState("");
 
   // Upload & Provision Wizard state
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
+  const [wizardOpen, setWizardOpen] = useState(() =>
+    Boolean(retainedUnsavedCredentialState),
+  );
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(() =>
+    retainedUnsavedCredentialState ? 3 : 1,
+  );
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadAsOf, setUploadAsOf] = useState("");
   const [parsing, setParsing] = useState(false);
   const [wizardError, setWizardError] = useState("");
   const [wizardNotice, setWizardNotice] = useState("");
 
-  const [importJob, setImportJob] = useState<ImportJobResponse | null>(null);
+  const [importJob, setImportJob] = useState<ImportJobResponse | null>(
+    () => retainedUnsavedCredentialState?.importJob ?? null,
+  );
   const [provisionAsOf, setProvisionAsOf] = useState("");
   const [initialPassword, setInitialPassword] = useState(DEFAULT_INITIAL_PASSWORD);
-  const [includePassword, setIncludePassword] = useState(true);
+  const [includePassword, setIncludePassword] = useState(
+    () => retainedUnsavedCredentialState?.includePassword ?? true,
+  );
   const [overrides, setOverrides] = useState<Record<string, PersonOverrideRow>>({});
   const [savingPreview, setSavingPreview] = useState(false);
   const [reparsing, setReparsing] = useState(false);
   const [reparseMode, setReparseMode] = useState<"fsm" | "llm">("fsm");
   const [provisioning, setProvisioning] = useState(false);
-  const [provisionResult, setProvisionResult] = useState<ProvisionResult | null>(null);
+  const [provisionResult, setProvisionResult] = useState<ProvisionResult | null>(
+    () => retainedUnsavedCredentialState?.provisionResult ?? null,
+  );
   const [rosterCopied, setRosterCopied] = useState(false);
   const [hasSavedCredentials, setHasSavedCredentials] = useState(false);
   const [showAssetDetails, setShowAssetDetails] = useState(false);
@@ -190,15 +206,57 @@ export default function AdminImportsPage() {
   );
 
   useEffect(() => {
+    if (hasUnsavedPlaintextRoster && provisionResult) {
+      retainedUnsavedCredentialState = {
+        importJob,
+        provisionResult,
+        includePassword,
+      };
+    } else if (hasSavedCredentials) {
+      retainedUnsavedCredentialState = null;
+    }
+  }, [
+    hasUnsavedPlaintextRoster,
+    hasSavedCredentials,
+    importJob,
+    provisionResult,
+    includePassword,
+  ]);
+
+  useEffect(() => {
     if (!hasUnsavedPlaintextRoster) return;
     function handleBeforeUnload(e: BeforeUnloadEvent) {
       e.preventDefault();
       e.returnValue = t.credentialLeaveConfirm;
       return t.credentialLeaveConfirm;
     }
+    function handleDocClick(e: MouseEvent) {
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || anchor.hasAttribute("download")) return;
+      const href = anchor.getAttribute("href");
+      if (!href || href.startsWith("#") || href.startsWith("blob:")) return;
+      if (!window.confirm(t.credentialLeaveConfirm)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      retainedUnsavedCredentialState = null;
+    }
+    function handlePopState() {
+      if (!window.confirm(t.credentialLeaveConfirm)) {
+        window.history.pushState(null, "", window.location.href);
+        return;
+      }
+      retainedUnsavedCredentialState = null;
+    }
     window.addEventListener("beforeunload", handleBeforeUnload);
+    document.addEventListener("click", handleDocClick, true);
+    window.addEventListener("popstate", handlePopState);
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      document.removeEventListener("click", handleDocClick, true);
+      window.removeEventListener("popstate", handlePopState);
     };
   }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
 
@@ -213,6 +271,7 @@ export default function AdminImportsPage() {
       const confirmed = window.confirm(t.credentialLeaveConfirm);
       if (!confirmed) return;
     }
+    retainedUnsavedCredentialState = null;
     setWizardOpen(false);
     setProvisionResult(null);
   }
@@ -425,6 +484,13 @@ export default function AdminImportsPage() {
           }),
         },
       );
+      if (Boolean(res.initial_password || includePassword)) {
+        retainedUnsavedCredentialState = {
+          importJob,
+          provisionResult: res,
+          includePassword,
+        };
+      }
       setProvisionResult(res);
       setHasSavedCredentials(false);
       setWizardStep(3);
@@ -447,6 +513,7 @@ export default function AdminImportsPage() {
     a.download = `roster-${provisionResult.job_id}-${provisionResult.as_of_time.replace(/-/g, "")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    retainedUnsavedCredentialState = null;
     setHasSavedCredentials(true);
   }
 
@@ -1226,6 +1293,7 @@ export default function AdminImportsPage() {
                         await navigator.clipboard.writeText(
                           provisionResult.roster_text,
                         );
+                        retainedUnsavedCredentialState = null;
                         setRosterCopied(true);
                         setHasSavedCredentials(true);
                         setTimeout(() => setRosterCopied(false), 2000);

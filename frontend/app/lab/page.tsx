@@ -255,7 +255,7 @@ export default function LabAssetsPage() {
       if (onlyOngoingProjects && j.status !== "ongoing") return false;
       if (onlyRecentProjects) {
         const py = extractProjectYear(j);
-        if (py !== null && py < minYear) return false;
+        if (py === null || py < minYear) return false;
       }
       if (!q) return true;
       return (
