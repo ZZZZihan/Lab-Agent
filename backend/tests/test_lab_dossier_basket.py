@@ -108,13 +108,16 @@ def make_webp_vp8l_bytes(width: int = 64, height: int = 32) -> bytes:
 
 
 def make_webp_vp8x_bytes(width: int = 100, height: int = 50) -> bytes:
-    """Create a valid minimal extended VP8X WebP image."""
+    """Create a valid minimal extended VP8X WebP image with an embedded VP8L bitstream chunk."""
     w_minus_1 = (width - 1).to_bytes(3, "little")
     h_minus_1 = (height - 1).to_bytes(3, "little")
-    payload = b"\x00\x00\x00\x00" + w_minus_1 + h_minus_1
-    chunk = b"VP8X" + struct.pack("<I", len(payload)) + payload
-    riff_size = 4 + len(chunk)
-    return b"RIFF" + struct.pack("<I", riff_size) + b"WEBP" + chunk
+    vp8x_payload = b"\x00\x00\x00\x00" + w_minus_1 + h_minus_1
+    vp8x_chunk = b"VP8X" + struct.pack("<I", len(vp8x_payload)) + vp8x_payload
+    bits = ((width - 1) & 0x3FFF) | (((height - 1) & 0x3FFF) << 14)
+    vp8l_payload = b"\x2f" + struct.pack("<I", bits) + b"\x00\x00\x00"
+    vp8l_chunk = b"VP8L" + struct.pack("<I", len(vp8l_payload)) + vp8l_payload
+    riff_size = 4 + len(vp8x_chunk) + len(vp8l_chunk)
+    return b"RIFF" + struct.pack("<I", riff_size) + b"WEBP" + vp8x_chunk + vp8l_chunk
 
 
 def build_proposal_docx_with_10_signatures(
@@ -503,6 +506,20 @@ def test_signature_validator_formats_and_bounds() -> None:
     assert validate_signature_image(jpg_bytes[:15]).error_code == "SIGNATURE_CORRUPT"
     assert validate_signature_image(jpg_bytes[:-2]).error_code == "SIGNATURE_CORRUPT"
     bad_webp = b"RIFF" + struct.pack("<I", 9999) + b"WEBP" + b"VP8 " + struct.pack("<I", 10) + b"0" * 10
+    vp8x_header_only_webp = (
+        b"RIFF"
+        + struct.pack("<I", 22)
+        + b"WEBP"
+        + b"VP8X"
+        + struct.pack("<I", 10)
+        + b"\x00\x00\x00\x00"
+        + (59).to_bytes(3, "little")
+        + (29).to_bytes(3, "little")
+    )
+    assert (
+        validate_signature_image(vp8x_header_only_webp).error_code
+        == "SIGNATURE_CORRUPT"
+    )
 
     # PII redaction beside ASCII contact labels while preserving 64-char SHA-256 hex hashes
     synth_mob = "138" + "12345678"
@@ -961,6 +978,59 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         wan_after_excl = await session.get(LabPerson, uuid.UUID(wan_id))
         assert wan_after_excl is not None
         assert wan_after_excl.title == "教授"
+
+    # 7) Newly merged unlinked person who later receives a manual signature upload is preserved on revert
+    async with maker() as session:
+        db_job_b3 = await session.get(ImportJob, uuid.UUID(job_b_id))
+        assert db_job_b3 is not None
+        prev_b3 = dict(db_job_b3.preview or {})
+        ppl_b3 = [dict(p) for p in (prev_b3.get("people") or [])]
+        ppl_b3.append(
+            {
+                "key": "p_new_unlinked",
+                "temp_id": "p_new_unlinked",
+                "name": "赵六",
+                "title": "助理研究员",
+                "affiliation": "天津工业大学",
+                "project_role": "member",
+                "tier": "T2",
+            }
+        )
+        prev_b3["people"] = ppl_b3
+        db_job_b3.preview = prev_b3
+        await session.commit()
+
+    r_merge_new = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": [], "exclude_keys": ["p2"]},
+    )
+    assert r_merge_new.status_code == 200, r_merge_new.text
+    async with maker() as session:
+        zhao_p = await session.scalar(select(LabPerson).where(LabPerson.name == "赵六"))
+        assert zhao_p is not None
+        assert zhao_p.user_id is None
+        zhao_id = str(zhao_p.id)
+
+    zhao_manual_png = make_png_bytes(88, 38, fill_byte=0x66)
+    zhao_manual_sha = hashlib.sha256(zhao_manual_png).hexdigest()
+    r_put_zhao = await client.put(
+        f"/api/v1/lab/people/{zhao_id}/signature",
+        headers=admin_headers,
+        files={"file": ("zhao.png", zhao_manual_png, "image/png")},
+    )
+    assert r_put_zhao.status_code == 200, r_put_zhao.text
+
+    r_rev_new = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_new.status_code == 200, r_rev_new.text
+    async with maker() as session:
+        zhao_after_rev = await session.get(LabPerson, uuid.UUID(zhao_id))
+        assert zhao_after_rev is not None
+        assert zhao_after_rev.signature_source == "upload"
+        assert zhao_after_rev.signature_sha256 == zhao_manual_sha
 
 
 # ---------------------------------------------------------------------------

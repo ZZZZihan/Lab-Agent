@@ -2688,13 +2688,7 @@ async def revert_import_merge(
         prior_affiliation = getattr(ent, "affiliation", None)
         prior_email = getattr(ent, "email", None)
         if ent.source_import_id == job.id and not remaining_live:
-            if etype == "person" and ent.user_id is not None:
-                # Spec §10.6: Never delete LabPerson linked to a User account!
-                for field in MANAGED_FIELDS[etype]:
-                    cur_val = get_entity_json_value(etype, ent, field)
-                    if not _is_blank(cur_val) and field != "project_role":
-                        set_entity_field_from_json(etype, ent, field, None)
-                        reverted_fields += 1
+            if etype == "person":
                 await session.refresh(
                     ent,
                     attribute_names=[
@@ -2705,6 +2699,15 @@ async def revert_import_merge(
                         "signature_source",
                     ],
                 )
+            if etype == "person" and (
+                ent.user_id is not None or ent.signature_source == "upload"
+            ):
+                # Spec §10.6 & v2.2: Never delete LabPerson linked to a User account or holding a manual signature upload!
+                for field in MANAGED_FIELDS[etype]:
+                    cur_val = get_entity_json_value(etype, ent, field)
+                    if not _is_blank(cur_val) and field not in ("name", "project_role"):
+                        set_entity_field_from_json(etype, ent, field, None)
+                        reverted_fields += 1
                 if (
                     ent.signature_source == "docx_import"
                     and ent.signature_sha256 is not None

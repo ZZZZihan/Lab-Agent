@@ -152,6 +152,34 @@ def _parse_jpeg_dimensions(raw: bytes) -> tuple[int, int] | None:
     return width, height
 
 
+def _has_valid_webp_bitstream(chunks_buf: bytes) -> bool:
+    c_pos = 0
+    found = False
+    while c_pos < len(chunks_buf):
+        if c_pos + 8 > len(chunks_buf):
+            return False
+        fcc = chunks_buf[c_pos : c_pos + 4]
+        csz = int.from_bytes(chunks_buf[c_pos + 4 : c_pos + 8], "little")
+        data_end = c_pos + 8 + csz
+        if data_end > len(chunks_buf):
+            return False
+        cpayload = chunks_buf[c_pos + 8 : data_end]
+        if fcc == b"VP8 ":
+            if len(cpayload) < 10 or cpayload[3:6] != b"\x9d\x01\x2a":
+                return False
+            found = True
+        elif fcc == b"VP8L":
+            if len(cpayload) < 5 or cpayload[0] != 0x2F:
+                return False
+            found = True
+        elif fcc == b"ANMF":
+            if len(cpayload) <= 16 or not _has_valid_webp_bitstream(cpayload[16:]):
+                return False
+            found = True
+        c_pos = data_end + (csz & 1)
+    return found
+
+
 def _parse_webp_dimensions(raw: bytes) -> tuple[int, int] | None:
     if len(raw) < 20:
         return None
@@ -179,6 +207,12 @@ def _parse_webp_dimensions(raw: bytes) -> tuple[int, int] | None:
             return None
         width = int.from_bytes(payload[4:7], "little") + 1
         height = int.from_bytes(payload[7:10], "little") + 1
+        riff_end = 8 + riff_size
+        next_chunk_pos = 20 + chunk_size + (chunk_size & 1)
+        if next_chunk_pos >= riff_end or not _has_valid_webp_bitstream(
+            raw[next_chunk_pos:riff_end]
+        ):
+            return None
     else:
         return None
     if width <= 0 or height <= 0:
