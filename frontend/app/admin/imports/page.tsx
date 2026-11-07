@@ -677,6 +677,8 @@ export default function AdminImportsPage() {
   async function handleRefreshMergePreview() {
     if (!mergeTargetJob) return;
     setMergeError("");
+    setMergePreview(null);
+    setMergeDecisions({});
     setMergeLoading(true);
     try {
       const preview = await previewImportMerge(
@@ -684,7 +686,9 @@ export default function AdminImportsPage() {
         mergeAsOfInput.trim() || undefined,
       );
       setMergePreview(preview);
-      setMergeDecisions({});
+      if (preview.as_of_time) {
+        setMergeAsOfInput(preview.as_of_time);
+      }
     } catch (err) {
       setMergeError(err instanceof ApiError ? err.message : t.error);
     } finally {
@@ -709,6 +713,16 @@ export default function AdminImportsPage() {
 
   async function handleExecuteMerge() {
     if (!mergeTargetJob || !mergePreview) return;
+    if (
+      mergeAsOfInput.trim() &&
+      mergePreview.as_of_time &&
+      mergeAsOfInput.trim() !== mergePreview.as_of_time
+    ) {
+      setMergeError(
+        "已修改基准日期，请点击「重新比对预览」加载最新差异后再确认合并。",
+      );
+      return;
+    }
     if (unresolvedConflictCount > 0) {
       setMergeError(`${t.unresolvedConflictsHint}（剩余 ${unresolvedConflictCount} 项）`);
       return;
@@ -722,25 +736,20 @@ export default function AdminImportsPage() {
       const res = await executeImportMerge(
         mergeTargetJob.job_id || mergeTargetJob.id,
         {
-          as_of_time: mergeAsOfInput.trim() || mergePreview.as_of_time || undefined,
+          as_of_time: mergePreview.as_of_time || undefined,
           decisions: decisionsList,
         },
       );
       setMergeModalOpen(false);
+      const st = res.stats || {};
       const sum = res.summary || {};
-      const addedN = res.added_count ?? sum.added ?? mergePreview.summary.added;
+      const addedN = st.added_entities ?? res.added_count ?? sum.added ?? 0;
       const updatedN =
-        res.updated_count ?? sum.updated ?? mergePreview.summary.updated;
-      const fillN =
-        res.fill_blank_count ??
-        sum.fill_blank ??
-        mergePreview.summary.fill_blank;
-      const forcedN =
-        res.forced_count ??
-        sum.forced ??
-        decisionsList.filter((d) => d.action === "force_adopt").length;
+        st.updated_fields ?? res.updated_count ?? sum.updated ?? 0;
+      const keptN = st.kept_fields ?? 0;
+      const forcedN = st.forced_fields ?? res.forced_count ?? sum.forced ?? 0;
       setInfoMessage(
-        `已完成版本合并（${mergeTargetJob.original_filename}）：新增 ${addedN} 项、演进更新 ${updatedN} 项、空白补齐 ${fillN} 项、人工强制采用 ${forcedN} 项。`,
+        `已完成版本合并（${mergeTargetJob.original_filename}）：新增实体 ${addedN} 项、更新字段 ${updatedN} 处（含人工强制采用 ${forcedN} 处）、保留原值 ${keptN} 处。`,
       );
       await loadJobs();
     } catch (err) {
@@ -1196,7 +1205,11 @@ export default function AdminImportsPage() {
                       id="merge-as-of"
                       type="date"
                       value={mergeAsOfInput}
-                      onChange={(e) => setMergeAsOfInput(e.target.value)}
+                      onChange={(e) => {
+                        setMergeAsOfInput(e.target.value);
+                        setMergePreview(null);
+                        setMergeDecisions({});
+                      }}
                       className="h-8 w-44 font-mono text-xs"
                     />
                   </div>
@@ -1519,6 +1532,10 @@ export default function AdminImportsPage() {
                           : t.confirmExecuteMerge}
                     </Button>
                   </DialogFooter>
+                </div>
+              ) : !mergeError ? (
+                <div className="rounded-md border border-border bg-card p-6 text-center text-sm text-muted-foreground">
+                  已修改基准日期，请点击「重新比对预览」加载最新差异后再确认合并。
                 </div>
               ) : null}
             </div>

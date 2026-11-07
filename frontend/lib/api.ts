@@ -480,13 +480,19 @@ export type MergeExecuteResponse = {
   job_id: string;
   status: string;
   as_of_time?: string;
+  rag_document_id?: string | null;
+  rag_doc_key?: string;
+  stats?: {
+    added_entities?: number;
+    updated_fields?: number;
+    kept_fields?: number;
+    forced_fields?: number;
+    rag_doc_key?: string;
+  };
   added_count?: number;
   updated_count?: number;
   fill_blank_count?: number;
   forced_count?: number;
-  ignored_regression_count?: number;
-  ignored_manual_count?: number;
-  rag_doc_key?: string;
   summary?: Record<string, number>;
 };
 
