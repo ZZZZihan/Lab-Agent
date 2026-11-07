@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
@@ -222,6 +222,7 @@ export default function AdminImportsPage() {
   >({});
   const [executingMerge, setExecutingMerge] = useState(false);
   const [revertingJobId, setRevertingJobId] = useState<string | null>(null);
+  const mergePreviewReqSeqRef = useRef(0);
 
   const loadJobs = useCallback(async () => {
     setError("");
@@ -648,6 +649,7 @@ export default function AdminImportsPage() {
   }
 
   async function handleOpenMergePreview(job: ImportJobSummary) {
+    const reqSeq = ++mergePreviewReqSeqRef.current;
     setError("");
     setInfoMessage("");
     setMergeError("");
@@ -663,19 +665,24 @@ export default function AdminImportsPage() {
         job.job_id || job.id,
         job.as_of_time || undefined,
       );
+      if (mergePreviewReqSeqRef.current !== reqSeq) return;
       setMergePreview(preview);
       if (preview.as_of_time) {
         setMergeAsOfInput(preview.as_of_time);
       }
     } catch (err) {
+      if (mergePreviewReqSeqRef.current !== reqSeq) return;
       setMergeError(err instanceof ApiError ? err.message : t.error);
     } finally {
-      setMergeLoading(false);
+      if (mergePreviewReqSeqRef.current === reqSeq) {
+        setMergeLoading(false);
+      }
     }
   }
 
   async function handleRefreshMergePreview() {
     if (!mergeTargetJob) return;
+    const reqSeq = ++mergePreviewReqSeqRef.current;
     setMergeError("");
     setMergePreview(null);
     setMergeDecisions({});
@@ -685,14 +692,18 @@ export default function AdminImportsPage() {
         mergeTargetJob.job_id || mergeTargetJob.id,
         mergeAsOfInput.trim() || undefined,
       );
+      if (mergePreviewReqSeqRef.current !== reqSeq) return;
       setMergePreview(preview);
       if (preview.as_of_time) {
         setMergeAsOfInput(preview.as_of_time);
       }
     } catch (err) {
+      if (mergePreviewReqSeqRef.current !== reqSeq) return;
       setMergeError(err instanceof ApiError ? err.message : t.error);
     } finally {
-      setMergeLoading(false);
+      if (mergePreviewReqSeqRef.current === reqSeq) {
+        setMergeLoading(false);
+      }
     }
   }
 
@@ -713,6 +724,13 @@ export default function AdminImportsPage() {
 
   async function handleExecuteMerge() {
     if (!mergeTargetJob || !mergePreview) return;
+    const targetJobId = mergeTargetJob.job_id || mergeTargetJob.id;
+    if (mergePreview.job_id && mergePreview.job_id !== targetJobId) {
+      setMergeError(
+        "当前预览与目标导入任务不匹配，请点击「重新比对预览」后再确认合并。",
+      );
+      return;
+    }
     if (
       mergeAsOfInput.trim() &&
       mergePreview.as_of_time &&
@@ -733,13 +751,10 @@ export default function AdminImportsPage() {
       const decisionsList: MergeDecision[] = Object.entries(mergeDecisions).map(
         ([change_key, action]) => ({ change_key, action }),
       );
-      const res = await executeImportMerge(
-        mergeTargetJob.job_id || mergeTargetJob.id,
-        {
-          as_of_time: mergePreview.as_of_time || undefined,
-          decisions: decisionsList,
-        },
-      );
+      const res = await executeImportMerge(targetJobId, {
+        as_of_time: mergePreview.as_of_time || undefined,
+        decisions: decisionsList,
+      });
       setMergeModalOpen(false);
       const st = res.stats || {};
       const sum = res.summary || {};
@@ -1185,7 +1200,16 @@ export default function AdminImportsPage() {
         )}
 
         {/* Phase 2 Multi-Proposal Merge Preview & Conflict Arbitration Modal */}
-        <Dialog open={mergeModalOpen} onOpenChange={setMergeModalOpen}>
+        <Dialog
+          open={mergeModalOpen}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              mergePreviewReqSeqRef.current += 1;
+              setMergeLoading(false);
+            }
+            setMergeModalOpen(nextOpen);
+          }}
+        >
           <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>
@@ -1206,6 +1230,9 @@ export default function AdminImportsPage() {
                       type="date"
                       value={mergeAsOfInput}
                       onChange={(e) => {
+                        mergePreviewReqSeqRef.current += 1;
+                        setMergeLoading(false);
+                        setMergeError("");
                         setMergeAsOfInput(e.target.value);
                         setMergePreview(null);
                         setMergeDecisions({});
@@ -1512,7 +1539,11 @@ export default function AdminImportsPage() {
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() => setMergeModalOpen(false)}
+                      onClick={() => {
+                        mergePreviewReqSeqRef.current += 1;
+                        setMergeLoading(false);
+                        setMergeModalOpen(false);
+                      }}
                     >
                       {t.cancel}
                     </Button>
@@ -1521,7 +1552,12 @@ export default function AdminImportsPage() {
                       disabled={
                         executingMerge ||
                         mergeLoading ||
-                        unresolvedConflictCount > 0
+                        unresolvedConflictCount > 0 ||
+                        Boolean(
+                          mergePreview?.job_id &&
+                            mergePreview.job_id !==
+                              (mergeTargetJob?.job_id || mergeTargetJob?.id),
+                        )
                       }
                       onClick={handleExecuteMerge}
                     >
