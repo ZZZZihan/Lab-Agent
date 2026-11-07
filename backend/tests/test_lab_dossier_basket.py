@@ -1366,6 +1366,37 @@ async def test_signature_crud_headers_concurrency_and_deferred_sql(
     assert r_big.status_code == 413
     assert r_big.json()["detail"]["code"] == "SIGNATURE_TOO_LARGE"
 
+    r_over_multipart = await client.put(
+        f"/api/v1/lab/people/{person_id}/signature",
+        headers=admin_headers,
+        files={"file": ("huge.png", b"\x89PNG\r\n\x1a\n" + b"0" * 3_000_000, "image/png")},
+    )
+    assert r_over_multipart.status_code == 413
+    assert r_over_multipart.json()["detail"]["code"] == "SIGNATURE_TOO_LARGE"
+
+    async def _chunked_oversized_stream():
+        for _ in range(30):
+            yield b"x" * 100_000
+
+    r_over_stream = await client.put(
+        f"/api/v1/lab/people/{person_id}/signature",
+        headers={
+            **admin_headers,
+            "Content-Type": "multipart/form-data; boundary=---bound",
+        },
+        content=_chunked_oversized_stream(),
+    )
+    assert r_over_stream.status_code == 413
+    assert r_over_stream.json()["detail"]["code"] == "SIGNATURE_TOO_LARGE"
+
+    r_missing_file = await client.put(
+        f"/api/v1/lab/people/{person_id}/signature",
+        headers=admin_headers,
+        data={"other_field": "no_file"},
+    )
+    assert r_missing_file.status_code == 422
+    assert r_missing_file.json()["detail"]["code"] == "SIGNATURE_FILE_MISSING"
+
     r_corrupt = await client.put(
         f"/api/v1/lab/people/{person_id}/signature",
         headers=admin_headers,

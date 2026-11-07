@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
+from starlette.exceptions import HTTPException
 
 from app.audit import write_audit
 from app.auth import Actor
@@ -3009,7 +3010,6 @@ async def upload_person_signature(
     request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    file: Annotated[UploadFile | None, File()] = None,
 ) -> dict[str, object] | JSONResponse:
     user = await _user(session, actor)
     uid = _parse_person_uuid(person_id)
@@ -3043,14 +3043,66 @@ async def upload_person_signature(
                 "电子签名已被其他请求更新，请刷新后重试",
             )
 
-    if file is None:
+    max_multipart_bytes = 2_621_440  # 2.5 MiB (§4.3 Content-Length & stream cap)
+    content_length_hdr = request.headers.get("content-length")
+    if content_length_hdr is not None and content_length_hdr.strip():
+        try:
+            if int(content_length_hdr) > max_multipart_bytes:
+                return _lab_v22_error(
+                    413,
+                    "SIGNATURE_TOO_LARGE",
+                    "签名图片大小必须在 1 字节到 2 MiB 之间",
+                )
+        except ValueError:
+            return _lab_v22_error(
+                400,
+                "INVALID_CONTENT_LENGTH",
+                "非法的 Content-Length 请求头",
+            )
+
+    body_chunks: list[bytes] = []
+    total_received = 0
+    async for chunk in request.stream():
+        total_received += len(chunk)
+        if total_received > max_multipart_bytes:
+            return _lab_v22_error(
+                413,
+                "SIGNATURE_TOO_LARGE",
+                "签名图片大小必须在 1 字节到 2 MiB 之间",
+            )
+        body_chunks.append(chunk)
+    request._body = b"".join(body_chunks)
+
+    try:
+        form = await request.form(
+            max_files=1,
+            max_fields=4,
+            max_part_size=2_097_153,
+        )
+    except HTTPException as exc:
+        if "exceeded maximum size" in str(exc.detail).lower() or exc.status_code == 413:
+            return _lab_v22_error(
+                413,
+                "SIGNATURE_TOO_LARGE",
+                "签名图片大小必须在 1 字节到 2 MiB 之间",
+            )
         return _lab_v22_error(
-            413,
-            "SIGNATURE_TOO_LARGE",
-            "未提供签名图片文件或文件为空",
+            422,
+            "SIGNATURE_FILE_MISSING",
+            "未提供签名图片文件或表单格式非法",
         )
 
-    raw_bytes = await file.read(2_097_153)
+    try:
+        uploaded = form.get("file")
+        if uploaded is None or isinstance(uploaded, str) or not hasattr(uploaded, "read"):
+            return _lab_v22_error(
+                422,
+                "SIGNATURE_FILE_MISSING",
+                "未提供签名图片文件或文件为空",
+            )
+        raw_bytes = await uploaded.read(2_097_153)
+    finally:
+        await form.close()
     check = validate_signature_image(raw_bytes)
     if not check.ok or check.mime is None or check.sha256 is None:
         err_code = check.error_code or "SIGNATURE_CORRUPT"
