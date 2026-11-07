@@ -183,14 +183,21 @@ def _extract_element_lines_text(elem: Any) -> str:
         if elem.tag == f"{{{W_NS}}}p"
         else list(elem.iter(f"{{{W_NS}}}p"))
     )
+    def _walk_p(node: Any, out: list[str]) -> None:
+        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
+        if local_name == "Fallback":
+            return
+        if node.tag == f"{{{W_NS}}}t":
+            out.append(node.text or "")
+        elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
+            out.append("\n")
+        for child in node:
+            _walk_p(child, out)
+
     lines: list[str] = []
     for p in paragraphs:
         chunks: list[str] = []
-        for node in p.iter():
-            if node.tag == f"{{{W_NS}}}t":
-                chunks.append(node.text or "")
-            elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
-                chunks.append("\n")
+        _walk_p(p, chunks)
         norm_p = normalize_cell_text("".join(chunks))
         if norm_p:
             lines.append(norm_p)
@@ -200,11 +207,30 @@ def _extract_element_lines_text(elem: Any) -> str:
 def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
     """Extract embedded image relationship IDs (`a:blip/@r:embed` and `v:imagedata/@r:id`).
 
-    Explicitly ignores external links (`a:blip/@r:link`).
+    Explicitly ignores external links (`a:blip/@r:link`) and selects at most one branch
+    of `<mc:AlternateContent>` (`mc:Choice` preferred over `mc:Fallback`).
     """
     rel_ids: list[str] = []
-    for node in elem.iter():
+
+    def _walk(node: ET.Element) -> None:
         local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
+        if local_name == "AlternateContent":
+            choices = [
+                ch
+                for ch in node
+                if (ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag) == "Choice"
+            ]
+            fallbacks = [
+                ch
+                for ch in node
+                if (ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag) == "Fallback"
+            ]
+            for branch in (*choices, *fallbacks):
+                branch_ids = _extract_rel_ids_from_element(branch)
+                if branch_ids:
+                    rel_ids.extend(branch_ids)
+                    return
+            return
         if local_name == "blip":
             embed_id = node.get(f"{{{R_NS}}}embed")
             if embed_id:
@@ -213,6 +239,10 @@ def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
             vml_id = node.get(f"{{{R_NS}}}id")
             if vml_id:
                 rel_ids.append(vml_id)
+        for child in node:
+            _walk(child)
+
+    _walk(elem)
     return rel_ids
 
 

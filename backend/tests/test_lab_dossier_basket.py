@@ -6,8 +6,10 @@ import base64
 import csv
 import hashlib
 import io
+import re
 import struct
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from datetime import UTC, date, datetime
@@ -24,7 +26,7 @@ from app.db import get_engine, get_sessionmaker
 from app.importer.matching import normalize_person_name, split_names
 from app.importer.parser import parse_proposal_docx
 from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
-from app.importer.reader import extract_embedded_images
+from app.importer.reader import _extract_rel_ids_from_element, extract_embedded_images
 from app.importer.signature import validate_signature_image
 from app.models import (
     AuditEvent,
@@ -133,6 +135,7 @@ def build_proposal_docx_with_10_signatures(
     pi_sig_in_commitment_table: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
+    wrap_alternate_content: bool = False,
 ) -> bytes:
     """Build a synthetic 10-person proposal .docx with embedded PI + 9 member signatures and body diagrams."""
     doc = docx.Document()
@@ -280,10 +283,14 @@ def build_proposal_docx_with_10_signatures(
     doc.save(buf)
     raw_docx = buf.getvalue()
 
-    if not corrupt_first_member_sig and not inject_external_rel:
+    if (
+        not corrupt_first_member_sig
+        and not inject_external_rel
+        and not wrap_alternate_content
+    ):
         return raw_docx
 
-    # Post-process ZIP entries if testing corrupt media or external relationships
+    # Post-process ZIP entries if testing corrupt media, external relationships, or mc:AlternateContent
     in_zf = zipfile.ZipFile(io.BytesIO(raw_docx), "r")
     out_buf = io.BytesIO()
     with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
@@ -299,6 +306,28 @@ def build_proposal_docx_with_10_signatures(
                     'Target="http://evil.example.com/ leak.png" TargetMode="External"/>'
                 )
                 xml_str = xml_str.replace("</Relationships>", f"{ext_rel}</Relationships>")
+                content = xml_str.encode("utf-8")
+            elif wrap_alternate_content and info.filename == "word/document.xml":
+                xml_str = content.decode("utf-8")
+
+                def _wrap_drawing(match: re.Match[str]) -> str:
+                    drawing_xml = match.group(0)
+                    embed_m = re.search(r'r:embed="(rId[^"]+)"', drawing_xml)
+                    rid = embed_m.group(1) if embed_m else "rId1"
+                    return (
+                        '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+                        'xmlns:v="urn:schemas-microsoft-com:vml">'
+                        f'<mc:Choice Requires="wps">{drawing_xml}</mc:Choice>'
+                        f'<mc:Fallback><w:pict><v:shape><v:imagedata r:id="{rid}"/></v:shape></w:pict></mc:Fallback>'
+                        "</mc:AlternateContent>"
+                    )
+
+                xml_str = re.sub(
+                    r"<w:drawing\b.*?</w:drawing>",
+                    _wrap_drawing,
+                    xml_str,
+                    flags=re.DOTALL,
+                )
                 content = xml_str.encode("utf-8")
             out_zf.writestr(info, content)
     return out_buf.getvalue()
@@ -675,6 +704,32 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
         pi_tbl_parsed["preview"]["signatures"][0]["sha256"]
         == sigs[0]["sha256"]
     )
+
+    # Edge case 3g: mc:AlternateContent with DrawingML in mc:Choice and VML in mc:Fallback selects only one branch
+    alt_elem = ET.fromstring(
+        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:v="urn:schemas-microsoft-com:vml" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<mc:AlternateContent>"
+        '<mc:Choice Requires="wps"><w:drawing><a:blip r:embed="rId1"/></w:drawing></mc:Choice>'
+        '<mc:Fallback><w:pict><v:shape><v:imagedata r:id="rId1"/></v:shape></w:pict></mc:Fallback>'
+        "</mc:AlternateContent>"
+        "</w:r>"
+    )
+    assert _extract_rel_ids_from_element(alt_elem) == ["rId1"]
+
+    alt_docx = build_proposal_docx_with_10_signatures(wrap_alternate_content=True)
+    assert len(extract_embedded_images(alt_docx)) == len(imgs)
+    alt_parsed = parse_proposal_docx("alt.docx", alt_docx)
+    alt_sig_warns = [
+        w
+        for w in alt_parsed["preview"]["warnings"]
+        if str(w.get("code", "")).startswith("SIGNATURE_")
+    ]
+    assert alt_sig_warns == []
+    assert len(alt_parsed["preview"]["signatures"]) == 10
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)
