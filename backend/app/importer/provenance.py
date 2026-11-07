@@ -2565,12 +2565,16 @@ async def execute_merge(
     for p_existing in existing_target_people:
         pid_str = str(p_existing.id)
         snap = pre_sig_snapshots.get(p_existing.id)
-        if pid_str in prior_job_sig_snaps:
-            prior_job_sig_snaps[pid_str]["applied_sha256"] = p_existing.signature_sha256
-        elif snap is not None and (
+        sig_changed_by_this_merge = snap is not None and (
             p_existing.signature_sha256 != snap["signature_sha256"]
             or p_existing.signature_source != snap["signature_source"]
-        ):
+        )
+        if pid_str in prior_job_sig_snaps:
+            if sig_changed_by_this_merge:
+                prior_job_sig_snaps[pid_str]["applied_sha256"] = (
+                    p_existing.signature_sha256
+                )
+        elif sig_changed_by_this_merge and snap is not None:
             prior_job_sig_snaps[pid_str] = {
                 **snap,
                 "applied_sha256": p_existing.signature_sha256,

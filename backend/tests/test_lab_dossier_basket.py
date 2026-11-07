@@ -940,11 +940,26 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert guo_after_b is not None
         assert guo_after_b.signature_sha256 == s2_sha
 
-    # Revert job A first (while S2 is active), then revert job B -> must restore None (S0), not S1
+    # Re-merge job A with p1 in skip_signature_ids -> must not claim B's active S2
+    r_remerge_a_skip = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": [], "skip_signature_ids": ["p1"]},
+    )
+    assert r_remerge_a_skip.status_code == 200, r_remerge_a_skip.text
+
+    # Revert job A first (while S2 is active) -> S2 stays active, and B's snapshot is rebased to None (S0)
     r_rev_a = await client.post(
         f"/api/v1/admin/imports/{job_a_id}/revert", headers=admin_headers
     )
     assert r_rev_a.status_code == 200, r_rev_a.text
+    async with maker() as session:
+        guo_after_rev_a = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_a is not None
+        assert guo_after_rev_a.signature_sha256 == s2_sha
+        assert guo_after_rev_a.signature_source == "docx_import"
+
+    # Then revert job B -> must restore None (S0), not S1
     r_rev_b = await client.post(
         f"/api/v1/admin/imports/{job_b_id}/revert", headers=admin_headers
     )
