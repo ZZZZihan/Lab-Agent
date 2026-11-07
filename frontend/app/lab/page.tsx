@@ -773,15 +773,24 @@ export default function LabAssetsPage() {
     setEditSaving(true);
     try {
       const payload: Record<string, unknown> = {};
+      const rec = editItem as unknown as Record<string, unknown>;
       for (const f of EDITABLE_FIELDS[editType]) {
         if (f.adminOnly && me?.role !== "admin") continue;
+        const origVal = rec[f.key];
+        const origStr =
+          origVal === null || origVal === undefined ? "" : String(origVal);
         const rawVal = editForm[f.key] ?? "";
+        if (rawVal === origStr) continue;
         if (f.type === "number") {
           const trimmed = rawVal.trim();
           payload[f.key] = trimmed ? Number(trimmed) : null;
         } else {
           payload[f.key] = rawVal;
         }
+      }
+      if (Object.keys(payload).length === 0) {
+        setEditModalOpen(false);
+        return;
       }
       const res = await updateLabEntity(editType, editItem.id, payload);
       const updatedEntity = (res.person ||
