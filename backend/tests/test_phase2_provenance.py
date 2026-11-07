@@ -669,6 +669,43 @@ async def test_phase2_manual_edit_protection_and_restore_imported(
     assert forbid_restore.status_code == 403
     assert forbid_restore.json()["error"]["code"] == "forbidden"
 
+    # 7. Regression check: non-admin member cannot restore project.pi_name or achievement.first_author to another owner
+    projs_resp = await client.get("/api/v1/lab/projects", headers=headers)
+    other_proj = next(
+        p for p in projs_resp.json()["projects"] if p["pi_name"] != "万振凯"
+    )
+    admin_proj_patch = await client.patch(
+        f"/api/v1/lab/projects/{other_proj['id']}",
+        headers=headers,
+        json={"pi_name": "万振凯"},
+    )
+    assert admin_proj_patch.status_code == 200, admin_proj_patch.text
+    forbid_proj_restore = await client.post(
+        f"/api/v1/lab/projects/{other_proj['id']}/restore-imported",
+        headers=member_headers,
+        json={"field": "pi_name"},
+    )
+    assert forbid_proj_restore.status_code == 403
+    assert forbid_proj_restore.json()["error"]["code"] == "forbidden"
+
+    achs_resp = await client.get("/api/v1/lab/achievements", headers=headers)
+    other_ach = next(
+        a for a in achs_resp.json()["achievements"] if a["first_author"] != "万振凯"
+    )
+    admin_ach_patch = await client.patch(
+        f"/api/v1/lab/achievements/{other_ach['id']}",
+        headers=headers,
+        json={"first_author": "万振凯"},
+    )
+    assert admin_ach_patch.status_code == 200, admin_ach_patch.text
+    forbid_ach_restore = await client.post(
+        f"/api/v1/lab/achievements/{other_ach['id']}/restore-imported",
+        headers=member_headers,
+        json={"field": "first_author"},
+    )
+    assert forbid_ach_restore.status_code == 403
+    assert forbid_ach_restore.json()["error"]["code"] == "forbidden"
+
 
 async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None:
     """Scenario 5: Two proposals with identical as_of_time but different field values require explicit decision."""
@@ -1078,6 +1115,35 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     manual_proj = manual_proj_resp.json()["project"]
     assert manual_proj["provenance"]["title"]["source_kind"] == "manual"
     assert manual_proj["provenance"]["title"]["source_job_id"] is None
+
+    # Regression check: _match_existing_project title-only fallback does not merge projects with conflicting nonempty funders
+    from app.importer.fingerprint import project_fp
+    from app.importer.provenance import _match_existing_project
+    from app.models import LabProject
+
+    existing_no_grant = LabProject(
+        title="同名横向咨询课题",
+        funder="天津市教委",
+        grant_no=None,
+        lab_role="host",
+        status="ongoing",
+        status_source="explicit",
+        raw_text="同名横向咨询课题",
+        entity_fingerprint=project_fp(
+            grant_no=None, title="同名横向咨询课题", funder="天津市教委"
+        ),
+    )
+    inc_diff_funder_fp = project_fp(
+        grant_no=None, title="同名横向咨询课题", funder="天津市科委"
+    )
+    assert (
+        _match_existing_project(
+            inc_diff_funder_fp,
+            {"title": "同名横向咨询课题", "funder": "天津市科委", "grant_no": None},
+            [existing_no_grant],
+        )
+        is None
+    )
 
     # Count User accounts before revert
     async with maker() as session:

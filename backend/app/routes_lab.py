@@ -2252,6 +2252,23 @@ async def restore_lab_entity_imported(
     except ProvisionError as exc:
         raise APIError(exc.status, exc.code, exc.message) from exc
 
+    if norm_type == "project" and "pi_name" in fields_to_restore:
+        await _require_lab_editor(
+            session,
+            actor,
+            owner_name=entity.pi_name,
+            new_owner_name=entity.pi_name or "",
+            require_owner=True,
+        )
+    elif norm_type == "achievement" and "first_author" in fields_to_restore:
+        await _require_lab_editor(
+            session,
+            actor,
+            owner_name=entity.first_author,
+            new_owner_name=entity.first_author or "",
+            require_owner=True,
+        )
+
     await session.flush()
     prov_map = await build_provenance_map(session, norm_type, [entity])
     if norm_type == "person":

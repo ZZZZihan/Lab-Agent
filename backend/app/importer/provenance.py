@@ -976,6 +976,11 @@ def _match_existing_project(
                 and norm(p.grant_no or "")
                 and grant_no != norm(p.grant_no or "")
             )
+            and not (
+                nfunder
+                and norm(p.funder or "")
+                and nfunder != norm(p.funder or "")
+            )
         ]
         if len(same_title) == 1:
             return same_title[0]
