@@ -178,12 +178,14 @@ export default function AdminImportsPage() {
     };
   }, [t.error]);
 
+  const wizardBusy = savingPreview || reparsing || provisioning;
+
   // Spec §8.3.3 beforeunload guard when Step 3 has plaintext credentials in memory
   const hasUnsavedPlaintextRoster = Boolean(
     wizardOpen &&
       wizardStep === 3 &&
       provisionResult &&
-      includePassword &&
+      Boolean(provisionResult.initial_password || includePassword) &&
       !hasSavedCredentials,
   );
 
@@ -201,11 +203,11 @@ export default function AdminImportsPage() {
   }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
 
   function tryCloseWizard() {
-    if (savingPreview || reparsing || provisioning) return;
+    if (wizardBusy) return;
     if (
       wizardStep === 3 &&
       provisionResult &&
-      includePassword &&
+      Boolean(provisionResult.initial_password || includePassword) &&
       !hasSavedCredentials
     ) {
       const confirmed = window.confirm(t.credentialLeaveConfirm);
@@ -884,6 +886,7 @@ export default function AdminImportsPage() {
                       id="imp-as-of"
                       type="date"
                       value={provisionAsOf}
+                      disabled={wizardBusy}
                       onChange={(e) => setProvisionAsOf(e.target.value)}
                       required
                     />
@@ -894,6 +897,7 @@ export default function AdminImportsPage() {
                       id="imp-pw"
                       type="text"
                       value={initialPassword}
+                      disabled={wizardBusy}
                       onChange={(e) => setInitialPassword(e.target.value)}
                       required
                     />
@@ -903,6 +907,7 @@ export default function AdminImportsPage() {
                       <input
                         type="checkbox"
                         checked={includePassword}
+                        disabled={wizardBusy}
                         onChange={(e) => setIncludePassword(e.target.checked)}
                         className="h-4 w-4 rounded border-border"
                       />
@@ -1022,7 +1027,7 @@ export default function AdminImportsPage() {
                             <td className="px-2.5 py-2">
                               <Input
                                 value={ov.login_name}
-                                disabled={ov.mode !== "new"}
+                                disabled={wizardBusy || ov.mode !== "new"}
                                 onChange={(e) =>
                                   setOverrides((prev) => ({
                                     ...prev,
@@ -1040,6 +1045,7 @@ export default function AdminImportsPage() {
                                 <select
                                   aria-label={`${p.name} 处理方式`}
                                   value={ov.mode}
+                                  disabled={wizardBusy}
                                   onChange={(e) =>
                                     setOverrides((prev) => ({
                                       ...prev,
@@ -1061,6 +1067,7 @@ export default function AdminImportsPage() {
                                   <select
                                     aria-label={`${p.name} 关联目标用户`}
                                     value={ov.link_user_id}
+                                    disabled={wizardBusy}
                                     onChange={(e) =>
                                       setOverrides((prev) => ({
                                         ...prev,
