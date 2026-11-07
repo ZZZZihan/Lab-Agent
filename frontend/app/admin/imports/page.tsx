@@ -100,10 +100,17 @@ function buildInitialOverrides(
 }
 
 let retainedUnsavedCredentialState: {
+  ownerUserId: string;
   importJob: ImportJobResponse | null;
   provisionResult: ProvisionResult;
   includePassword: boolean;
 } | null = null;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("lab-auth-logout", () => {
+    retainedUnsavedCredentialState = null;
+  });
+}
 
 export default function AdminImportsPage() {
   const { t } = useI18n();
@@ -114,34 +121,24 @@ export default function AdminImportsPage() {
   const [infoMessage, setInfoMessage] = useState("");
 
   // Upload & Provision Wizard state
-  const [wizardOpen, setWizardOpen] = useState(() =>
-    Boolean(retainedUnsavedCredentialState),
-  );
-  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(() =>
-    retainedUnsavedCredentialState ? 3 : 1,
-  );
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadAsOf, setUploadAsOf] = useState("");
   const [parsing, setParsing] = useState(false);
   const [wizardError, setWizardError] = useState("");
   const [wizardNotice, setWizardNotice] = useState("");
 
-  const [importJob, setImportJob] = useState<ImportJobResponse | null>(
-    () => retainedUnsavedCredentialState?.importJob ?? null,
-  );
+  const [importJob, setImportJob] = useState<ImportJobResponse | null>(null);
   const [provisionAsOf, setProvisionAsOf] = useState("");
   const [initialPassword, setInitialPassword] = useState(DEFAULT_INITIAL_PASSWORD);
-  const [includePassword, setIncludePassword] = useState(
-    () => retainedUnsavedCredentialState?.includePassword ?? true,
-  );
+  const [includePassword, setIncludePassword] = useState(true);
   const [overrides, setOverrides] = useState<Record<string, PersonOverrideRow>>({});
   const [savingPreview, setSavingPreview] = useState(false);
   const [reparsing, setReparsing] = useState(false);
   const [reparseMode, setReparseMode] = useState<"fsm" | "llm">("fsm");
   const [provisioning, setProvisioning] = useState(false);
-  const [provisionResult, setProvisionResult] = useState<ProvisionResult | null>(
-    () => retainedUnsavedCredentialState?.provisionResult ?? null,
-  );
+  const [provisionResult, setProvisionResult] = useState<ProvisionResult | null>(null);
   const [rosterCopied, setRosterCopied] = useState(false);
   const [hasSavedCredentials, setHasSavedCredentials] = useState(false);
   const [showAssetDetails, setShowAssetDetails] = useState(false);
@@ -161,9 +158,22 @@ export default function AdminImportsPage() {
         api<{ users: AdminUserItem[] }>("admin/users").catch(() => ({ users: [] })),
       ]);
       setMe(actor);
+      if (!actor || actor.role !== "admin") {
+        retainedUnsavedCredentialState = null;
+        setWizardOpen(false);
+        setProvisionResult(null);
+      } else if (
+        retainedUnsavedCredentialState &&
+        retainedUnsavedCredentialState.ownerUserId !== actor.id
+      ) {
+        retainedUnsavedCredentialState = null;
+        setWizardOpen(false);
+        setProvisionResult(null);
+      }
       setJobs(listedJobs);
       setUsers(listedUsers.users);
     } catch (err) {
+      retainedUnsavedCredentialState = null;
       setError(err instanceof ApiError ? err.message : t.error);
       setJobs([]);
     }
@@ -181,11 +191,32 @@ export default function AdminImportsPage() {
       .then(([actor, listedJobs, listedUsers]) => {
         if (cancelled) return;
         setMe(actor);
+        if (!actor || actor.role !== "admin") {
+          retainedUnsavedCredentialState = null;
+          setWizardOpen(false);
+          setProvisionResult(null);
+        } else if (retainedUnsavedCredentialState) {
+          if (retainedUnsavedCredentialState.ownerUserId === actor.id) {
+            setImportJob(retainedUnsavedCredentialState.importJob);
+            setProvisionResult(retainedUnsavedCredentialState.provisionResult);
+            setIncludePassword(retainedUnsavedCredentialState.includePassword);
+            setHasSavedCredentials(false);
+            setWizardStep(3);
+            setWizardOpen(true);
+          } else {
+            retainedUnsavedCredentialState = null;
+            setWizardOpen(false);
+            setProvisionResult(null);
+          }
+        }
         setJobs(listedJobs);
         setUsers(listedUsers.users);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
+        retainedUnsavedCredentialState = null;
+        setWizardOpen(false);
+        setProvisionResult(null);
         setError(err instanceof ApiError ? err.message : t.error);
         setJobs([]);
       });
@@ -206,13 +237,19 @@ export default function AdminImportsPage() {
   );
 
   useEffect(() => {
-    if (hasUnsavedPlaintextRoster && provisionResult) {
+    if (
+      hasUnsavedPlaintextRoster &&
+      provisionResult &&
+      me?.id &&
+      me.role === "admin"
+    ) {
       retainedUnsavedCredentialState = {
+        ownerUserId: me.id,
         importJob,
         provisionResult,
         includePassword,
       };
-    } else if (hasSavedCredentials) {
+    } else if (hasSavedCredentials || (me && me.role !== "admin")) {
       retainedUnsavedCredentialState = null;
     }
   }, [
@@ -221,6 +258,7 @@ export default function AdminImportsPage() {
     importJob,
     provisionResult,
     includePassword,
+    me,
   ]);
 
   useEffect(() => {
@@ -484,8 +522,13 @@ export default function AdminImportsPage() {
           }),
         },
       );
-      if (Boolean(res.initial_password || includePassword)) {
+      if (
+        me?.id &&
+        me.role === "admin" &&
+        Boolean(res.initial_password || includePassword)
+      ) {
         retainedUnsavedCredentialState = {
+          ownerUserId: me.id,
           importJob,
           provisionResult: res,
           includePassword,

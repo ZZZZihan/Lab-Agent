@@ -38,6 +38,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     currentUser()
       .then((found) => {
         if (!found) {
+          window.dispatchEvent(new Event("lab-auth-logout"));
           router.replace("/login");
           return;
         }
@@ -57,7 +58,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
             setCalibrated(null);
           });
       })
-      .catch(() => router.replace("/login"));
+      .catch(() => {
+        window.dispatchEvent(new Event("lab-auth-logout"));
+        router.replace("/login");
+      });
   }, [router, pathname]);
 
   const links = [
@@ -130,6 +134,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 variant="ghost"
                 size="sm"
                 onClick={async () => {
+                  window.dispatchEvent(new Event("lab-auth-logout"));
                   await logout();
                   router.replace("/login");
                 }}
