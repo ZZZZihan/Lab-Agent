@@ -183,6 +183,7 @@ export default function AdminImportsPage() {
   }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
 
   function tryCloseWizard() {
+    if (provisioning) return;
     if (
       wizardStep === 3 &&
       provisionResult &&
@@ -316,9 +317,11 @@ export default function AdminImportsPage() {
           ...p,
           exclude: ov.mode === "exclude",
           override_mode: ov.mode,
-          override_login_name: trimmedLogin || p.login_name,
+          override_login_name:
+            ov.mode === "new" ? trimmedLogin || p.login_name : p.login_name,
           override_link_user_id: ov.mode === "existing" ? ov.link_user_id : "",
-          login_name: trimmedLogin || p.login_name,
+          login_name:
+            ov.mode === "new" ? trimmedLogin || p.login_name : p.login_name,
           match:
             ov.mode === "existing" && ov.link_user_id
               ? { status: "existing", user_id: ov.link_user_id }
@@ -380,7 +383,9 @@ export default function AdminImportsPage() {
         return {
           key: p.key,
           exclude: ov?.mode === "exclude",
-          ...(trimmedLogin && trimmedLogin !== p.login_name
+          ...(ov?.mode === "new" &&
+          trimmedLogin &&
+          trimmedLogin !== p.login_name
             ? { login_name: trimmedLogin }
             : {}),
           ...(ov?.mode === "existing" && ov.link_user_id
@@ -1105,6 +1110,7 @@ export default function AdminImportsPage() {
                   <Button
                     type="button"
                     variant="outline"
+                    disabled={provisioning || savingPreview || reparsing}
                     onClick={() => setWizardOpen(false)}
                   >
                     稍后继续
