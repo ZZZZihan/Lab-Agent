@@ -1511,6 +1511,260 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert xu_after_rev_b4.signature_sha256 is None
         assert xu_after_rev_b4.signature_source is None
 
+    # 9) Import A (merge) creates an unlinked person without signature; Import B (provision) writes a signature
+    #    for the same fingerprint; reverting A preserves the person and B's signature, and reverting B cleans it up.
+    sun_sig_bytes = make_png_bytes(96, 42, fill_byte=0x55)
+    sun_sig_sha = hashlib.sha256(sun_sig_bytes).hexdigest()
+    sun_person_item = {
+        "key": "p_sun_unlinked",
+        "temp_id": "p_sun_unlinked",
+        "name": "孙七",
+        "title": "讲师",
+        "affiliation": "天津工业大学",
+        "project_role": "member",
+        "tier": "T2",
+        "login_name": "sunqi",
+    }
+    async with maker() as session:
+        db_job_a9 = await session.get(ImportJob, uuid.UUID(job_a_id))
+        assert db_job_a9 is not None
+        prev_a9 = dict(db_job_a9.preview or {})
+        ppl_a9 = [dict(p) for p in (prev_a9.get("people") or [])]
+        ppl_a9.append(dict(sun_person_item))
+        prev_a9["people"] = ppl_a9
+        db_job_a9.preview = prev_a9
+
+        db_job_c9 = await session.get(ImportJob, uuid.UUID(job_c_id))
+        assert db_job_c9 is not None
+        prev_c9 = dict(db_job_c9.preview or {})
+        ppl_c9 = [dict(p) for p in (prev_c9.get("people") or [])]
+        ppl_c9.append(dict(sun_person_item))
+        prev_c9["people"] = ppl_c9
+        sigs_c9 = [dict(s) for s in (prev_c9.get("signatures") or [])]
+        sigs_c9.append(
+            {
+                "person_temp_id": "p_sun_unlinked",
+                "person_name": "孙七",
+                "sha256": sun_sig_sha,
+                "mime": "image/png",
+                "width": 96,
+                "height": 42,
+                "byte_size": len(sun_sig_bytes),
+                "confidence": "high",
+                "warnings": [],
+            }
+        )
+        prev_c9["signatures"] = sigs_c9
+        blobs_c9 = dict(prev_c9.get("_signature_blobs") or {})
+        blobs_c9[sun_sig_sha] = base64.b64encode(sun_sig_bytes).decode("ascii")
+        prev_c9["_signature_blobs"] = blobs_c9
+        db_job_c9.preview = prev_c9
+        await session.commit()
+
+    r_merge_a9 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_a9.status_code == 200, r_merge_a9.text
+    async with maker() as session:
+        sun_p = await session.scalar(select(LabPerson).where(LabPerson.name == "孙七"))
+        assert sun_p is not None
+        assert sun_p.user_id is None
+        assert sun_p.signature_sha256 is None
+        sun_id = str(sun_p.id)
+
+    r_prov_c9 = await client.post(
+        f"/api/v1/admin/imports/{job_c_id}/provision",
+        headers=admin_headers,
+        json={},
+    )
+    assert r_prov_c9.status_code == 200, r_prov_c9.text
+    async with maker() as session:
+        sun_after_c9 = await session.get(LabPerson, uuid.UUID(sun_id))
+        assert sun_after_c9 is not None
+        assert sun_after_c9.user_id is not None
+        assert sun_after_c9.signature_sha256 == sun_sig_sha
+        assert sun_after_c9.signature_source == "docx_import"
+
+    r_rev_a9 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_a9.status_code == 200, r_rev_a9.text
+    async with maker() as session:
+        sun_after_rev_a9 = await session.get(LabPerson, uuid.UUID(sun_id))
+        assert sun_after_rev_a9 is not None
+        assert sun_after_rev_a9.signature_sha256 == sun_sig_sha
+        assert sun_after_rev_a9.signature_source == "docx_import"
+
+    r_rev_c9 = await client.post(
+        f"/api/v1/admin/imports/{job_c_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_c9.status_code == 200, r_rev_c9.text
+    async with maker() as session:
+        sun_after_rev_c9 = await session.get(LabPerson, uuid.UUID(sun_id))
+        assert sun_after_rev_c9 is not None
+        assert sun_after_rev_c9.signature_sha256 is None
+        assert sun_after_rev_c9.signature_source is None
+
+
+@pytest.mark.asyncio
+async def test_import_confirm_signature_merge_and_keep_upload(
+    client: AsyncClient,
+) -> None:
+    admin_user, admin_headers = await _seed_user_and_token(
+        role="admin", login_name="admin_sig_unlinked"
+    )
+    maker = get_sessionmaker()
+    sig_b_bytes = make_png_bytes(92, 40, fill_byte=0x4A)
+    sig_b_sha = hashlib.sha256(sig_b_bytes).hexdigest()
+    sig_b_b64 = base64.b64encode(sig_b_bytes).decode("ascii")
+
+    # 1) Unlinked person created by Import A (merge) without signature, then Import B (merge without field provenance)
+    #    writes a signature; reverting A preserves the unlinked person and B's signature, and reverting B cleans up.
+    async with maker() as session:
+        job_a = ImportJob(
+            uploaded_by=admin_user.id,
+            original_filename="unlinked_a.docx",
+            content_sha256="1" * 64,
+            status="parsed",
+            as_of_time=date(2026, 4, 20),
+            preview={
+                "as_of_time": "2026-04-20",
+                "people": [
+                    {
+                        "key": "p_zhou",
+                        "temp_id": "p_zhou",
+                        "name": "周八",
+                        "affiliation": "天津工业大学",
+                        "project_role": "member",
+                        "tier": "T2",
+                    }
+                ],
+                "projects": [],
+                "achievements": [],
+                "facilities": [],
+                "signatures": [],
+                "warnings": [],
+            },
+        )
+        job_b = ImportJob(
+            uploaded_by=admin_user.id,
+            original_filename="unlinked_b.docx",
+            content_sha256="2" * 64,
+            status="parsed",
+            as_of_time=date(2026, 4, 21),
+            preview={
+                "as_of_time": "2026-04-21",
+                "people": [
+                    {
+                        "key": "p_zhou",
+                        "temp_id": "p_zhou",
+                        "name": "周八",
+                        "affiliation": "天津工业大学",
+                        "project_role": "member",
+                        "tier": "T2",
+                        "login_name": "zhouba",
+                    }
+                ],
+                "projects": [],
+                "achievements": [],
+                "facilities": [],
+                "signatures": [
+                    {
+                        "person_temp_id": "p_zhou",
+                        "person_name": "周八",
+                        "sha256": sig_b_sha,
+                        "mime": "image/png",
+                        "width": 92,
+                        "height": 40,
+                        "byte_size": len(sig_b_bytes),
+                        "confidence": "high",
+                        "warnings": [],
+                    }
+                ],
+                "_signature_blobs": {sig_b_sha: sig_b_b64},
+                "warnings": [],
+            },
+        )
+        session.add_all([job_a, job_b])
+        await session.commit()
+        job_a_id = str(job_a.id)
+        job_b_id = str(job_b.id)
+
+    r_merge_a = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_a.status_code == 200, r_merge_a.text
+    async with maker() as session:
+        zhou_p = await session.scalar(select(LabPerson).where(LabPerson.name == "周八"))
+        assert zhou_p is not None
+        assert zhou_p.user_id is None
+        assert zhou_p.signature_sha256 is None
+        zhou_id = str(zhou_p.id)
+
+    r_prov_b = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/provision",
+        headers=admin_headers,
+        json={},
+    )
+    assert r_prov_b.status_code == 200, r_prov_b.text
+    async with maker() as session:
+        zhou_after_b = await session.get(LabPerson, uuid.UUID(zhou_id))
+        assert zhou_after_b is not None
+        assert zhou_after_b.signature_sha256 == sig_b_sha
+        assert zhou_after_b.signature_source == "docx_import"
+
+    # Also test the pure unlinked + no-remaining-provenance path by detaching user_id & B's field provenance
+    async with maker() as session:
+        from app.models import FieldProvenance
+
+        zhou_row = await session.get(LabPerson, uuid.UUID(zhou_id))
+        assert zhou_row is not None
+        zhou_row.user_id = None
+        b_prov_rows = list(
+            await session.scalars(
+                select(FieldProvenance).where(
+                    FieldProvenance.source_job_id == uuid.UUID(job_b_id)
+                )
+            )
+        )
+        for r in b_prov_rows:
+            r.superseded = True
+        await session.commit()
+
+    r_rev_a = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_a.status_code == 200, r_rev_a.text
+    async with maker() as session:
+        zhou_after_rev_a = await session.get(LabPerson, uuid.UUID(zhou_id))
+        assert zhou_after_rev_a is not None
+        assert zhou_after_rev_a.signature_sha256 == sig_b_sha
+        assert zhou_after_rev_a.signature_source == "docx_import"
+        assert zhou_after_rev_a.source_import_id == uuid.UUID(job_b_id)
+        # Re-attach user_id so reverting B leaves the person row with cleared signature
+        linked_u = await session.scalar(select(User).where(User.login_name == "zhouba"))
+        assert linked_u is not None
+        zhou_after_rev_a.user_id = linked_u.id
+        await session.commit()
+
+    r_rev_b = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_b.status_code == 200, r_rev_b.text
+    async with maker() as session:
+        zhou_after_rev_b = await session.get(LabPerson, uuid.UUID(zhou_id))
+        assert zhou_after_rev_b is not None
+        assert zhou_after_rev_b.signature_sha256 is None
+        assert zhou_after_rev_b.signature_source is None
+
 
 # ---------------------------------------------------------------------------
 # 5. Signature CRUD, ETag/If-Match, Security Headers & Deferred Loading (§5 & §8.2)

@@ -2794,6 +2794,33 @@ async def revert_import_merge(
 
     await session.flush()
 
+    other_jobs = list(
+        await session.scalars(
+            select(ImportJob)
+            .where(
+                ImportJob.id != job.id,
+                ImportJob.status.in_(("merged", "provisioned")),
+            )
+            .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
+            .with_for_update()
+        )
+    )
+    other_sig_owner_by_pid: dict[str, uuid.UUID] = {}
+    for oj in other_jobs:
+        oj_stats = oj.stats if isinstance(oj.stats, dict) else {}
+        oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+        if isinstance(oj_pre_sigs, dict):
+            for pid_str, oj_snap in oj_pre_sigs.items():
+                if isinstance(oj_snap, dict):
+                    other_sig_owner_by_pid[str(pid_str)] = oj.id
+    for pid_str in list(other_sig_owner_by_pid.keys()):
+        tail_job_id_str = _find_tail_writer_job_id(other_jobs, pid_str, None)
+        if tail_job_id_str is not None:
+            try:
+                other_sig_owner_by_pid[pid_str] = uuid.UUID(tail_job_id_str)
+            except ValueError:
+                pass
+
     reverted_fields = 0
     deleted_entities = 0
 
@@ -2827,10 +2854,19 @@ async def revert_import_merge(
                         "signature_source",
                     ],
                 )
+            other_sig_job_id = (
+                other_sig_owner_by_pid.get(str(ent.id))
+                if etype == "person"
+                else None
+            )
             if etype == "person" and (
-                ent.user_id is not None or ent.signature_source == "upload"
+                ent.user_id is not None
+                or ent.signature_source == "upload"
+                or other_sig_job_id is not None
             ):
-                # Spec §10.6 & v2.2: Never delete LabPerson linked to a User account or holding a manual signature upload!
+                # Spec §10.6 & v2.2: Never delete LabPerson linked to a User account, holding a manual signature upload, or owned by another active import's signature snapshot!
+                if other_sig_job_id is not None:
+                    ent.source_import_id = other_sig_job_id
                 for field in MANAGED_FIELDS[etype]:
                     cur_val = get_entity_json_value(etype, ent, field)
                     if not _is_blank(cur_val) and field not in ("name", "project_role"):
@@ -2847,6 +2883,7 @@ async def revert_import_merge(
                 )
                 if (
                     not has_pre_sig_entry
+                    and other_sig_job_id is None
                     and ent.signature_source == "docx_import"
                     and ent.signature_sha256 is not None
                 ):
@@ -2893,21 +2930,12 @@ async def revert_import_merge(
             ]
             if rem_jobs:
                 ent.source_import_id = rem_jobs[-1]
+            elif etype == "person" and str(ent.id) in other_sig_owner_by_pid:
+                ent.source_import_id = other_sig_owner_by_pid[str(ent.id)]
 
     cur_stats = dict(job.stats or {})
     raw_pre_sigs = cur_stats.pop("_pre_merge_signatures", None)
     if isinstance(raw_pre_sigs, dict):
-        other_jobs = list(
-            await session.scalars(
-                select(ImportJob)
-                .where(
-                    ImportJob.id != job.id,
-                    ImportJob.status.in_(("merged", "provisioned")),
-                )
-                .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
-                .with_for_update()
-            )
-        )
         for pid_str, snap in raw_pre_sigs.items():
             if not isinstance(snap, dict):
                 continue

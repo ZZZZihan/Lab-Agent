@@ -381,6 +381,7 @@ async def provision_import_job(
     new_roster_items: list[dict[str, object]] = []
     existing_roster_items: list[dict[str, object]] = []
     inserted_people: list[LabPerson] = []
+    linked_existing_people: list[LabPerson] = []
     imported_people_by_key: dict[str, LabPerson] = {}
     ambiguous_person_keys: set[str] = set()
     inserted_achievements: list[LabAchievement] = []
@@ -476,8 +477,18 @@ async def provision_import_job(
                 matched_existing_lp = existing_people_by_fp.get(
                     fp_val
                 ) or existing_people_by_uid.get(user_id)
-                if matched_existing_lp is not None and pkey:
-                    imported_people_by_key[pkey] = matched_existing_lp
+                if matched_existing_lp is not None:
+                    if (
+                        matched_existing_lp.user_id is None
+                        and user_id is not None
+                        and user_id not in existing_person_user_ids
+                    ):
+                        matched_existing_lp.user_id = user_id
+                        existing_person_user_ids.add(user_id)
+                        existing_people_by_uid[user_id] = matched_existing_lp
+                        linked_existing_people.append(matched_existing_lp)
+                    if pkey:
+                        imported_people_by_key[pkey] = matched_existing_lp
             else:
                 existing_person_fps.add(fp_val)
                 existing_person_user_ids.add(user_id)
@@ -658,7 +669,7 @@ async def provision_import_job(
             record_entity_import_provenance,
         )
 
-        for p_ent in inserted_people:
+        for p_ent in [*inserted_people, *linked_existing_people]:
             await record_entity_import_provenance(
                 session,
                 entity_type="person",
