@@ -972,6 +972,7 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
                 "signature_sha256": None,
                 "signature_updated_at": None,
                 "signature_source": None,
+                "prev_writer_job_id": None,
                 "applied_sha256": lp.signature_sha256,
             }
         first_updated_map = {lp.id: lp.signature_updated_at for lp in people_rows}
@@ -1286,6 +1287,86 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert guo_after_rev_b2.signature_sha256 is None
         assert guo_after_rev_b2.signature_source is None
 
+    # 5c) Three distinct imports A(S1) -> B(S2) -> C(S1):
+    #     Reverting A while C's S1 is active must preserve C's S1 and rebase B's pre-merge snapshot to None;
+    #     reverting C then restores B's S2, and reverting B restores None.
+    r_merge_a3 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_a3.status_code == 200, r_merge_a3.text
+    r_merge_b3 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_b3.status_code == 200, r_merge_b3.text
+    r_up_c = await client.post(
+        "/api/v1/admin/imports/proposal",
+        headers=admin_headers,
+        files={
+            "file": (
+                "proposal_chain_c.docx",
+                raw_docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert r_up_c.status_code == 200, r_up_c.text
+    job_c_id = r_up_c.json()["job_id"]
+    r_merge_c = await client.post(
+        f"/api/v1/admin/imports/{job_c_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_c.status_code == 200, r_merge_c.text
+    async with maker() as session:
+        guo_after_c = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_c is not None
+        assert guo_after_c.signature_sha256 == guo_orig_sha
+        assert guo_after_c.signature_source == "docx_import"
+
+    r_rev_a3 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/revert", headers=admin_headers
+    )
+    assert r_rev_a3.status_code == 200, r_rev_a3.text
+    async with maker() as session:
+        guo_after_rev_a3 = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_a3 is not None
+        assert guo_after_rev_a3.signature_sha256 == guo_orig_sha
+        assert guo_after_rev_a3.signature_source == "docx_import"
+        db_job_b_rebased = await session.get(ImportJob, uuid.UUID(job_b_id))
+        assert db_job_b_rebased is not None
+        b_guo_snap = (
+            (db_job_b_rebased.stats or {})
+            .get("_pre_merge_signatures", {})
+            .get(guo_id)
+        )
+        assert isinstance(b_guo_snap, dict)
+        assert b_guo_snap.get("signature_sha256") is None
+        assert b_guo_snap.get("prev_writer_job_id") is None
+
+    r_rev_c = await client.post(
+        f"/api/v1/admin/imports/{job_c_id}/revert", headers=admin_headers
+    )
+    assert r_rev_c.status_code == 200, r_rev_c.text
+    async with maker() as session:
+        guo_after_rev_c = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_c is not None
+        assert guo_after_rev_c.signature_sha256 == s2_sha
+        assert guo_after_rev_c.signature_source == "docx_import"
+
+    r_rev_b3 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert", headers=admin_headers
+    )
+    assert r_rev_b3.status_code == 200, r_rev_b3.text
+    async with maker() as session:
+        guo_after_rev_b3 = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_b3 is not None
+        assert guo_after_rev_b3.signature_sha256 is None
+        assert guo_after_rev_b3.signature_source is None
+
     # 6) Conflicting person in exclude_keys does not trigger 422 merge_conflict_unresolved
     async with maker() as session:
         db_job_b2 = await session.get(ImportJob, uuid.UUID(job_b_id))
@@ -1408,6 +1489,16 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         xu_after_rev_job1 = await session.get(LabPerson, uuid.UUID(xu_id))
         assert xu_after_rev_job1 is not None
         assert xu_after_rev_job1.signature_sha256 == s2_sha
+
+    r_rev_job2 = await client.post(
+        f"/api/v1/admin/imports/{job2_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_job2.status_code == 200, r_rev_job2.text
+    async with maker() as session:
+        xu_after_rev_job2 = await session.get(LabPerson, uuid.UUID(xu_id))
+        assert xu_after_rev_job2 is not None
+        assert xu_after_rev_job2.signature_sha256 == s2_sha
 
     r_rev_b4 = await client.post(
         f"/api/v1/admin/imports/{job_b_id}/revert",

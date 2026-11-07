@@ -653,7 +653,10 @@ async def provision_import_job(
 
         await session.flush()
 
-        from app.importer.provenance import record_entity_import_provenance
+        from app.importer.provenance import (
+            _find_tail_writer_job_id,
+            record_entity_import_provenance,
+        )
 
         for p_ent in inserted_people:
             await record_entity_import_provenance(
@@ -760,14 +763,40 @@ async def provision_import_job(
             ambiguous_keys=ambiguous_person_keys,
         )
         changed_sig_snapshots: dict[str, dict[str, str | None]] = {}
+        other_merged_jobs = list(
+            await session.scalars(
+                select(ImportJob)
+                .where(
+                    ImportJob.id != job.id,
+                    ImportJob.status.in_(("merged", "provisioned")),
+                )
+                .order_by(ImportJob.created_at.asc(), ImportJob.id.asc())
+                .with_for_update()
+            )
+        )
         for p_existing in existing_target_people:
+            pid_str = str(p_existing.id)
             snap = pre_sig_snapshots.get(p_existing.id)
-            if snap is not None and (
-                p_existing.signature_sha256 != snap["signature_sha256"]
-                or p_existing.signature_source != snap["signature_source"]
-            ):
-                changed_sig_snapshots[str(p_existing.id)] = {
+            sig_bound_by_this_job = bool(
+                getattr(p_existing, "_sig_bound_by_import", False)
+            ) or (
+                snap is not None
+                and (
+                    p_existing.signature_sha256 != snap["signature_sha256"]
+                    or p_existing.signature_source != snap["signature_source"]
+                )
+            )
+            if sig_bound_by_this_job and snap is not None:
+                tail_id = (
+                    _find_tail_writer_job_id(
+                        other_merged_jobs, pid_str, snap["signature_sha256"]
+                    )
+                    if snap["signature_source"] == "docx_import"
+                    else None
+                )
+                changed_sig_snapshots[pid_str] = {
                     **snap,
+                    "prev_writer_job_id": tail_id,
                     "applied_sha256": p_existing.signature_sha256,
                 }
         for p_new in inserted_people:
@@ -778,6 +807,7 @@ async def provision_import_job(
                     "signature_sha256": None,
                     "signature_updated_at": None,
                     "signature_source": None,
+                    "prev_writer_job_id": None,
                     "applied_sha256": p_new.signature_sha256,
                 }
         cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}

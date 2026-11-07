@@ -757,6 +757,10 @@ def persist_import_signatures(
     }
     extra_warnings: list[dict[str, object]] = []
     now = datetime.now(UTC)
+    bound_attr = "_sig_bound_by_import"
+
+    for p_obj in imported_people_by_key.values():
+        setattr(p_obj, bound_attr, False)
 
     for entry in sig_entries:
         temp_id = str(entry.get("person_temp_id") or entry.get("person_key") or "").strip()
@@ -836,6 +840,7 @@ def persist_import_signatures(
             person.signature_source == "docx_import"
             and person.signature_sha256 == check.sha256
         ):
+            setattr(person, bound_attr, True)
             result["unchanged"] += 1
             continue
 
@@ -844,6 +849,7 @@ def persist_import_signatures(
         person.signature_sha256 = check.sha256
         person.signature_updated_at = now
         person.signature_source = "docx_import"
+        setattr(person, bound_attr, True)
         result["saved"] += 1
 
     return result, extra_warnings
