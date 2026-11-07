@@ -51,7 +51,7 @@ async function forward(request: Request, path: string[]) {
   const type = upstream.headers.get("content-type") || "application/json";
   const responseHeaders: Record<string, string> = {
     "Content-Type": type,
-    "Cache-Control": "no-cache",
+    "Cache-Control": upstream.headers.get("cache-control") || "no-cache",
     "X-Accel-Buffering": "no",
   };
   for (const hdr of [
@@ -61,6 +61,8 @@ async function forward(request: Request, path: string[]) {
     "x-signature-count-missing",
     "x-export-warnings-count",
     "x-export-warnings",
+    "x-content-type-options",
+    "content-security-policy",
   ]) {
     const val = upstream.headers.get(hdr);
     if (val) responseHeaders[hdr] = val;
