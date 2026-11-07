@@ -411,6 +411,7 @@ export default function LabAssetsPage() {
   const [sigStatusMsg, setSigStatusMsg] = useState("");
   const dossierAbortRef = useRef<AbortController | null>(null);
   const dossierReqSeqRef = useRef(0);
+  const dossierSessionRef = useRef(0);
   const sigFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // ==========================================================================
@@ -541,13 +542,19 @@ export default function LabAssetsPage() {
     };
   }, [me?.id]);
 
-  async function fetchDossierById(personId: string) {
+  async function fetchDossierById(
+    personId: string,
+    options?: { preserveSigFeedback?: boolean },
+  ) {
     if (dossierAbortRef.current) {
       dossierAbortRef.current.abort();
     }
     const controller = new AbortController();
     dossierAbortRef.current = controller;
     const reqSeq = ++dossierReqSeqRef.current;
+    if (!options?.preserveSigFeedback) {
+      dossierSessionRef.current += 1;
+    }
 
     setDossierOpen(true);
     setDossierPersonId(personId);
@@ -555,9 +562,13 @@ export default function LabAssetsPage() {
     setDossierLoading(true);
     setDossierError("");
     setDossierNotFound(false);
-    setSigError("");
-    setSigStatusMsg("");
-    setSigConfirmDelete(false);
+    if (!options?.preserveSigFeedback) {
+      setSigUploading(false);
+      setSigDeleting(false);
+      setSigError("");
+      setSigStatusMsg("");
+      setSigConfirmDelete(false);
+    }
 
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
@@ -610,12 +621,15 @@ export default function LabAssetsPage() {
 
   function closePersonDossier() {
     dossierReqSeqRef.current += 1;
+    dossierSessionRef.current += 1;
     if (dossierAbortRef.current) {
       dossierAbortRef.current.abort();
       dossierAbortRef.current = null;
     }
     setDossierOpen(false);
     setDossierPersonId(null);
+    setSigUploading(false);
+    setSigDeleting(false);
     setSigConfirmDelete(false);
     setSigError("");
     setSigStatusMsg("");
@@ -662,14 +676,27 @@ export default function LabAssetsPage() {
       const initialPerson = new URLSearchParams(window.location.search).get(
         "person",
       );
-      if (
-        initialPerson &&
-        initialPerson.trim() &&
-        dossierReqSeqRef.current === 0
-      ) {
-        void fetchDossierById(initialPerson.trim());
+      if (initialPerson && initialPerson.trim()) {
+        const targetId = initialPerson.trim();
+        void Promise.resolve().then(() => {
+          if (!cancelled) {
+            void fetchDossierById(targetId);
+          }
+        });
       }
     }
+    return () => {
+      cancelled = true;
+      dossierReqSeqRef.current += 1;
+      if (dossierAbortRef.current) {
+        dossierAbortRef.current.abort();
+        dossierAbortRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     Promise.all([
       currentUser(),
       api<LabOverview>("lab/overview"),
@@ -716,10 +743,6 @@ export default function LabAssetsPage() {
       });
     return () => {
       cancelled = true;
-      if (dossierAbortRef.current) {
-        dossierAbortRef.current.abort();
-        dossierAbortRef.current = null;
-      }
     };
   }, [t.error]);
 
@@ -1171,6 +1194,7 @@ export default function LabAssetsPage() {
   ) {
     setError("");
     setSigError("");
+    const startSessionSeq = dossierSessionRef.current;
     try {
       const url = getPersonSignatureUrl(personId, "attachment", sha256);
       const response = await fetch(url, { cache: "no-store" });
@@ -1209,7 +1233,11 @@ export default function LabAssetsPage() {
         err instanceof ApiError
           ? mapLabErrorCode(err.code, err.message)
           : "下载签名失败，请稍后重试";
-      if (dossierOpen) {
+      if (
+        dossierOpen &&
+        dossierSessionRef.current === startSessionSeq &&
+        dossierPersonId === personId
+      ) {
         setSigError(msg);
       } else {
         setError(msg);
@@ -1246,6 +1274,9 @@ export default function LabAssetsPage() {
       return;
     }
 
+    const targetPersonId = dossier.person.id;
+    const targetPersonName = dossier.person.name;
+    const startSessionSeq = dossierSessionRef.current;
     const currentSha =
       dossier.signature?.signature_sha256 ??
       dossier.signature?.sha256 ??
@@ -1254,19 +1285,34 @@ export default function LabAssetsPage() {
 
     setSigUploading(true);
     try {
-      await uploadPersonSignature(dossier.person.id, file, currentSha);
-      setSigStatusMsg("电子签名已上传更新");
-      setStatusBanner(`已更新 ${dossier.person.name} 的电子签名`);
-      await Promise.all([fetchDossierById(dossier.person.id), loadAll()]);
+      await uploadPersonSignature(targetPersonId, file, currentSha);
+      setStatusBanner(`已更新 ${targetPersonName} 的电子签名`);
+      const loadAllPromise = loadAll();
+      if (dossierSessionRef.current === startSessionSeq) {
+        setSigStatusMsg("电子签名已上传更新");
+        await Promise.all([
+          fetchDossierById(targetPersonId, { preserveSigFeedback: true }),
+          loadAllPromise,
+        ]);
+      } else {
+        await loadAllPromise;
+      }
     } catch (err) {
+      if (dossierSessionRef.current !== startSessionSeq) {
+        return;
+      }
       if (
         err instanceof ApiError &&
         (err.status === 412 ||
           err.code.toUpperCase() === "PRECONDITION_FAILED" ||
           err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
       ) {
-        setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
-        await fetchDossierById(dossier.person.id);
+        const conflictMsg = mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED");
+        setSigError(conflictMsg);
+        await fetchDossierById(targetPersonId, { preserveSigFeedback: true });
+        if (dossierSessionRef.current === startSessionSeq) {
+          setSigError(conflictMsg);
+        }
       } else {
         setSigError(
           err instanceof ApiError
@@ -1275,7 +1321,9 @@ export default function LabAssetsPage() {
         );
       }
     } finally {
-      setSigUploading(false);
+      if (dossierSessionRef.current === startSessionSeq) {
+        setSigUploading(false);
+      }
     }
   }
 
@@ -1284,26 +1332,44 @@ export default function LabAssetsPage() {
     setSigError("");
     setSigStatusMsg("");
     setSigDeleting(true);
+    const targetPersonId = dossier.person.id;
+    const targetPersonName = dossier.person.name;
+    const startSessionSeq = dossierSessionRef.current;
     const currentSha =
       dossier.signature?.signature_sha256 ??
       dossier.signature?.sha256 ??
       dossier.person.signature_sha256 ??
       null;
     try {
-      await deletePersonSignature(dossier.person.id, currentSha);
-      setSigConfirmDelete(false);
-      setSigStatusMsg("电子签名已删除");
-      setStatusBanner(`已删除 ${dossier.person.name} 的电子签名`);
-      await Promise.all([fetchDossierById(dossier.person.id), loadAll()]);
+      await deletePersonSignature(targetPersonId, currentSha);
+      setStatusBanner(`已删除 ${targetPersonName} 的电子签名`);
+      const loadAllPromise = loadAll();
+      if (dossierSessionRef.current === startSessionSeq) {
+        setSigConfirmDelete(false);
+        setSigStatusMsg("电子签名已删除");
+        await Promise.all([
+          fetchDossierById(targetPersonId, { preserveSigFeedback: true }),
+          loadAllPromise,
+        ]);
+      } else {
+        await loadAllPromise;
+      }
     } catch (err) {
+      if (dossierSessionRef.current !== startSessionSeq) {
+        return;
+      }
       if (
         err instanceof ApiError &&
         (err.status === 412 ||
           err.code.toUpperCase() === "PRECONDITION_FAILED" ||
           err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
       ) {
-        setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
-        await fetchDossierById(dossier.person.id);
+        const conflictMsg = mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED");
+        setSigError(conflictMsg);
+        await fetchDossierById(targetPersonId, { preserveSigFeedback: true });
+        if (dossierSessionRef.current === startSessionSeq) {
+          setSigError(conflictMsg);
+        }
       } else {
         setSigError(
           err instanceof ApiError
@@ -1312,7 +1378,9 @@ export default function LabAssetsPage() {
         );
       }
     } finally {
-      setSigDeleting(false);
+      if (dossierSessionRef.current === startSessionSeq) {
+        setSigDeleting(false);
+      }
     }
   }
 
