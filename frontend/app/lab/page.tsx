@@ -97,6 +97,7 @@ const EDITABLE_FIELDS: Record<TabKey, EditableFieldConfig[]> = {
         { value: "report", label: "研究报告/资政报告" },
         { value: "patent", label: "发明专利" },
         { value: "software", label: "软件著作权" },
+        { value: "award", label: "科研奖励/奖项" },
         { value: "book", label: "学术专著" },
         { value: "exhibition", label: "成果展" },
         { value: "other", label: "其他成果" },
@@ -753,6 +754,7 @@ export default function LabAssetsPage() {
   ) {
     editSessionSeqRef.current += 1;
     setEditSaving(false);
+    setRestoringFieldKey(null);
     setEditError("");
     setEditType(type);
     setEditItem(item);
@@ -770,7 +772,7 @@ export default function LabAssetsPage() {
 
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
-    if (!editItem) return;
+    if (!editItem || editSaving || restoringFieldKey !== null) return;
     const capturedSeq = editSessionSeqRef.current;
     setEditError("");
     setStatusBanner("");
@@ -832,6 +834,7 @@ export default function LabAssetsPage() {
     itemId: string,
     field: string,
   ) {
+    if (restoringFieldKey !== null || editSaving) return;
     setError("");
     setEditError("");
     setStatusBanner("");
@@ -859,9 +862,21 @@ export default function LabAssetsPage() {
         wasEditingTarget &&
         editSessionSeqRef.current === capturedSeq
       ) {
-        setEditItem(updatedEntity);
         const rec = updatedEntity as unknown as Record<string, unknown>;
         const restoredVal = rec[field];
+        setEditItem((prev) =>
+          prev && prev.id === itemId
+            ? ({
+                ...prev,
+                [field]: restoredVal,
+                provenance: updatedEntity.provenance,
+              } as
+                | LabPersonItem
+                | LabProjectItem
+                | LabAchievementItem
+                | LabFacilityItem)
+            : prev,
+        );
         setEditForm((prev) => ({
           ...prev,
           [field]:
@@ -882,7 +897,9 @@ export default function LabAssetsPage() {
         setError(msg);
       }
     } finally {
-      setRestoringFieldKey((prev) => (prev === opKey ? null : prev));
+      if (editSessionSeqRef.current === capturedSeq) {
+        setRestoringFieldKey((prev) => (prev === opKey ? null : prev));
+      }
     }
   }
 
@@ -999,7 +1016,7 @@ export default function LabAssetsPage() {
                       size="sm"
                       variant="outline"
                       className="h-6 px-2 text-[11px]"
-                      disabled={restoringFieldKey === opKey}
+                      disabled={restoringFieldKey !== null || editSaving}
                       onClick={() => handleRestoreImported(type, item.id, field)}
                     >
                       {restoringFieldKey === opKey
@@ -1045,7 +1062,7 @@ export default function LabAssetsPage() {
                           size="sm"
                           variant="outline"
                           className="h-6 px-2 text-[11px]"
-                          disabled={restoringFieldKey === opKey}
+                          disabled={restoringFieldKey !== null || editSaving}
                           onClick={() =>
                             handleRestoreImported(type, item.id, field)
                           }
@@ -1803,6 +1820,7 @@ export default function LabAssetsPage() {
             if (!nextOpen) {
               editSessionSeqRef.current += 1;
               setEditSaving(false);
+              setRestoringFieldKey(null);
             }
             setEditModalOpen(nextOpen);
           }}
@@ -1850,7 +1868,7 @@ export default function LabAssetsPage() {
                               size="sm"
                               variant="outline"
                               className="h-6 px-2 text-[11px]"
-                              disabled={restoringFieldKey === opKey}
+                              disabled={restoringFieldKey !== null || editSaving}
                               onClick={() =>
                                 handleRestoreImported(
                                   editType,
@@ -1922,12 +1940,16 @@ export default function LabAssetsPage() {
                     onClick={() => {
                       editSessionSeqRef.current += 1;
                       setEditSaving(false);
+                      setRestoringFieldKey(null);
                       setEditModalOpen(false);
                     }}
                   >
                     {t.cancel}
                   </Button>
-                  <Button type="submit" disabled={editSaving}>
+                  <Button
+                    type="submit"
+                    disabled={editSaving || restoringFieldKey !== null}
+                  >
                     {editSaving ? t.saving : t.save}
                   </Button>
                 </DialogFooter>
