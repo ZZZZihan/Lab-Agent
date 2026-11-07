@@ -174,6 +174,14 @@ export async function logout(): Promise<void> {
   await fetch("/api/session", { method: "DELETE" });
 }
 
+export type FieldProvenanceSummary = {
+  source_kind: "import" | "manual" | "legacy" | string;
+  as_of_time?: string | null;
+  source_job_id?: string | null;
+  has_manual_override?: boolean;
+  imported_value?: unknown;
+};
+
 export type LabPersonItem = {
   id: string;
   user_id?: string | null;
@@ -188,8 +196,10 @@ export type LabPersonItem = {
   project_role: "applicant" | "member" | string;
   bio?: string | null;
   as_of_time?: string | null;
+  source_import_id?: string | null;
   application_text: string;
   application_text_with_bio: string;
+  provenance?: Record<string, FieldProvenanceSummary>;
 };
 
 export type LabProjectItem = {
@@ -208,8 +218,10 @@ export type LabProjectItem = {
   relationship_note?: string | null;
   raw_text: string;
   as_of_time?: string | null;
+  source_import_id?: string | null;
   application_text: string;
   application_text_with_rel: string;
+  provenance?: Record<string, FieldProvenanceSummary>;
 };
 
 export type LabAchievementItem = {
@@ -225,8 +237,10 @@ export type LabAchievementItem = {
   raw_text: string;
   parse_quality: string;
   as_of_time?: string | null;
+  source_import_id?: string | null;
   application_text: string;
   application_text_plain: string;
+  provenance?: Record<string, FieldProvenanceSummary>;
 };
 
 export type LabFacilityItem = {
@@ -238,7 +252,9 @@ export type LabFacilityItem = {
   usage_scenario?: string | null;
   raw_text: string;
   as_of_time?: string | null;
+  source_import_id?: string | null;
   application_text: string;
+  provenance?: Record<string, FieldProvenanceSummary>;
 };
 
 export type LabOverview = {
@@ -396,7 +412,7 @@ export type RosterRegenResponse = {
   roster_csv: string;
 };
 
-// Phase 2 provenance & merge arbitration types (pre-reserved for seamless integration)
+// Phase 2 provenance & merge arbitration types
 export type FieldProvenanceEntry = {
   id: string | number;
   entity_type: "person" | "project" | "achievement" | "facility" | string;
@@ -411,30 +427,35 @@ export type FieldProvenanceEntry = {
   superseded: boolean;
 };
 
-export type MergeDiffItem = {
+export type MergeChangeCategory =
+  | "added"
+  | "updated"
+  | "fill_blank"
+  | "time_regression"
+  | "manual_protected"
+  | "same_time_conflict";
+
+export type MergeChangeItem = {
+  change_key: string;
+  category: MergeChangeCategory;
   entity_type: string;
-  entity_id?: string | null;
-  entity_label?: string;
+  entity_id: string;
+  entity_name: string;
   field: string;
-  category:
-    | "added"
-    | "updated"
-    | "fill_blank"
-    | "time_regression"
-    | "manual_protected"
-    | "same_time_conflict"
-    | string;
-  current_value?: unknown;
+  current_value: unknown;
   current_as_of_time?: string | null;
   current_source_kind?: string | null;
-  incoming_value?: unknown;
-  incoming_as_of_time?: string | null;
+  current_source_job_id?: string | null;
+  incoming_value: unknown;
+  incoming_as_of_time: string;
+  default_action: "adopt_incoming" | "keep_current";
+  requires_decision: boolean;
 };
 
 export type MergePreviewResponse = {
   job_id: string;
-  as_of_time?: string | null;
-  counts: {
+  as_of_time: string;
+  summary: {
     added: number;
     updated: number;
     fill_blank: number;
@@ -442,7 +463,45 @@ export type MergePreviewResponse = {
     manual_protected: number;
     same_time_conflict: number;
   };
-  items: MergeDiffItem[];
+  changes: MergeChangeItem[];
+  added_entities: Array<{
+    entity_type: string;
+    name: string;
+    fingerprint?: string;
+  }>;
+};
+
+export type MergeDecision = {
+  change_key: string;
+  action: "adopt_incoming" | "keep_current" | "force_adopt";
+};
+
+export type MergeExecuteResponse = {
+  job_id: string;
+  status: string;
+  as_of_time?: string;
+  rag_document_id?: string | null;
+  rag_doc_key?: string;
+  stats?: {
+    added_entities?: number;
+    updated_fields?: number;
+    kept_fields?: number;
+    forced_fields?: number;
+    rag_doc_key?: string;
+  };
+  added_count?: number;
+  updated_count?: number;
+  fill_blank_count?: number;
+  forced_count?: number;
+  summary?: Record<string, number>;
+};
+
+export type RevertMergeResponse = {
+  job_id?: string;
+  reverted_fields: number;
+  deleted_entities: number;
+  job_status: string;
+  rag_doc_key?: string;
 };
 
 export async function listImportJobs(): Promise<ImportJobSummary[]> {
@@ -487,6 +546,57 @@ export async function reparseImportJob(
   return api<ImportJobResponse>(`admin/imports/${jobId}/reparse`, {
     method: "POST",
     body: JSON.stringify({ mode }),
+  });
+}
+
+export async function previewImportMerge(
+  jobId: string,
+  asOfTime?: string,
+): Promise<MergePreviewResponse> {
+  return api<MergePreviewResponse>(`admin/imports/${jobId}/merge-preview`, {
+    method: "POST",
+    body: JSON.stringify(asOfTime && asOfTime.trim() ? { as_of_time: asOfTime.trim() } : {}),
+  });
+}
+
+export async function executeImportMerge(
+  jobId: string,
+  payload: { as_of_time?: string; decisions: MergeDecision[] },
+): Promise<MergeExecuteResponse> {
+  return api<MergeExecuteResponse>(`admin/imports/${jobId}/merge`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function revertImportMerge(
+  jobId: string,
+): Promise<RevertMergeResponse> {
+  return api<RevertMergeResponse>(`admin/imports/${jobId}/revert`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function updateLabEntity(
+  type: "people" | "projects" | "achievements" | "facilities",
+  id: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>(`lab/${type}/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function restoreImportedField(
+  type: "people" | "projects" | "achievements" | "facilities",
+  id: string,
+  field: string,
+): Promise<Record<string, unknown>> {
+  return api<Record<string, unknown>>(`lab/${type}/${id}/restore-imported`, {
+    method: "POST",
+    body: JSON.stringify({ field }),
   });
 }
 
