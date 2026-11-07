@@ -352,13 +352,14 @@ async def record_manual_field_edit(
     old_val: object,
     new_val: object,
     actor_id: uuid.UUID,
+    force_record: bool = False,
 ) -> None:
     """Record a `source_kind='manual'` edit, backfilling baseline import provenance if absent."""
     if field not in MANAGED_FIELDS[entity_type]:
         return
     norm_old = normalize_field_json_value(entity_type, field, old_val)
     norm_new = normalize_field_json_value(entity_type, field, new_val)
-    if norm_old == norm_new:
+    if norm_old == norm_new and not force_record:
         return
 
     existing_rows = list(
@@ -529,8 +530,15 @@ async def restore_entity_imported_fields(
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     prior_affiliation = getattr(entity, "affiliation", None)
     prior_email = getattr(entity, "email", None)
+    target_fields = list(fields)
+    if (
+        entity_type == "project"
+        and "status" in target_fields
+        and "status_source" not in target_fields
+    ):
+        target_fields.append("status_source")
     restored: list[str] = []
-    for field in fields:
+    for field in target_fields:
         if field not in MANAGED_FIELDS[entity_type]:
             raise ProvisionError(422, "invalid_field", f"不支持恢复该字段: {field}")
         rows = list(
@@ -740,9 +748,10 @@ def _extract_project_incoming(
     funder = str(proj_dict.get("funder") or "").strip() or None
     grant_no = str(proj_dict.get("grant_no") or "").strip() or None
     pi_name = str(proj_dict.get("pi_name") or "").strip() or None
-    lab_role = str(proj_dict.get("lab_role") or "host").strip()
-    if lab_role not in ("host", "participant", "unknown"):
-        lab_role = "host"
+    lab_role_raw = str(proj_dict.get("lab_role") or "").strip().lower()
+    lab_role: str | None = (
+        lab_role_raw if lab_role_raw in ("host", "participant") else None
+    )
     start_d = _parse_iso_date(proj_dict.get("start_date"))
     end_d = _parse_iso_date(proj_dict.get("end_date"))
     amt_wan = _parse_decimal(proj_dict.get("amount_wan"))
@@ -1516,7 +1525,6 @@ async def build_merge_preview(
 
     as_of_date = _resolve_job_as_of(job, as_of_time_override)
     await ensure_baseline_provenance(session)
-    await _reconcile_job_existing_provenance(session, job.id, as_of_date)
 
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
@@ -1532,7 +1540,26 @@ async def build_merge_preview(
     )
     by_ef: dict[tuple[str, uuid.UUID, str], list[FieldProvenance]] = {}
     for r in live_rows:
-        by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(r)
+        row_obj = r
+        if (
+            r.source_job_id == job.id
+            and r.source_kind == "import"
+            and r.as_of_time != as_of_date
+        ):
+            row_obj = FieldProvenance(
+                id=r.id,
+                entity_type=r.entity_type,
+                entity_id=r.entity_id,
+                field=r.field,
+                value=r.value,
+                source_kind=r.source_kind,
+                source_job_id=r.source_job_id,
+                as_of_time=as_of_date,
+                recorded_by=r.recorded_by,
+                recorded_at=r.recorded_at,
+                superseded=False,
+            )
+        by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(row_obj)
 
     preview: dict[str, Any] = dict(job.preview or {})
 
@@ -1577,12 +1604,14 @@ async def build_merge_preview(
     ) -> None:
         for field in MANAGED_FIELDS[entity_type]:
             inc_val = incoming_fields.get(field)
-            cur_val = get_entity_json_value(entity_type, entity, field)
-            if _is_blank(inc_val) or inc_val == cur_val:
-                continue
-
             f_rows = by_ef.get((entity_type, entity.id, field), [])
             eff = effective_value(f_rows)
+            if any(r.source_job_id == job.id for r in f_rows):
+                cur_val = eff.value if eff is not None else None
+            else:
+                cur_val = get_entity_json_value(entity_type, entity, field)
+            if _is_blank(inc_val) or inc_val == cur_val:
+                continue
             cur_as_of = (
                 eff.as_of_time
                 if eff is not None and eff.as_of_time is not None
@@ -2155,6 +2184,12 @@ async def execute_merge(
             if fp_val in used_proj_fps:
                 continue
             used_proj_fps.add(fp_val)
+            raw_lab_role = str(proj.get("lab_role") or "").strip().lower()
+            default_lab_role = (
+                raw_lab_role
+                if raw_lab_role in ("host", "participant", "unknown")
+                else "host"
+            )
             new_proj = LabProject(
                 title=title,
                 funder=(
@@ -2170,7 +2205,7 @@ async def execute_merge(
                     if isinstance(j_fields["pi_name"], str)
                     else None
                 ),
-                lab_role=str(j_fields["lab_role"] or "host"),
+                lab_role=str(j_fields["lab_role"] or default_lab_role),
                 start_date=_parse_iso_date(j_fields["start_date"]),
                 end_date=_parse_iso_date(j_fields["end_date"]),
                 amount_wan=_parse_decimal(j_fields["amount_wan"]),

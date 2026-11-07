@@ -1285,18 +1285,67 @@ async def test_phase2_revert_merge_and_backfill_provenance(
         is None
     )
 
-    # Regression check: _extract_project_incoming treats uninferable status (inferred + unknown, no end_date) as None
+    # Regression check: _extract_project_incoming treats uninferable status (inferred + unknown, no end_date) and unknown lab_role as None
     _, _, uninf_fields = _extract_project_incoming(
         {
             "title": "无状态与结题日期的存量项目",
+            "lab_role": "unknown",
             "status": "unknown",
             "status_source": "inferred",
             "end_date": None,
         },
         date(2026, 6, 1),
     )
+    assert uninf_fields["lab_role"] is None
     assert uninf_fields["status"] is None
     assert uninf_fields["status_source"] is None
+
+    # Regression check: manually changing project status while status_source is already 'explicit' also protects status_source as manual, and restoring status restores status_source too
+    age_proj_before_edit = next(
+        p
+        for p in (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+            "projects"
+        ]
+        if p["grant_no"] == "AGE240005"
+    )
+    assert age_proj_before_edit["status"] == "completed"
+    assert age_proj_before_edit["status_source"] == "explicit"
+    manual_status_patch = await client.patch(
+        f"/api/v1/lab/projects/{age_proj_before_edit['id']}",
+        headers=headers,
+        json={"status": "ongoing"},
+    )
+    assert manual_status_patch.status_code == 200, manual_status_patch.text
+    patched_age = manual_status_patch.json()["project"]
+    assert patched_age["status"] == "ongoing"
+    assert patched_age["provenance"]["status"]["source_kind"] == "manual"
+    assert patched_age["provenance"]["status_source"]["source_kind"] == "manual"
+
+    restore_age_status = await client.post(
+        f"/api/v1/lab/projects/{age_proj_before_edit['id']}/restore-imported",
+        headers=headers,
+        json={"field": "status"},
+    )
+    assert restore_age_status.status_code == 200, restore_age_status.text
+    restored_age = restore_age_status.json()["project"]
+    assert restored_age["status"] == "completed"
+    assert restored_age["provenance"]["status"]["source_kind"] == "import"
+    assert restored_age["provenance"]["status_source"]["source_kind"] == "import"
+
+    # Regression check: previewing an already-merged job with a different as_of_time does NOT persist mutations before merge is executed
+    preview_2022 = await client.post(
+        f"/api/v1/admin/imports/{job_2026['job_id']}/merge-preview",
+        headers=headers,
+        json={"as_of_time": "2022-01-01"},
+    )
+    assert preview_2022.status_code == 200, preview_2022.text
+    assert preview_2022.json()["summary"]["time_regression"] >= 1
+    ppl_after_preview_only = await client.get("/api/v1/lab/people", headers=headers)
+    wan_after_preview_only = next(
+        p for p in ppl_after_preview_only.json()["people"] if p["name"] == "万振凯"
+    )
+    assert wan_after_preview_only["title"] == "教授"
+    assert wan_after_preview_only["as_of_time"] == "2026-06-01"
 
     # Regression check: correcting an already-merged job's as_of_time reconciles its FieldProvenance rows and entity effective values
     remerge_2022 = await client.post(

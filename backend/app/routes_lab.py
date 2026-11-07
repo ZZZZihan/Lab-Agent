@@ -1761,6 +1761,9 @@ async def update_lab_project(
         raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
     project.entity_fingerprint = new_proj_fp
 
+    status_changed = old_vals.get("status") != get_entity_json_value(
+        "project", project, "status"
+    )
     for fld in touched_fields:
         await record_manual_field_edit(
             session,
@@ -1770,6 +1773,7 @@ async def update_lab_project(
             old_val=old_vals.get(fld),
             new_val=get_entity_json_value("project", project, fld),
             actor_id=user.id,
+            force_record=(fld == "status_source" and status_changed),
         )
     await session.flush()
     prov_map = await build_provenance_map(session, "project", [project])
