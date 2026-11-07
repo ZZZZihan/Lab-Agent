@@ -118,7 +118,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   });
-  if (!response.ok) throw await parseError(response);
+  if (!response.ok) {
+    const err = await parseError(response);
+    if (
+      err.status === 403 &&
+      err.code === "password_change_required" &&
+      typeof window !== "undefined" &&
+      window.location.pathname !== "/change-password" &&
+      window.location.pathname !== "/login"
+    ) {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.assign("/change-password");
+    }
+    throw err;
+  }
   return (await response.json()) as T;
 }
 
@@ -261,6 +274,46 @@ export type ImportPreviewPerson = {
   affiliation?: string | null;
   match?: { status: "new" | "existing" | "conflict" | string; user_id?: string };
   warnings?: string[];
+  exclude?: boolean;
+  override_mode?: "new" | "existing" | "exclude";
+  override_login_name?: string;
+  override_link_user_id?: string;
+};
+
+export type ImportJobStats = {
+  people_parsed?: number;
+  achievements_parsed?: number;
+  projects_parsed?: number;
+  facilities_parsed?: number;
+  pii_dropped?: number;
+  users_created?: number;
+  users_linked?: number;
+  people_inserted?: number;
+  people_skipped?: number;
+  achievements_inserted?: number;
+  achievements_skipped?: number;
+  projects_inserted?: number;
+  projects_skipped?: number;
+  facilities_inserted?: number;
+  facilities_skipped?: number;
+  rag_doc_key?: string;
+};
+
+export type ImportJobSummary = {
+  id: string;
+  job_id: string;
+  uploaded_by?: string;
+  original_filename: string;
+  content_sha256?: string;
+  parser_version?: string;
+  as_of_time?: string | null;
+  status: "parsed" | "provisioned" | "merged" | "failed" | string;
+  stats: ImportJobStats;
+  error_code?: string | null;
+  rag_document_id?: string | null;
+  created_at?: string | null;
+  provisioned_at?: string | null;
+  provisioned_by?: string | null;
 };
 
 export type ImportJobResponse = {
@@ -269,15 +322,14 @@ export type ImportJobResponse = {
   original_filename: string;
   as_of_time?: string | null;
   status: string;
-  stats: {
-    people_parsed?: number;
-    achievements_parsed?: number;
-    projects_parsed?: number;
-    facilities_parsed?: number;
-    pii_dropped?: number;
-  };
+  error_code?: string | null;
+  created_at?: string | null;
+  provisioned_at?: string | null;
+  deduplicated?: boolean;
+  stats: ImportJobStats;
   preview: {
     as_of_time?: string | null;
+    extraction_mode?: string;
     cover?: {
       project_title?: string | null;
       applicant_name?: string | null;
@@ -317,7 +369,8 @@ export type ProvisionResult = {
   job_id: string;
   status: string;
   as_of_time: string;
-  deadline: string;
+  deadline: string | null;
+  initial_password?: string | null;
   rag_document_id?: string | null;
   rag_doc_key: string;
   stats: {
@@ -335,3 +388,116 @@ export type ProvisionResult = {
   roster_text: string;
   roster_csv: string;
 };
+
+export type RosterRegenResponse = {
+  job_id: string;
+  format: "text" | "csv" | string;
+  roster_text: string;
+  roster_csv: string;
+};
+
+// Phase 2 provenance & merge arbitration types (pre-reserved for seamless integration)
+export type FieldProvenanceEntry = {
+  id: string | number;
+  entity_type: "person" | "project" | "achievement" | "facility" | string;
+  entity_id: string;
+  field: string;
+  value: unknown;
+  source_kind: "import" | "manual" | "legacy" | string;
+  source_job_id?: string | null;
+  as_of_time?: string | null;
+  recorded_at?: string | null;
+  recorded_by?: string | null;
+  superseded: boolean;
+};
+
+export type MergeDiffItem = {
+  entity_type: string;
+  entity_id?: string | null;
+  entity_label?: string;
+  field: string;
+  category:
+    | "added"
+    | "updated"
+    | "fill_blank"
+    | "time_regression"
+    | "manual_protected"
+    | "same_time_conflict"
+    | string;
+  current_value?: unknown;
+  current_as_of_time?: string | null;
+  current_source_kind?: string | null;
+  incoming_value?: unknown;
+  incoming_as_of_time?: string | null;
+};
+
+export type MergePreviewResponse = {
+  job_id: string;
+  as_of_time?: string | null;
+  counts: {
+    added: number;
+    updated: number;
+    fill_blank: number;
+    time_regression: number;
+    manual_protected: number;
+    same_time_conflict: number;
+  };
+  items: MergeDiffItem[];
+};
+
+export async function listImportJobs(): Promise<ImportJobSummary[]> {
+  const res = await api<{ imports: ImportJobSummary[] }>("admin/imports");
+  return res.imports;
+}
+
+export async function getImportJob(jobId: string): Promise<ImportJobResponse> {
+  return api<ImportJobResponse>(`admin/imports/${jobId}`);
+}
+
+export async function deleteImportJob(
+  jobId: string,
+): Promise<{ status: string; id: string; job_id: string }> {
+  return api<{ status: string; id: string; job_id: string }>(
+    `admin/imports/${jobId}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function getImportRoster(
+  jobId: string,
+  format: "text" | "csv" = "text",
+): Promise<RosterRegenResponse> {
+  return api<RosterRegenResponse>(`admin/imports/${jobId}/roster?format=${format}`);
+}
+
+export async function updateImportPreview(
+  jobId: string,
+  payload: Record<string, unknown>,
+): Promise<ImportJobResponse> {
+  return api<ImportJobResponse>(`admin/imports/${jobId}/preview`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function reparseImportJob(
+  jobId: string,
+  mode: "llm" | "fsm" = "fsm",
+): Promise<ImportJobResponse> {
+  return api<ImportJobResponse>(`admin/imports/${jobId}/reparse`, {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export async function reindexLabAssets(): Promise<{
+  status: string;
+  rag_doc_key: string;
+  rag_document_id?: string | null;
+}> {
+  return api<{
+    status: string;
+    rag_doc_key: string;
+    rag_document_id?: string | null;
+  }>("lab/reindex", { method: "POST" });
+}

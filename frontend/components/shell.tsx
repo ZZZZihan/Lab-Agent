@@ -38,12 +38,16 @@ export function Shell({ children }: { children: React.ReactNode }) {
     currentUser()
       .then((found) => {
         if (!found) {
+          window.dispatchEvent(new Event("lab-auth-logout"));
           router.replace("/login");
           return;
         }
         setUser(found);
         if (found.must_change_password) {
           setPwOpen(true);
+          if (pathname !== "/change-password") {
+            router.replace("/change-password");
+          }
         }
         setReady(true);
         api<{ calibrated?: boolean }>("health")
@@ -54,8 +58,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
             setCalibrated(null);
           });
       })
-      .catch(() => router.replace("/login"));
-  }, [router]);
+      .catch(() => {
+        window.dispatchEvent(new Event("lab-auth-logout"));
+        router.replace("/login");
+      });
+  }, [router, pathname]);
 
   const links = [
     { href: "/chat", label: t.chat },
@@ -64,6 +71,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/settings", label: t.settings },
     ...(user?.role === "admin"
       ? [
+          { href: "/admin/imports", label: t.importsNav },
           { href: "/admin/users", label: t.users },
           { href: "/admin/groups", label: t.groups },
           { href: "/audit", label: t.audit },
@@ -126,6 +134,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 variant="ghost"
                 size="sm"
                 onClick={async () => {
+                  window.dispatchEvent(new Event("lab-auth-logout"));
                   await logout();
                   router.replace("/login");
                 }}
