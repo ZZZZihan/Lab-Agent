@@ -614,6 +614,30 @@ async def test_phase2_manual_edit_protection_and_restore_imported(
         == "2027-09-01"
     )
 
+    # 5. Regression check: PATCH facility.spec then restore-imported recomputes entity_fingerprint
+    fac_resp = await client.get("/api/v1/lab/facilities", headers=headers)
+    fac = fac_resp.json()["facilities"][0]
+    fac_id = fac["id"]
+    orig_fac_fp = fac["entity_fingerprint"]
+    orig_fac_spec = fac["spec"]
+
+    patch_fac = await client.patch(
+        f"/api/v1/lab/facilities/{fac_id}",
+        headers=headers,
+        json={"spec": "8xH100 临时手工规格"},
+    )
+    assert patch_fac.status_code == 200, patch_fac.text
+    assert patch_fac.json()["facility"]["entity_fingerprint"] != orig_fac_fp
+
+    restore_fac = await client.post(
+        f"/api/v1/lab/facilities/{fac_id}/restore-imported",
+        headers=headers,
+        json={"field": "spec"},
+    )
+    assert restore_fac.status_code == 200, restore_fac.text
+    assert restore_fac.json()["facility"]["spec"] == orig_fac_spec
+    assert restore_fac.json()["facility"]["entity_fingerprint"] == orig_fac_fp
+
 
 async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None:
     """Scenario 5: Two proposals with identical as_of_time but different field values require explicit decision."""
@@ -682,6 +706,33 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     ppl_resp = await client.get("/api/v1/lab/people", headers=headers)
     wan = next(p for p in ppl_resp.json()["people"] if p["name"] == "万振凯")
     assert wan["title"] == "教授"
+    assert wan["provenance"]["title"]["source_kind"] == "import"
+    assert wan["provenance"]["title"]["has_manual_override"] is False
+
+    # A strictly newer 2027 proposal must classify title as 'updated' (NOT 'manual_protected')
+    docx_c = build_proposal_docx_variant(
+        fill_date_str="2027 年 6 月 1 日",
+        project_title="后续2027本子",
+        wan_title="讲席教授",
+    )
+    job_c = await _upload_proposal(
+        client, headers, docx_c, "proposal-2027-c.docx", "2027-06-01"
+    )
+    mp_c_resp = await client.post(
+        f"/api/v1/admin/imports/{job_c['job_id']}/merge-preview",
+        headers=headers,
+    )
+    assert mp_c_resp.status_code == 200
+    mp_c = mp_c_resp.json()
+    title_change_c = next(
+        c
+        for c in mp_c["changes"]
+        if c["entity_type"] == "person"
+        and c["entity_name"] == "万振凯"
+        and c["field"] == "title"
+    )
+    assert title_change_c["category"] == "updated"
+    assert title_change_c["default_action"] == "adopt_incoming"
 
 
 async def test_phase2_revert_merge_and_backfill_provenance(
@@ -714,6 +765,19 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     async with maker() as session:
         await session.execute(delete(FieldProvenance))
         await session.commit()
+
+    # Regression check: calling restore-imported on a legacy record with no provenance rows must preserve current value and establish baseline
+    ppl_pre_bf = await client.get("/api/v1/lab/people", headers=headers)
+    wan_legacy = next(
+        p for p in ppl_pre_bf.json()["people"] if p["name"] == "万振凯"
+    )
+    legacy_restore = await client.post(
+        f"/api/v1/lab/people/{wan_legacy['id']}/restore-imported",
+        headers=headers,
+        json={"field": "title"},
+    )
+    assert legacy_restore.status_code == 200, legacy_restore.text
+    assert legacy_restore.json()["person"]["title"] == "副教授"
 
     bf1 = await client.post(
         "/api/v1/admin/imports/backfill-provenance", headers=headers

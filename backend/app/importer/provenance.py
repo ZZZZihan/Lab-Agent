@@ -400,6 +400,81 @@ async def record_manual_field_edit(
     )
 
 
+async def _refresh_and_validate_entity_fingerprint(
+    session: AsyncSession,
+    entity_type: EntityType,
+    entity: Any,
+) -> None:
+    """Recompute and validate `entity_fingerprint` after provenance-driven field mutations."""
+    new_fp: str
+    if entity_type == "person":
+        t1_fp: str | None = None
+        if getattr(entity, "user_id", None) is not None:
+            linked_user = await session.get(User, entity.user_id)
+            if linked_user is not None and linked_user.login_name:
+                cand_t1 = person_fp(
+                    tier="T1",
+                    login_name=linked_user.login_name,
+                    name=entity.name,
+                    affiliation=entity.affiliation,
+                    email=entity.email,
+                )
+                if cand_t1 == entity.entity_fingerprint:
+                    t1_fp = cand_t1
+        if t1_fp is not None:
+            new_fp = t1_fp
+        else:
+            new_fp = person_fp(
+                tier="T3" if entity.email else "T2",
+                login_name=None,
+                name=entity.name,
+                affiliation=entity.affiliation,
+                email=entity.email,
+            )
+    elif entity_type == "project":
+        new_fp = project_fp(
+            grant_no=entity.grant_no,
+            title=entity.title,
+            funder=entity.funder,
+        )
+    elif entity_type == "achievement":
+        new_fp = achievement_fp(
+            kind=entity.kind,
+            title=entity.title,
+            year=entity.year,
+            raw_text=entity.raw_text or entity.title,
+            parse_quality=entity.parse_quality or "structured",
+        )
+    else:
+        new_fp = facility_fp(
+            category=entity.category,
+            name=entity.name,
+            spec=entity.spec,
+        )
+
+    if new_fp != entity.entity_fingerprint:
+        model_map: dict[EntityType, Any] = {
+            "person": LabPerson,
+            "project": LabProject,
+            "achievement": LabAchievement,
+            "facility": LabFacility,
+        }
+        model_cls = model_map[entity_type]
+        dup_id = await session.scalar(
+            select(model_cls.id).where(
+                model_cls.entity_fingerprint == new_fp,
+                model_cls.id != entity.id,
+            )
+        )
+        if dup_id is not None:
+            raise ProvisionError(
+                409,
+                "duplicate_entity",
+                "恢复或合并后的记录与现有资产指纹冲突",
+            )
+        entity.entity_fingerprint = new_fp
+
+
 async def restore_entity_imported_fields(
     session: AsyncSession,
     *,
@@ -422,10 +497,33 @@ async def restore_entity_imported_fields(
                 )
             )
         )
+        if not rows:
+            cur_val = get_entity_json_value(entity_type, entity, field)
+            if not _is_blank(cur_val):
+                src_job_id = getattr(entity, "source_import_id", None)
+                base_as_of = getattr(entity, "as_of_time", None) or date.today()
+                session.add(
+                    FieldProvenance(
+                        entity_type=entity_type,
+                        entity_id=entity.id,
+                        field=field,
+                        value=cur_val,
+                        source_kind="import" if src_job_id is not None else "legacy",
+                        source_job_id=src_job_id,
+                        as_of_time=base_as_of,
+                        recorded_by=None,
+                        superseded=False,
+                    )
+                )
+            restored.append(field)
+            continue
         manual_rows = [r for r in rows if r.source_kind == "manual"]
         for mr in manual_rows:
             mr.superseded = True
         remaining = [r for r in rows if r.source_kind != "manual"]
+        if not manual_rows and not remaining:
+            restored.append(field)
+            continue
         eff = effective_value(remaining)
         set_entity_field_from_json(
             entity_type,
@@ -435,6 +533,7 @@ async def restore_entity_imported_fields(
         )
         restored.append(field)
 
+    await _refresh_and_validate_entity_fingerprint(session, entity_type, entity)
     await session.flush()
     all_live = list(
         await session.scalars(
@@ -1528,9 +1627,7 @@ async def execute_merge(
                 chosen_act = _lookup_decision(decisions_map, ch) or default_act
 
                 if cat in ("time_regression", "manual_protected", "same_time_conflict"):
-                    if chosen_act == "force_adopt" or (
-                        cat == "same_time_conflict" and chosen_act == "adopt_incoming"
-                    ):
+                    if chosen_act == "force_adopt":
                         man_row = FieldProvenance(
                             entity_type=entity_type,
                             entity_id=entity.id,
@@ -1558,6 +1655,19 @@ async def execute_merge(
                 updated_fields_count += 1
             elif ch is not None:
                 kept_fields_count += 1
+
+        old_fp = entity.entity_fingerprint
+        await _refresh_and_validate_entity_fingerprint(session, entity_type, entity)
+        if entity.entity_fingerprint != old_fp:
+            fp_set_map = {
+                "person": used_person_fps,
+                "project": used_proj_fps,
+                "achievement": used_ach_fps,
+                "facility": used_fac_fps,
+            }
+            target_set = fp_set_map[entity_type]
+            target_set.discard(old_fp)
+            target_set.add(entity.entity_fingerprint)
 
         if getattr(entity, "as_of_time", None) is None or as_of_date > entity.as_of_time:
             entity.as_of_time = as_of_date
@@ -1906,6 +2016,7 @@ async def revert_import_merge(
                     if not _is_blank(cur_val) and field != "project_role":
                         set_entity_field_from_json(etype, ent, field, None)
                         reverted_fields += 1
+                await _refresh_and_validate_entity_fingerprint(session, etype, ent)
             else:
                 await session.delete(ent)
                 deleted_entities += 1
@@ -1922,6 +2033,8 @@ async def revert_import_merge(
             if new_val != cur_val:
                 set_entity_field_from_json(etype, ent, field, new_val)
                 reverted_fields += 1
+
+        await _refresh_and_validate_entity_fingerprint(session, etype, ent)
 
         rem_dates = [r.as_of_time for r in remaining_live if r.as_of_time is not None]
         if rem_dates:
