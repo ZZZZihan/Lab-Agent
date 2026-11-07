@@ -400,32 +400,47 @@ export type ImportJobResponse = {
       spec?: string | null;
       value_wan?: string | null;
     }>;
-    signatures?: {
-      summary?: {
-        found_images?: number;
-        bound?: number;
-        rejected?: number;
-        ambiguous?: number;
-        warnings?: number;
-      };
-      items?: Array<{
-        sig_id: string;
-        role: "pi" | "member" | string;
-        person_ref?: string | null;
-        person_key?: string | null;
-        person_name?: string | null;
-        status: "bound" | "rejected" | "ambiguous" | string;
-        sha256?: string | null;
-        mime?: string | null;
-        width?: number | null;
-        height?: number | null;
-        size?: number;
-        warnings?: string[];
-      }>;
-      warnings?: Array<string | { code: string; message?: string }>;
-    };
-    warnings?: Array<{ code: string; count?: number; section?: string }>;
+    signatures?:
+      | ImportPreviewSignatureItem[]
+      | {
+          summary?: {
+            found_images?: number;
+            bound?: number;
+            rejected?: number;
+            ambiguous?: number;
+            warnings?: number;
+          };
+          items?: ImportPreviewSignatureItem[];
+          warnings?: Array<string | { code: string; message?: string }>;
+        };
+    warnings?: Array<{
+      code: string;
+      count?: number;
+      section?: string;
+      person_temp_id?: string;
+      person_name?: string;
+      person_temp_ids?: string[];
+      person_names?: string[];
+    }>;
   };
+};
+
+export type ImportPreviewSignatureItem = {
+  sig_id?: string;
+  person_temp_id?: string | null;
+  role: "pi" | "member" | string;
+  person_ref?: string | null;
+  person_key?: string | null;
+  person_name?: string | null;
+  status?: "bound" | "rejected" | "ambiguous" | string;
+  sha256?: string | null;
+  mime?: string | null;
+  width?: number | null;
+  height?: number | null;
+  size?: number;
+  source_kind?: string;
+  source_location?: Record<string, unknown>;
+  warnings?: string[];
 };
 
 export type ProvisionResult = {
@@ -676,13 +691,16 @@ export type DossierProjectItem = {
   title: string;
   year?: number | null;
   funder?: string | null;
+  source?: string | null;
   grant_no?: string | null;
+  code?: string | null;
   pi_name?: string | null;
   status?: string;
   status_label?: string;
   start_date?: string | null;
   end_date?: string | null;
   relation: "pi" | "participant" | "host" | string;
+  relation_role?: "pi" | "participant" | "host" | string;
   match?: "exact" | "ambiguous" | string;
   copy_text?: string;
   application_text?: string;
@@ -693,10 +711,13 @@ export type DossierAchievementItem = {
   id: string;
   title: string;
   kind?: string;
+  type?: string;
   kind_label?: string;
   venue?: string | null;
   year?: number | null;
+  authors?: string | null;
   relation: "first_author" | "coauthor" | string;
+  relation_role?: "first_author" | "coauthor" | string;
   author_position?: number | null;
   match?: "exact" | "ambiguous" | string;
   copy_text?: string;
@@ -726,9 +747,18 @@ export type PersonDossierResponse = {
   achievements?: DossierAchievementItem[];
   outputs?: DossierAchievementItem[];
   counts?: {
-    projects: number;
+    projects?: number;
+    projects_total?: number;
+    projects_as_pi?: number;
+    projects_as_participant?: number;
     outputs?: number;
+    outputs_total?: number;
+    outputs_first_author?: number;
+    outputs_coauthor?: number;
     achievements?: number;
+    achievements_total?: number;
+    achievements_first_author?: number;
+    achievements_coauthor?: number;
   };
   truncated?: {
     projects: boolean;
@@ -753,6 +783,7 @@ export type BasketEntityKind = "person" | "project" | "achievement" | "facility"
 
 export type BasketItemRef = {
   kind: BasketEntityKind | string;
+  entity?: BasketEntityKind | string;
   id: string;
 };
 
@@ -778,20 +809,27 @@ export type BasketState = {
 };
 
 export type BatchFormatOptions = {
+  style?: "nsfc_standard" | "compact" | "plain" | string;
   with_support?: boolean;
+  include_support_note?: boolean;
   with_relation?: boolean;
   include_bio?: boolean;
-  numbering?: "none" | "arabic" | "bracket";
+  include_person_bio?: boolean;
+  numbering?: "none" | "arabic" | "decimal" | "bracket";
   separator?: "blank_line" | "newline";
   group_by_kind?: boolean;
+  group_by_entity?: boolean;
+  include_signatures_annex?: boolean;
 };
 
 export type BatchFormatResponse = {
   text: string;
+  combined_text?: string;
   lines?: string[];
   count?: number;
   items?: Array<{
     kind: string;
+    entity?: string;
     id: string;
     ok: boolean;
     text?: string;
@@ -806,12 +844,17 @@ export type BatchFormatResponse = {
 };
 
 export type ExportSelectedOptions = {
+  style?: "nsfc_standard" | "compact" | "plain" | string;
   with_support?: boolean;
+  include_support_note?: boolean;
   with_relation?: boolean;
   include_bio?: boolean;
-  numbering?: "none" | "arabic" | "bracket";
+  include_person_bio?: boolean;
+  numbering?: "none" | "arabic" | "decimal" | "bracket";
   group_by_kind?: boolean;
+  group_by_entity?: boolean;
   include_signatures?: boolean;
+  include_signatures_annex?: boolean;
   signature_width_cm?: number;
   title?: string;
 };
@@ -827,14 +870,22 @@ const LAB_ERROR_MESSAGES: Record<string, string> = {
   SIGNATURE_TOO_LARGE: "签名图片需小于 2 MB",
   SIGNATURE_REJECTED_FORMAT: "仅支持 PNG / JPEG / WebP 格式",
   SIGNATURE_CORRUPT: "图片文件已损坏",
+  SIGNATURE_CORRUPT_IN_STORAGE: "存储中的电子签名数据异常",
   SIGNATURE_BAD_DIMENSIONS: "图片尺寸不符合要求（8–6000 像素）",
+  FORBIDDEN: "仅本人或管理员可修改签名",
   FORBIDDEN_SIGNATURE_EDIT: "仅本人或管理员可修改签名",
+  PRECONDITION_FAILED: "签名已被他人更新，请刷新",
   SIGNATURE_PRECONDITION_FAILED: "签名已被他人更新，请刷新",
   SIGNATURE_NOT_FOUND: "该成员暂无签名",
   PERSON_NOT_FOUND: "成员不存在或已删除",
+  NOT_FOUND: "部分条目或成员不存在",
   SIGNATURE_FILE_MISSING: "请选择要上传的签名图片文件",
   BASKET_EMPTY: "素材篮为空",
   BASKET_TOO_LARGE: "素材篮超出上限（最多 200 项）",
+  BATCH_LIMIT_EXCEEDED: "素材篮超出上限（最多 200 项）",
+  ZIP_PERSON_LIMIT_EXCEEDED: "单次打包签名人数超出限制（最多 50 人）",
+  ZIP_SIZE_LIMIT_EXCEEDED: "签名包总大小超过 50 MB 上限",
+  INVALID_FILENAME_TEMPLATE: "签名文件命名模板无效",
   NO_SIGNATURES_SELECTED: "所选成员均无签名",
   BASKET_ALL_MISSING: "所选条目均已不存在",
   FORMAT_KIND_UNSUPPORTED: "包含不支持的素材类型",
@@ -847,8 +898,12 @@ const LAB_ERROR_MESSAGES: Record<string, string> = {
   SIG_INVALID_IMAGE: "签名图片格式或尺寸校验未通过",
   SIG_TOO_LARGE: "签名图片超过 2 MB，已跳过",
   SIG_MULTIPLE_IN_CELL: "同一签名格内存在多张图片，未自动绑定",
+  SIGNATURE_MULTIPLE_IN_ROW: "同一成员行包含多张签名图片，已跳过自动绑定",
+  SIGNATURE_UNEXPECTED_CELL: "非签名列发现图片，已忽略",
   SIG_ORPHAN: "签名列存在图片但该行无姓名，未绑定",
   SIG_PI_AMBIGUOUS: "负责人签章区图片无法唯一确定",
+  SIGNATURE_AMBIGUOUS_PI: "负责人签章区存在多张候选图片，未自动绑定",
+  SIGNATURE_AMBIGUOUS_PERSON: "存在同名成员歧义，签名已跳过自动入库",
   SIG_PI_CONFLICT: "负责人成员行签名与签章区签名不一致，已保留成员行签名",
   SIG_DUPLICATE_HASH: "同一签名图片被绑定到多名成员，请核对",
   SIG_MISSING_PART: "文档内引用的签名图片部件缺失",
@@ -893,10 +948,32 @@ export async function getPersonDossier(
   personId: string,
   signal?: AbortSignal,
 ): Promise<PersonDossierResponse> {
-  return api<PersonDossierResponse>(
+  const res = await api<PersonDossierResponse>(
     `lab/people/${encodeURIComponent(personId)}/dossier`,
     signal ? { signal } : undefined,
   );
+  const normalizeProject = (p: DossierProjectItem): DossierProjectItem => {
+    const role = p.relation_role ?? p.relation ?? "participant";
+    return {
+      ...p,
+      relation: role,
+      relation_role: role,
+    };
+  };
+  const normalizeAchievement = (a: DossierAchievementItem): DossierAchievementItem => {
+    const role = a.relation_role ?? a.relation ?? "coauthor";
+    return {
+      ...a,
+      relation: role,
+      relation_role: role,
+    };
+  };
+  return {
+    ...res,
+    projects: (res.projects || []).map(normalizeProject),
+    achievements: res.achievements ? res.achievements.map(normalizeAchievement) : undefined,
+    outputs: res.outputs ? res.outputs.map(normalizeAchievement) : undefined,
+  };
 }
 
 export function getPersonSignatureUrl(
@@ -952,39 +1029,53 @@ export async function formatLabBatch(
   items: BasketItemRef[],
   options?: BatchFormatOptions,
 ): Promise<BatchFormatResponse> {
-  const normalizedOptions: BatchFormatOptions = {
-    with_support: options?.with_support ?? true,
-    with_relation: options?.with_relation ?? false,
-    include_bio: options?.include_bio ?? false,
-    numbering: options?.numbering ?? "bracket",
-    separator: options?.separator ?? "blank_line",
-    group_by_kind: options?.group_by_kind ?? false,
+  const rawNumbering = options?.numbering ?? "bracket";
+  const backendNumbering = rawNumbering === "arabic" ? "decimal" : rawNumbering;
+  const backendOptions = {
+    style: options?.style ?? "nsfc_standard",
+    numbering: backendNumbering,
+    group_by_entity: options?.group_by_entity ?? options?.group_by_kind ?? false,
+    include_person_bio: options?.include_person_bio ?? options?.include_bio ?? false,
+    include_support_note: options?.include_support_note ?? options?.with_support ?? true,
+    include_signatures_annex: options?.include_signatures_annex ?? false,
   };
-  return api<BatchFormatResponse>("lab/format/batch", {
+  const res = await api<BatchFormatResponse>("lab/format/batch", {
     method: "POST",
     body: JSON.stringify({
-      items: items.map((it) => ({ kind: it.kind, id: it.id })),
-      options: normalizedOptions,
+      items: items.map((it) => ({
+        entity: it.entity || it.kind || "person",
+        id: it.id,
+      })),
+      options: backendOptions,
     }),
     signal:
       typeof AbortSignal !== "undefined" && "timeout" in AbortSignal
         ? AbortSignal.timeout(60000)
         : undefined,
   });
+  return {
+    ...res,
+    text: res.text ?? res.combined_text ?? "",
+    items: res.items?.map((it) => ({
+      ...it,
+      kind: it.kind || it.entity || "person",
+      ok: it.ok ?? true,
+    })),
+  };
 }
 
 export async function downloadSignaturesZip(
   personIds: string[],
   naming: "seq_name" | "name" | "name_id" = "seq_name",
-  includeManifest: boolean = true,
+  _includeManifest?: boolean,
 ): Promise<BlobDownloadResult> {
+  void _includeManifest;
   const response = await fetch("/api/backend/lab/people/signatures:zip", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       person_ids: personIds,
-      naming,
-      include_manifest: includeManifest,
+      filename_template: naming,
     }),
     cache: "no-store",
     signal:
@@ -1000,8 +1091,12 @@ export async function downloadSignaturesZip(
     response.headers.get("content-disposition"),
     `课题组签名_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.zip`,
   );
-  const incRaw = response.headers.get("x-signatures-included");
-  const missRaw = response.headers.get("x-signatures-missing");
+  const incRaw =
+    response.headers.get("x-signature-count-included") ??
+    response.headers.get("x-signatures-included");
+  const missRaw =
+    response.headers.get("x-signature-count-missing") ??
+    response.headers.get("x-signatures-missing");
   return {
     blob,
     filename,
@@ -1014,22 +1109,28 @@ export async function exportSelectedLabAssets(
   items: BasketItemRef[],
   options?: ExportSelectedOptions,
 ): Promise<BlobDownloadResult & { warnings: string[] }> {
-  const normalizedOptions: ExportSelectedOptions = {
-    with_support: options?.with_support ?? true,
-    with_relation: options?.with_relation ?? false,
-    include_bio: options?.include_bio ?? false,
-    numbering: options?.numbering ?? "bracket",
-    group_by_kind: options?.group_by_kind ?? true,
-    include_signatures: options?.include_signatures ?? true,
-    signature_width_cm: options?.signature_width_cm ?? 3.0,
-    title: options?.title ?? "写本子素材汇总",
+  const rawNumbering = options?.numbering ?? "bracket";
+  const backendNumbering = rawNumbering === "arabic" ? "decimal" : rawNumbering;
+  const title = options?.title ?? "写本子素材汇总";
+  const backendOptions = {
+    style: options?.style ?? "nsfc_standard",
+    numbering: backendNumbering,
+    group_by_entity: options?.group_by_entity ?? options?.group_by_kind ?? true,
+    include_person_bio: options?.include_person_bio ?? options?.include_bio ?? false,
+    include_support_note: options?.include_support_note ?? options?.with_support ?? true,
+    include_signatures_annex:
+      options?.include_signatures_annex ?? options?.include_signatures ?? true,
   };
   const response = await fetch("/api/backend/lab/export:selected", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      items: items.map((it) => ({ kind: it.kind, id: it.id })),
-      options: normalizedOptions,
+      title,
+      items: items.map((it) => ({
+        entity: it.entity || it.kind || "person",
+        id: it.id,
+      })),
+      options: backendOptions,
     }),
     cache: "no-store",
     signal:
@@ -1050,6 +1151,11 @@ export async function exportSelectedLabAssets(
     .split(",")
     .map((w) => w.trim())
     .filter(Boolean);
+  const warnCountRaw = response.headers.get("x-export-warnings-count");
+  const warnCount = warnCountRaw ? Number(warnCountRaw) : 0;
+  if (warnings.length === 0 && warnCount > 0) {
+    warnings.push(`导出包含 ${warnCount} 项签名或素材提示，请查阅文档末尾提示信息`);
+  }
   return {
     blob,
     filename,

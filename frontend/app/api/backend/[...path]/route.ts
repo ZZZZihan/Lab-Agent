@@ -37,6 +37,10 @@ async function forward(request: Request, path: string[]) {
   if (secret) headers.set("X-Internal-Proxy-Secret", secret);
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
+  const ifMatch = request.headers.get("if-match");
+  if (ifMatch) headers.set("If-Match", ifMatch);
+  const ifNoneMatch = request.headers.get("if-none-match");
+  if (ifNoneMatch) headers.set("If-None-Match", ifNoneMatch);
   const method = request.method;
   const upstream = await fetch(`${apiBase()}/api/v1/${path.join("/")}${new URL(request.url).search}`, {
     method,
@@ -45,13 +49,25 @@ async function forward(request: Request, path: string[]) {
     cache: "no-store",
   });
   const type = upstream.headers.get("content-type") || "application/json";
-  return new NextResponse(upstream.body, {
+  const responseHeaders: Record<string, string> = {
+    "Content-Type": type,
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+  };
+  for (const hdr of [
+    "content-disposition",
+    "etag",
+    "x-signature-count-included",
+    "x-signature-count-missing",
+    "x-export-warnings-count",
+    "x-export-warnings",
+  ]) {
+    const val = upstream.headers.get(hdr);
+    if (val) responseHeaders[hdr] = val;
+  }
+  return new NextResponse(upstream.status === 304 ? null : upstream.body, {
     status: upstream.status,
-    headers: {
-      "Content-Type": type,
-      "Cache-Control": "no-cache",
-      "X-Accel-Buffering": "no",
-    },
+    headers: responseHeaders,
   });
 }
 

@@ -41,6 +41,7 @@ import {
   type DossierProjectItem,
   type FieldProvenanceSummary,
   type ImportJobResponse,
+  type ImportPreviewSignatureItem,
   type LabAchievementItem,
   type LabFacilityItem,
   type LabOverview,
@@ -1269,6 +1270,7 @@ export default function LabAssetsPage() {
       if (
         err instanceof ApiError &&
         (err.status === 412 ||
+          err.code.toUpperCase() === "PRECONDITION_FAILED" ||
           err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
       ) {
         setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
@@ -1305,6 +1307,7 @@ export default function LabAssetsPage() {
       if (
         err instanceof ApiError &&
         (err.status === 412 ||
+          err.code.toUpperCase() === "PRECONDITION_FAILED" ||
           err.code.toUpperCase() === "SIGNATURE_PRECONDITION_FAILED")
       ) {
         setSigError(mapLabErrorCode("SIGNATURE_PRECONDITION_FAILED"));
@@ -2180,6 +2183,45 @@ export default function LabAssetsPage() {
   const dossierProjects: DossierProjectItem[] = dossier?.projects || [];
   const dossierAchievements: DossierAchievementItem[] =
     dossier?.achievements || dossier?.outputs || [];
+
+  const previewSignatures = useMemo<ImportPreviewSignatureItem[]>(() => {
+    const rawSigs = importJob?.preview?.signatures;
+    if (!rawSigs) return [];
+    const list = Array.isArray(rawSigs) ? rawSigs : rawSigs.items || [];
+    const jobWarnings = importJob?.preview?.warnings || [];
+    return list.map((sig, idx) => {
+      const sigKey =
+        sig.person_temp_id ||
+        sig.person_key ||
+        sig.sig_id ||
+        sig.person_ref ||
+        sig.person_name ||
+        `sig-${idx + 1}`;
+      const status = sig.status || "bound";
+      const matchedWarnCodes = jobWarnings
+        .filter(
+          (w) =>
+            (w.person_temp_id && w.person_temp_id === sigKey) ||
+            (Array.isArray(w.person_temp_ids) &&
+              w.person_temp_ids.includes(sigKey)) ||
+            (sig.person_name &&
+              ((w.person_name && w.person_name === sig.person_name) ||
+                (Array.isArray(w.person_names) &&
+                  w.person_names.includes(sig.person_name)))),
+        )
+        .map((w) => w.code);
+      const combinedWarnings = Array.from(
+        new Set([...(sig.warnings || []), ...matchedWarnCodes]),
+      );
+      return {
+        ...sig,
+        sig_id: sigKey,
+        person_temp_id: sig.person_temp_id || sigKey,
+        status,
+        warnings: combinedWarnings,
+      };
+    });
+  }, [importJob]);
 
   return (
     <Shell>
@@ -3479,7 +3521,10 @@ export default function LabAssetsPage() {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="font-medium text-[14px] text-foreground">
                       关联承担项目 (
-                      {dossier.counts?.projects ?? dossierProjects.length})
+                      {dossier.counts?.projects_total ??
+                        dossier.counts?.projects ??
+                        dossierProjects.length}
+                      )
                     </h3>
                     {dossierProjects.length > 0 ? (
                       <Button
@@ -3521,6 +3566,10 @@ export default function LabAssetsPage() {
                           proj.copy_text ||
                           proj.application_text ||
                           `《${proj.title}》`;
+                        const projRelation =
+                          proj.relation_role ?? proj.relation;
+                        const isProjLeader =
+                          projRelation === "pi" || projRelation === "host";
                         return (
                           <div
                             key={proj.id}
@@ -3544,17 +3593,11 @@ export default function LabAssetsPage() {
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   <Badge
                                     variant={
-                                      proj.relation === "pi" ||
-                                      proj.relation === "host"
-                                        ? "secondary"
-                                        : "outline"
+                                      isProjLeader ? "secondary" : "outline"
                                     }
                                     className="text-[11px]"
                                   >
-                                    {proj.relation === "pi" ||
-                                    proj.relation === "host"
-                                      ? "负责人"
-                                      : "参与"}
+                                    {isProjLeader ? "负责人" : "参与"}
                                   </Badge>
                                   <span className="font-medium text-foreground">
                                     《{proj.title}》
@@ -3602,7 +3645,11 @@ export default function LabAssetsPage() {
 
                   {dossier.truncated?.projects ? (
                     <p className="text-[11px] text-muted-foreground">
-                      仅显示最近 200 条，共 {dossier.counts?.projects ?? 200} 条
+                      仅显示最近 200 条，共{" "}
+                      {dossier.counts?.projects_total ??
+                        dossier.counts?.projects ??
+                        200}{" "}
+                      条
                     </p>
                   ) : null}
                 </div>
@@ -3612,7 +3659,9 @@ export default function LabAssetsPage() {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="font-medium text-[14px] text-foreground">
                       关联前期成果 (
-                      {dossier.counts?.achievements ??
+                      {dossier.counts?.achievements_total ??
+                        dossier.counts?.outputs_total ??
+                        dossier.counts?.achievements ??
                         dossier.counts?.outputs ??
                         dossierAchievements.length}
                       )
@@ -3657,12 +3706,14 @@ export default function LabAssetsPage() {
                           ach.copy_text ||
                           ach.application_text ||
                           `《${ach.title}》`;
-                        const relLabel =
-                          ach.relation === "first_author"
-                            ? "第一作者"
-                            : ach.author_position && ach.author_position > 1
-                              ? `第 ${ach.author_position} 作者`
-                              : "共同作者";
+                        const achRelation =
+                          ach.relation_role ?? ach.relation;
+                        const isFirstAuthor = achRelation === "first_author";
+                        const relLabel = isFirstAuthor
+                          ? "第一作者"
+                          : ach.author_position && ach.author_position > 1
+                            ? `第 ${ach.author_position} 作者`
+                            : "共同作者";
                         return (
                           <div
                             key={ach.id}
@@ -3686,9 +3737,7 @@ export default function LabAssetsPage() {
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   <Badge
                                     variant={
-                                      ach.relation === "first_author"
-                                        ? "secondary"
-                                        : "outline"
+                                      isFirstAuthor ? "secondary" : "outline"
                                     }
                                     className="text-[11px]"
                                   >
@@ -3742,7 +3791,9 @@ export default function LabAssetsPage() {
                   dossier.truncated?.outputs ? (
                     <p className="text-[11px] text-muted-foreground">
                       仅显示最近 200 条，共{" "}
-                      {dossier.counts?.achievements ??
+                      {dossier.counts?.achievements_total ??
+                        dossier.counts?.outputs_total ??
+                        dossier.counts?.achievements ??
                         dossier.counts?.outputs ??
                         200}{" "}
                       条
@@ -4382,11 +4433,14 @@ export default function LabAssetsPage() {
                     {importJob.preview.facilities?.length ?? 0}
                   </span>{" "}
                   项
-                  {importJob.preview.signatures?.summary ? (
+                  {previewSignatures.length > 0 ? (
                     <>
                       、提取绑定电子签名{" "}
                       <span className="font-mono font-semibold">
-                        {importJob.preview.signatures.summary.bound ?? 0}
+                        {
+                          previewSignatures.filter((s) => s.status === "bound")
+                            .length
+                        }
                       </span>{" "}
                       枚
                     </>
@@ -4534,8 +4588,7 @@ export default function LabAssetsPage() {
                 </div>
 
                 {/* Spec §6.6 Extracted Signatures Preview Table */}
-                {importJob.preview.signatures?.items &&
-                importJob.preview.signatures.items.length > 0 ? (
+                {previewSignatures.length > 0 ? (
                   <div className="space-y-1.5">
                     <h4 className="font-medium text-[12px] text-foreground">
                       抽取到的成员电子签名（取消勾选将跳过入库）
@@ -4553,23 +4606,26 @@ export default function LabAssetsPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-border">
-                          {importJob.preview.signatures.items.map((sig) => {
-                            const isSkipped = Boolean(
-                              skipSignatureIds[sig.sig_id],
-                            );
+                          {previewSignatures.map((sig, idx) => {
+                            const sigKey =
+                              sig.person_temp_id ||
+                              sig.sig_id ||
+                              `sig-${idx + 1}`;
+                            const sigStatus = sig.status || "bound";
+                            const isSkipped = Boolean(skipSignatureIds[sigKey]);
                             return (
-                              <tr key={sig.sig_id}>
+                              <tr key={sigKey}>
                                 <td className="px-2.5 py-1.5">
                                   <input
                                     type="checkbox"
-                                    disabled={sig.status !== "bound"}
+                                    disabled={sigStatus !== "bound"}
                                     checked={
-                                      sig.status === "bound" && !isSkipped
+                                      sigStatus === "bound" && !isSkipped
                                     }
                                     onChange={(e) =>
                                       setSkipSignatureIds((prev) => ({
                                         ...prev,
-                                        [sig.sig_id]: !e.target.checked,
+                                        [sigKey]: !e.target.checked,
                                       }))
                                     }
                                   />
@@ -4583,14 +4639,14 @@ export default function LabAssetsPage() {
                                 <td className="px-2.5 py-1.5">
                                   <Badge
                                     variant={
-                                      sig.status === "bound"
+                                      sigStatus === "bound"
                                         ? "secondary"
                                         : "outline"
                                     }
                                   >
-                                    {sig.status === "bound"
+                                    {sigStatus === "bound"
                                       ? "已绑定"
-                                      : sig.status === "ambiguous"
+                                      : sigStatus === "ambiguous"
                                         ? "存在歧义"
                                         : "已拒绝"}
                                   </Badge>

@@ -37,6 +37,7 @@ const nextConfigModule = await import("../next.config.ts");
 const { proxy } = await import("../proxy.ts");
 const sessionRoute = await import("../app/api/session/route.ts");
 const backendRoute = await import("../app/api/backend/[...path]/route.ts");
+const apiModule = await import("../lib/api.ts");
 const { NextRequest } = await import("next/server.js");
 
 test("next.config.ts headers() sets CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy", async () => {
@@ -231,3 +232,158 @@ test("proxy redirects unauthenticated protected page requests to /login", () => 
     }
   }
 });
+
+test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize dossier relations", async () => {
+  const prevFetch = globalThis.fetch;
+  const captured = [];
+  globalThis.fetch = async (url, init = {}) => {
+    captured.push({ url: String(url), init });
+    if (String(url).includes("/dossier")) {
+      return new Response(
+        JSON.stringify({
+          person: { id: "p-1", name: "张三" },
+          projects: [
+            { id: "proj-1", title: "重点研发", relation_role: "pi" },
+            { id: "proj-2", title: "面上项目", relation_role: "participant" },
+          ],
+          achievements: [
+            { id: "ach-1", title: "论文A", relation_role: "first_author", author_position: 1 },
+            { id: "ach-2", title: "论文B", relation_role: "coauthor", author_position: 3 },
+          ],
+          counts: { projects_total: 2, achievements_total: 2 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (String(url).includes("lab/format/batch")) {
+      return new Response(
+        JSON.stringify({
+          items: [{ entity: "person", id: "p-1", text: "1. 张三" }],
+          combined_text: "1. 张三",
+          count: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (String(url).includes("signatures:zip")) {
+      return new Response(new Uint8Array([80, 75, 3, 4]), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": "attachment; filename*=UTF-8''%E7%AD%BE%E5%90%8D.zip",
+          "X-Signature-Count-Included": "2",
+          "X-Signature-Count-Missing": "1",
+        },
+      });
+    }
+    if (String(url).includes("export:selected")) {
+      return new Response(new Uint8Array([80, 75, 3, 4]), {
+        status: 200,
+        headers: {
+          "Content-Type":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": "attachment; filename*=UTF-8''%E7%B4%A0%E6%9D%90.docx",
+          "X-Export-Warnings-Count": "1",
+        },
+      });
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    // 1. getPersonDossier normalizes relation_role -> relation & relation_role
+    const dossier = await apiModule.getPersonDossier("p-1");
+    assert.equal(dossier.projects[0].relation, "pi");
+    assert.equal(dossier.projects[0].relation_role, "pi");
+    assert.equal(dossier.projects[1].relation, "participant");
+    assert.equal(dossier.achievements[0].relation, "first_author");
+    assert.equal(dossier.achievements[0].relation_role, "first_author");
+    assert.equal(dossier.achievements[1].relation, "coauthor");
+
+    // 2. formatLabBatch sends entity and strict BatchFormatOptions
+    const batchRes = await apiModule.formatLabBatch(
+      [{ kind: "person", id: "p-1" }],
+      {
+        with_support: true,
+        include_bio: true,
+        numbering: "arabic",
+        group_by_kind: true,
+      },
+    );
+    assert.equal(batchRes.text, "1. 张三");
+    const batchCall = captured.find((c) => c.url.includes("lab/format/batch"));
+    const batchBody = JSON.parse(batchCall.init.body);
+    assert.deepEqual(batchBody, {
+      items: [{ entity: "person", id: "p-1" }],
+      options: {
+        style: "nsfc_standard",
+        numbering: "decimal",
+        group_by_entity: true,
+        include_person_bio: true,
+        include_support_note: true,
+        include_signatures_annex: false,
+      },
+    });
+
+    // 3. downloadSignaturesZip sends { person_ids, filename_template } only
+    const zipRes = await apiModule.downloadSignaturesZip(["p-1", "p-2"], "name_id");
+    assert.equal(zipRes.filename, "签名.zip");
+    assert.equal(zipRes.includedCount, 2);
+    assert.equal(zipRes.missingCount, 1);
+    const zipCall = captured.find((c) => c.url.includes("signatures:zip"));
+    const zipBody = JSON.parse(zipCall.init.body);
+    assert.deepEqual(zipBody, {
+      person_ids: ["p-1", "p-2"],
+      filename_template: "name_id",
+    });
+
+    // 4. exportSelectedLabAssets sends top-level title, entity items, and strict BatchFormatOptions
+    const docxRes = await apiModule.exportSelectedLabAssets(
+      [
+        { kind: "person", id: "p-1" },
+        { kind: "project", id: "proj-1" },
+      ],
+      {
+        with_support: false,
+        include_bio: false,
+        numbering: "bracket",
+        group_by_kind: true,
+        include_signatures: true,
+        title: "自定义标题",
+      },
+    );
+    assert.equal(docxRes.filename, "素材.docx");
+    assert.equal(docxRes.warnings.length, 1);
+    const exportCall = captured.find((c) => c.url.includes("export:selected"));
+    const exportBody = JSON.parse(exportCall.init.body);
+    assert.deepEqual(exportBody, {
+      title: "自定义标题",
+      items: [
+        { entity: "person", id: "p-1" },
+        { entity: "project", id: "proj-1" },
+      ],
+      options: {
+        style: "nsfc_standard",
+        numbering: "bracket",
+        group_by_entity: true,
+        include_person_bio: false,
+        include_support_note: false,
+        include_signatures_annex: true,
+      },
+    });
+
+    // 5. deletePersonSignature sends If-Match header
+    await apiModule.deletePersonSignature("p-1", "abc123sha");
+    const delCall = captured.find(
+      (c) => c.url.includes("lab/people/p-1/signature") && c.init.method === "DELETE",
+    );
+    const delHeaders = new Headers(delCall.init.headers);
+    assert.equal(delHeaders.get("If-Match"), '"abc123sha"');
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+});
+
