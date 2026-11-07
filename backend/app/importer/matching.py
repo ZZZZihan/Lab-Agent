@@ -262,7 +262,7 @@ def classify_project_for_person(
 def classify_achievement_for_person(
     ach: LabAchievement | Any, target_norm_name: str
 ) -> tuple[str, int] | None:
-    """Return `(relation_role, author_position)` or `None` for `ach` (Spec v2.2 §4.4)."""
+    """Return `(relation_role, author_position)` or `None` for `ach` (Spec v2.2 §4.1)."""
     if not target_norm_name:
         return None
 
@@ -272,25 +272,26 @@ def classify_achievement_for_person(
     author_tokens = split_names(authors_text)
     first_norm = normalize_person_name(first_author_raw)
 
-    # Also check leading author prefix in raw_text if authors_text and first_author are empty
+    # Fallback to leading author prefix in raw_text only when no author_tokens and no first_norm exist
     if not author_tokens and not first_norm:
         raw_text = str(getattr(ach, "raw_text", "") or "").strip()
         m_lead = re.match(r"^([^:：《\n]{2,30})\s*[:：]", raw_text)
         if m_lead:
             author_tokens = split_names(m_lead.group(1))
 
-    if first_norm and first_norm not in author_tokens:
-        author_tokens = [first_norm, *author_tokens]
+    pos: int | None = (
+        author_tokens.index(target_norm_name) + 1
+        if target_norm_name in author_tokens
+        else None
+    )
+    is_first_author = (pos == 1) or (
+        bool(first_norm) and target_norm_name == first_norm
+    )
 
-    first = first_norm or (author_tokens[0] if author_tokens else "")
+    if pos is not None:
+        return ("first_author" if is_first_author else "coauthor"), pos
 
-    if first and target_norm_name == first:
+    if is_first_author:
         return "first_author", 1
-
-    if target_norm_name in author_tokens:
-        pos = author_tokens.index(target_norm_name) + 1
-        if pos == 1:
-            return "first_author", 1
-        return "coauthor", pos
 
     return None

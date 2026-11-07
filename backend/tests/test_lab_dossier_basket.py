@@ -23,7 +23,11 @@ from app.audit import sanitize_detail
 from app.auth import hash_password, issue_token
 from app.config import get_settings
 from app.db import get_engine, get_sessionmaker
-from app.importer.matching import normalize_person_name, split_names
+from app.importer.matching import (
+    classify_achievement_for_person,
+    normalize_person_name,
+    split_names,
+)
 from app.importer.parser import parse_proposal_docx
 from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
 from app.importer.reader import _extract_rel_ids_from_element, extract_embedded_images
@@ -1519,6 +1523,50 @@ async def test_person_dossier_attribution_and_query_budget(
     ]
     assert split_names("张三、欧阳 娜娜") == ["张三", "欧阳娜娜"]
     assert split_names("Roland, et al.") == ["roland"]
+
+    # Unit-test classify_achievement_for_person preserving original authors_text position
+    # when first_author metadata differs from or is absent in authors_text (Spec v2.2 §4.1)
+    ach_override_in_list = LabAchievement(
+        kind="paper",
+        title="一作覆盖但保留原位论文",
+        authors_text="张三、李四",
+        first_author="李四",
+        raw_text="张三、李四: 一作覆盖但保留原位论文",
+        parse_quality="structured",
+        entity_fingerprint="f1" * 32,
+        as_of_time=date(2026, 4, 26),
+    )
+    assert classify_achievement_for_person(ach_override_in_list, "张三") == (
+        "first_author",
+        1,
+    )
+    assert classify_achievement_for_person(ach_override_in_list, "李四") == (
+        "first_author",
+        2,
+    )
+
+    ach_override_outside_list = LabAchievement(
+        kind="paper",
+        title="列表外一作覆盖不降级不偏移论文",
+        authors_text="张三、李四",
+        first_author="王五",
+        raw_text="张三、李四: 列表外一作覆盖不降级不偏移论文",
+        parse_quality="structured",
+        entity_fingerprint="f2" * 32,
+        as_of_time=date(2026, 4, 26),
+    )
+    assert classify_achievement_for_person(ach_override_outside_list, "张三") == (
+        "first_author",
+        1,
+    )
+    assert classify_achievement_for_person(ach_override_outside_list, "李四") == (
+        "coauthor",
+        2,
+    )
+    assert classify_achievement_for_person(ach_override_outside_list, "王五") == (
+        "first_author",
+        1,
+    )
 
     _, admin_headers = await _seed_user_and_token(role="admin", login_name="dos_admin")
     zhang_user, zhang_headers = await _seed_user_and_token(
