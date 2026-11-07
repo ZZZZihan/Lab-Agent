@@ -666,6 +666,26 @@ def bind_proposal_signatures(
         if t_id in bound_by_temp_id:
             ordered_signatures.append(bound_by_temp_id[t_id])
 
+    sigs_by_sha: dict[str, list[dict[str, object]]] = {}
+    for sig_entry in ordered_signatures:
+        sha_val = str(sig_entry.get("sha256") or "")
+        if sha_val:
+            sigs_by_sha.setdefault(sha_val, []).append(sig_entry)
+    for sha_val, shared_group in sigs_by_sha.items():
+        if len(shared_group) >= 2:
+            warnings.append(
+                {
+                    "code": "SIG_DUPLICATE_HASH",
+                    "sha256": sha_val,
+                    "person_temp_ids": [
+                        str(g.get("person_temp_id") or "") for g in shared_group
+                    ],
+                    "person_names": [
+                        str(g.get("person_name") or "") for g in shared_group
+                    ],
+                }
+            )
+
     return ordered_signatures, blobs, warnings
 
 

@@ -135,6 +135,7 @@ def build_proposal_docx_with_10_signatures(
     pi_sig_in_commitment_table: bool = False,
     applicant_in_member_table: bool = False,
     applicant_member_sig_matches_pi: bool = False,
+    shared_member_sig_hash: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
     wrap_alternate_content: bool = False,
@@ -202,7 +203,9 @@ def build_proposal_docx_with_10_signatures(
             t_team.cell(r_idx, 8).text = "无"
 
         sig_para = t_team.cell(r_idx, 7).paragraphs[0]
-        if m_idx == 1 or m_idx == 7:
+        if shared_member_sig_hash and m_idx in (0, 1):
+            img_bytes = make_png_bytes(66, 30, fill_byte=0x77)
+        elif m_idx == 1 or m_idx == 7:
             img_bytes = make_png_bytes(60 + m_idx, 28, fill_byte=20 + m_idx)
         else:
             img_bytes = make_jpeg_bytes(90 + m_idx, 32, seed=10 + m_idx)
@@ -791,6 +794,30 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
         w.get("code") != "SIG_PI_CONFLICT"
         for w in same_pi_parsed["preview"]["warnings"]
     )
+
+    # Edge case 3i: Two distinct members share the exact same signature image (same sha256) -> retain bindings and emit SIG_DUPLICATE_HASH
+    shared_hash_docx = build_proposal_docx_with_10_signatures(
+        shared_member_sig_hash=True
+    )
+    shared_hash_parsed = parse_proposal_docx("shared_hash.docx", shared_hash_docx)
+    shared_hash_sigs = shared_hash_parsed["preview"]["signatures"]
+    assert len(shared_hash_sigs) == 10
+    expected_shared_sha = hashlib.sha256(
+        make_png_bytes(66, 30, fill_byte=0x77)
+    ).hexdigest()
+    assert shared_hash_sigs[1]["person_temp_id"] == "p2"
+    assert shared_hash_sigs[1]["sha256"] == expected_shared_sha
+    assert shared_hash_sigs[2]["person_temp_id"] == "p3"
+    assert shared_hash_sigs[2]["sha256"] == expected_shared_sha
+    dup_hash_warns = [
+        w
+        for w in shared_hash_parsed["preview"]["warnings"]
+        if w.get("code") == "SIG_DUPLICATE_HASH"
+    ]
+    assert len(dup_hash_warns) == 1
+    assert dup_hash_warns[0]["sha256"] == expected_shared_sha
+    assert dup_hash_warns[0]["person_temp_ids"] == ["p2", "p3"]
+    assert dup_hash_warns[0]["person_names"] == ["万振凯", "徐国伟"]
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)

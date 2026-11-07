@@ -3016,17 +3016,15 @@ async def upload_person_signature(
     if uid is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
 
-    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
-    person = await session.scalar(
-        select(LabPerson)
-        .options(undefer(LabPerson.signature_data))
-        .where(LabPerson.id == uid)
-        .with_for_update()
+    person_pre = await session.scalar(
+        select(LabPerson).where(LabPerson.id == uid)
     )
-    if person is None:
+    if person_pre is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
 
-    if actor.role != "admin" and (person.user_id is None or person.user_id != user.id):
+    if actor.role != "admin" and (
+        person_pre.user_id is None or person_pre.user_id != user.id
+    ):
         return _lab_v22_error(
             403,
             "FORBIDDEN",
@@ -3035,8 +3033,8 @@ async def upload_person_signature(
 
     if_match = request.headers.get("if-match")
     if if_match is not None and if_match.strip():
-        cur_sha = person.signature_sha256 or ""
-        if not cur_sha or not _etag_matches(if_match, cur_sha):
+        pre_sha = person_pre.signature_sha256 or ""
+        if not pre_sha or not _etag_matches(if_match, pre_sha):
             return _lab_v22_error(
                 412,
                 "PRECONDITION_FAILED",
@@ -3123,6 +3121,31 @@ async def upload_person_signature(
             err_code,
             "签名图片文件损坏或尺寸不在允许范围内（8×8 至 6000×6000）",
         )
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    person = await session.scalar(
+        select(LabPerson)
+        .where(LabPerson.id == uid)
+        .options(undefer(LabPerson.signature_data))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if person is None:
+        return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
+    if actor.role != "admin" and (person.user_id is None or person.user_id != user.id):
+        return _lab_v22_error(
+            403,
+            "FORBIDDEN",
+            "仅管理员或本人可上传或替换电子签名",
+        )
+    if if_match is not None and if_match.strip():
+        cur_sha = person.signature_sha256 or ""
+        if not cur_sha or not _etag_matches(if_match, cur_sha):
+            return _lab_v22_error(
+                412,
+                "PRECONDITION_FAILED",
+                "电子签名已被其他请求更新，请刷新后重试",
+            )
 
     now_utc = datetime.now(UTC)
     person.signature_data = raw_bytes
