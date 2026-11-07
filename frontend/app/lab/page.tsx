@@ -280,7 +280,7 @@ export default function LabAssetsPage() {
     return achievements.filter((a) => {
       if (kindFilter && a.kind !== kindFilter) return false;
       if (onlyRecentAchievements) {
-        if (a.year && a.year < minYear) return false;
+        if (a.year == null || a.year < minYear) return false;
       }
       if (!q) return true;
       return (
