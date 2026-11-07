@@ -5,10 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import time
 import uuid
 import zipfile
 from datetime import date
+from pathlib import Path
 
 import docx
 import fakeredis.aioredis
@@ -35,17 +37,27 @@ INITIAL_PW = "TJPU-ColdStart-2026#Init"
 ORIGIN = "http://127.0.0.1:43123"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-FORWARDED_RESPONSE_HEADERS = (
-    "content-disposition",
-    "etag",
-    "x-signature-count-included",
-    "x-signature-count-missing",
-    "x-export-warnings-count",
-    "x-export-warnings",
-    "x-content-type-options",
-    "content-security-policy",
-    "cache-control",
-)
+def _load_route_ts_forwarded_headers() -> tuple[str, ...]:
+    route_ts = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/app/api/backend/[...path]/route.ts"
+    ).read_text(encoding="utf-8")
+    loop_match = re.search(
+        r"for\s*\(\s*const\s+hdr\s+of\s*\[(.*?)\]\s*\)",
+        route_ts,
+        re.DOTALL,
+    )
+    assert loop_match is not None, "route.ts missing header forwarding loop"
+    extracted = [
+        m.group(1).lower()
+        for m in re.finditer(r'"([^"]+)"', loop_match.group(1))
+    ]
+    if 'upstream.headers.get("cache-control")' in route_ts:
+        extracted.append("cache-control")
+    return tuple(extracted)
+
+
+FORWARDED_RESPONSE_HEADERS = _load_route_ts_forwarded_headers()
 
 
 async def _drain_pending() -> None:

@@ -8,7 +8,10 @@ registerHooks({
       return nextResolve("next/server.js", context);
     }
     if (specifier === "next/headers") {
-      return nextResolve("next/headers.js", context);
+      return {
+        shortCircuit: true,
+        url: "data:text/javascript,export async function cookies() { return { get(name) { const v = globalThis.__TEST_COOKIES__?.get(name); return v ? { name, value: v } : undefined; }, set(name, value) { globalThis.__TEST_COOKIES__?.set(name, value); }, delete(name) { globalThis.__TEST_COOKIES__?.delete(name); } }; }",
+      };
     }
     const parentURL = context.parentURL || "";
     if (
@@ -416,19 +419,190 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
 
 test("/api/backend/[...path] forwards signature security headers, ETag, and export counters", async () => {
   const prevOrigin = process.env.PUBLIC_ORIGIN;
+  const prevSecret = process.env.INTERNAL_PROXY_SECRET;
+  const prevFetch = globalThis.fetch;
+  const prevCookies = globalThis.__TEST_COOKIES__;
   process.env.PUBLIC_ORIGIN = "http://127.0.0.1:43123";
+  process.env.INTERNAL_PROXY_SECRET = "proxy-secret-test";
+
+  const upstreamCalls = [];
   try {
-    const rules = await nextConfigModule.default.headers();
-    assert.equal(rules[0].source, "/:path*");
-    // Verify backendRoute exports all 5 HTTP methods required by Spec v2.2
-    for (const method of ["GET", "POST", "PATCH", "PUT", "DELETE"]) {
-      assert.equal(typeof backendRoute[method], "function");
-    }
+    // 1. Unauthenticated request without session cookie returns 401
+    globalThis.__TEST_COOKIES__ = new Map();
+    const unauthResp = await backendRoute.GET(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people"),
+      { params: Promise.resolve({ path: ["lab", "people"] }) },
+    );
+    assert.equal(unauthResp.status, 401);
+
+    // 2. Authenticated GET signature stream forwards request headers and security/caching/ETag response headers
+    globalThis.__TEST_COOKIES__ = new Map([["la_session", "test-session-jwt"]]);
+    globalThis.fetch = async (url, init = {}) => {
+      upstreamCalls.push({ url: String(url), init });
+      const reqHeaders = new Headers(init.headers);
+      if (reqHeaders.get("If-None-Match") === '"etag-304"') {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ETag: '"etag-304"',
+            "Cache-Control": "private, max-age=0, must-revalidate",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy":
+              "default-src 'none'; img-src 'self' data:; style-src 'none'; script-src 'none'; sandbox",
+          },
+        });
+      }
+      if (String(url).endsWith("/signature") || String(url).includes("/signature?")) {
+        return new Response(new Uint8Array([137, 80, 78, 71]), {
+          status: 200,
+          headers: {
+            "Content-Type": "image/png",
+            "Cache-Control": "private, max-age=0, must-revalidate",
+            ETag: '"sig-sha-256"',
+            "Content-Disposition":
+              "inline; filename*=UTF-8''%E4%B8%87%E6%8C%AF%E5%87%AF_%E7%AD%BE%E5%90%8D.png",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy":
+              "default-src 'none'; img-src 'self' data:; style-src 'none'; script-src 'none'; sandbox",
+          },
+        });
+      }
+      return new Response(new Uint8Array([80, 75, 3, 4]), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition":
+            "attachment; filename*=UTF-8''%E7%AD%BE%E5%90%8D%E5%8C%85.zip",
+          "X-Signature-Count-Included": "8",
+          "X-Signature-Count-Missing": "2",
+          "X-Export-Warnings-Count": "1",
+          "X-Export-Warnings": '["SIG_WEBP_SKIPPED"]',
+        },
+      });
+    };
+
+    const sigGetResp = await backendRoute.GET(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people/p1/signature?raw=1", {
+        method: "GET",
+        headers: {
+          "If-None-Match": '"old-etag"',
+          "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
+        },
+      }),
+      { params: Promise.resolve({ path: ["lab", "people", "p1", "signature"] }) },
+    );
+    assert.equal(sigGetResp.status, 200);
+    assert.equal(sigGetResp.headers.get("content-type"), "image/png");
+    assert.equal(
+      sigGetResp.headers.get("cache-control"),
+      "private, max-age=0, must-revalidate",
+    );
+    assert.equal(sigGetResp.headers.get("etag"), '"sig-sha-256"');
+    assert.equal(
+      sigGetResp.headers.get("content-disposition"),
+      "inline; filename*=UTF-8''%E4%B8%87%E6%8C%AF%E5%87%AF_%E7%AD%BE%E5%90%8D.png",
+    );
+    assert.equal(sigGetResp.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(
+      sigGetResp.headers.get("content-security-policy"),
+      "default-src 'none'; img-src 'self' data:; style-src 'none'; script-src 'none'; sandbox",
+    );
+    assert.equal(sigGetResp.headers.get("x-accel-buffering"), "no");
+    assert.deepEqual(new Uint8Array(await sigGetResp.arrayBuffer()), new Uint8Array([137, 80, 78, 71]));
+
+    const firstUpstream = upstreamCalls[0];
+    assert.equal(
+      firstUpstream.url,
+      "http://127.0.0.1:43124/api/v1/lab/people/p1/signature?raw=1",
+    );
+    const firstReqHeaders = new Headers(firstUpstream.init.headers);
+    assert.equal(firstReqHeaders.get("Authorization"), "Bearer test-session-jwt");
+    assert.equal(firstReqHeaders.get("If-None-Match"), '"old-etag"');
+    assert.equal(firstReqHeaders.get("X-Client-IP"), "198.51.100.7");
+    assert.equal(firstReqHeaders.get("X-Internal-Proxy-Secret"), "proxy-secret-test");
+
+    // 3. 304 Not Modified response preserves ETag & Cache-Control with empty body
+    const sig304Resp = await backendRoute.GET(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people/p1/signature", {
+        method: "GET",
+        headers: { "If-None-Match": '"etag-304"' },
+      }),
+      { params: Promise.resolve({ path: ["lab", "people", "p1", "signature"] }) },
+    );
+    assert.equal(sig304Resp.status, 304);
+    assert.equal(sig304Resp.headers.get("etag"), '"etag-304"');
+    assert.equal(
+      sig304Resp.headers.get("cache-control"),
+      "private, max-age=0, must-revalidate",
+    );
+    assert.equal((await sig304Resp.arrayBuffer()).byteLength, 0);
+
+    // 4. POST export endpoints forward signature counts, export warnings, and Content-Disposition
+    const exportPostResp = await backendRoute.POST(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people/signatures:zip", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ person_ids: ["p1"], filename_template: "seq_name" }),
+      }),
+      { params: Promise.resolve({ path: ["lab", "people", "signatures:zip"] }) },
+    );
+    assert.equal(exportPostResp.status, 200);
+    assert.equal(exportPostResp.headers.get("content-type"), "application/zip");
+    assert.equal(exportPostResp.headers.get("cache-control"), "no-cache");
+    assert.equal(
+      exportPostResp.headers.get("content-disposition"),
+      "attachment; filename*=UTF-8''%E7%AD%BE%E5%90%8D%E5%8C%85.zip",
+    );
+    assert.equal(exportPostResp.headers.get("x-signature-count-included"), "8");
+    assert.equal(exportPostResp.headers.get("x-signature-count-missing"), "2");
+    assert.equal(exportPostResp.headers.get("x-export-warnings-count"), "1");
+    assert.equal(
+      exportPostResp.headers.get("x-export-warnings"),
+      '["SIG_WEBP_SKIPPED"]',
+    );
+
+    // 5. PUT and DELETE forward If-Match optimistic concurrency header to upstream
+    await backendRoute.PUT(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people/p1/signature", {
+        method: "PUT",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "If-Match": '"sig-sha-256"',
+        },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+      { params: Promise.resolve({ path: ["lab", "people", "p1", "signature"] }) },
+    );
+    const putUpstream = upstreamCalls.at(-1);
+    assert.equal(new Headers(putUpstream.init.headers).get("If-Match"), '"sig-sha-256"');
+
+    await backendRoute.DELETE(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people/p1/signature", {
+        method: "DELETE",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "If-Match": '"sig-sha-256"',
+        },
+      }),
+      { params: Promise.resolve({ path: ["lab", "people", "p1", "signature"] }) },
+    );
+    const delUpstream = upstreamCalls.at(-1);
+    assert.equal(new Headers(delUpstream.init.headers).get("If-Match"), '"sig-sha-256"');
   } finally {
+    globalThis.fetch = prevFetch;
+    globalThis.__TEST_COOKIES__ = prevCookies;
     if (prevOrigin === undefined) {
       delete process.env.PUBLIC_ORIGIN;
     } else {
       process.env.PUBLIC_ORIGIN = prevOrigin;
+    }
+    if (prevSecret === undefined) {
+      delete process.env.INTERNAL_PROXY_SECRET;
+    } else {
+      process.env.INTERNAL_PROXY_SECRET = prevSecret;
     }
   }
 });
