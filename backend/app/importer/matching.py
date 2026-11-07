@@ -73,6 +73,7 @@ def normalize_person_name(raw: str | None) -> str:
         text = TRAILING_PAREN_RE.sub("", text)
         text = TRAILING_MARK_RE.sub("", text)
 
+    text = "".join(ch.lower() if ch.isascii() else ch for ch in text)
     return text
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
 import io
@@ -707,6 +708,7 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         },
     )
     assert r_conf3.status_code == 200
+    assert "_pre_merge_signatures" not in r_conf3.json()["stats"]
     assert r_conf3.json()["signature_result"] == {
         "saved": 0,
         "unchanged": 6,
@@ -774,6 +776,84 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert wan_still_upload is not None
         assert wan_still_upload.signature_source == "upload"
         assert wan_still_upload.signature_sha256 == manual_sha
+
+    # 5) Out-of-order revert: merge job A (None -> S1) then merge job B (S1 -> S2);
+    #    reverting job A first rebases job B's snapshot to None, so reverting job B restores None (not S1)
+    r_up_a = await client.post(
+        "/api/v1/admin/imports/proposal",
+        headers=admin_headers,
+        files={
+            "file": (
+                "proposal_chain_a.docx",
+                raw_docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    job_a_id = r_up_a.json()["job_id"]
+    r_merge_a = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_a.status_code == 200, r_merge_a.text
+
+    r_up_b = await client.post(
+        "/api/v1/admin/imports/proposal",
+        headers=admin_headers,
+        files={
+            "file": (
+                "proposal_chain_b.docx",
+                raw_docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    job_b_id = r_up_b.json()["job_id"]
+    # Replace p1 (郭建民) signature in job_b with a distinct PNG (S2)
+    s2_bytes = make_png_bytes(120, 50, fill_byte=0x77)
+    s2_sha = hashlib.sha256(s2_bytes).hexdigest()
+    async with maker() as session:
+        db_job_b = await session.get(ImportJob, uuid.UUID(job_b_id))
+        assert db_job_b is not None
+        prev_b = dict(db_job_b.preview or {})
+        sigs_b = [dict(s) for s in (prev_b.get("signatures") or [])]
+        for s_item in sigs_b:
+            if s_item.get("person_temp_id") == "p1":
+                s_item["sha256"] = s2_sha
+                s_item["mime"] = "image/png"
+        prev_b["signatures"] = sigs_b
+        blobs_b = dict(prev_b.get("_signature_blobs") or {})
+        blobs_b[s2_sha] = base64.b64encode(s2_bytes).decode("ascii")
+        prev_b["_signature_blobs"] = blobs_b
+        db_job_b.preview = prev_b
+        await session.commit()
+
+    r_merge_b = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_b.status_code == 200, r_merge_b.text
+    async with maker() as session:
+        guo_after_b = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_b is not None
+        assert guo_after_b.signature_sha256 == s2_sha
+
+    # Revert job A first (while S2 is active), then revert job B -> must restore None (S0), not S1
+    r_rev_a = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/revert", headers=admin_headers
+    )
+    assert r_rev_a.status_code == 200, r_rev_a.text
+    r_rev_b = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert", headers=admin_headers
+    )
+    assert r_rev_b.status_code == 200, r_rev_b.text
+    async with maker() as session:
+        guo_after_both_reverts = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_both_reverts is not None
+        assert guo_after_both_reverts.signature_sha256 is None
+        assert guo_after_both_reverts.signature_source is None
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +1039,14 @@ async def test_signature_crud_headers_concurrency_and_deferred_sql(
     for stmt in executed_sqls:
         assert "signature_data" not in stmt
 
-    # 8) DELETE signature (idempotent) -> 200, subsequent GET -> 404
+    # 8) DELETE signature (If-Match mismatch -> 412; matching/omitted -> 200, idempotent), subsequent GET -> 404
+    r_del_412 = await client.delete(
+        f"/api/v1/lab/people/{person_id}/signature",
+        headers={**self_headers, "If-Match": '"0000000000000000"'},
+    )
+    assert r_del_412.status_code == 412
+    assert r_del_412.json()["detail"]["code"] == "PRECONDITION_FAILED"
+
     r_del1 = await client.delete(
         f"/api/v1/lab/people/{person_id}/signature", headers=self_headers
     )
@@ -1246,11 +1333,11 @@ async def test_person_dossier_attribution_and_query_budget(
             title="Cross-Modal Reasoning",
             funder="NSFC",
             grant_no="INT-2026",
-            pi_name="John Smith",
+            pi_name="john smith",
             lab_role="host",
             status="ongoing",
             status_source="explicit",
-            raw_text="Cross-Modal Reasoning, PI: John Smith",
+            raw_text="Cross-Modal Reasoning, PI: john smith",
             entity_fingerprint="b4" * 32,
             as_of_time=date(2026, 4, 26),
             source_import_id=job.id,
@@ -1258,11 +1345,11 @@ async def test_person_dossier_attribution_and_query_budget(
         ach_john = LabAchievement(
             kind="paper",
             title="Spaced Name Attribution Paper",
-            first_author="John Smith",
-            authors_text="John Smith, 张三",
+            first_author="john smith",
+            authors_text="john smith, 张三",
             venue="IEEE TPAMI",
             year=2026,
-            raw_text="John Smith: Spaced Name Attribution Paper, 2026.",
+            raw_text="john smith: Spaced Name Attribution Paper, 2026.",
             parse_quality="structured",
             entity_fingerprint="c4" * 32,
             as_of_time=date(2026, 4, 26),

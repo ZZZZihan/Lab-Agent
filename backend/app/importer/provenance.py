@@ -2749,14 +2749,46 @@ async def revert_import_merge(
                     "signature_source",
                 ],
             )
-            if p_ent.signature_source == "upload":
-                continue
             applied_sha = snap.get("applied_sha256")
-            if (
+            if p_ent.signature_source == "upload" or (
                 isinstance(applied_sha, str)
                 and applied_sha
                 and p_ent.signature_sha256 != applied_sha
             ):
+                if isinstance(applied_sha, str) and applied_sha:
+                    other_jobs = list(
+                        await session.scalars(
+                            select(ImportJob)
+                            .where(
+                                ImportJob.id != job.id,
+                                ImportJob.status.in_(("merged", "provisioned")),
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    for oj in other_jobs:
+                        oj_stats = dict(oj.stats or {})
+                        oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+                        if not isinstance(oj_pre_sigs, dict):
+                            continue
+                        oj_snap = oj_pre_sigs.get(pid_str)
+                        if (
+                            isinstance(oj_snap, dict)
+                            and oj_snap.get("signature_sha256") == applied_sha
+                        ):
+                            new_oj_pre_sigs = dict(oj_pre_sigs)
+                            new_oj_pre_sigs[pid_str] = {
+                                "signature_data_b64": snap.get("signature_data_b64"),
+                                "signature_mime": snap.get("signature_mime"),
+                                "signature_sha256": snap.get("signature_sha256"),
+                                "signature_updated_at": snap.get(
+                                    "signature_updated_at"
+                                ),
+                                "signature_source": snap.get("signature_source"),
+                                "applied_sha256": oj_snap.get("applied_sha256"),
+                            }
+                            oj_stats["_pre_merge_signatures"] = new_oj_pre_sigs
+                            oj.stats = oj_stats
                 continue
             b64_data = snap.get("signature_data_b64")
             prev_sha = snap.get("signature_sha256")

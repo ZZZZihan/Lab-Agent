@@ -3078,6 +3078,16 @@ async def delete_person_signature(
             "仅管理员或本人可删除电子签名",
         )
 
+    if_match = request.headers.get("if-match")
+    if if_match is not None and if_match.strip():
+        cur_sha = person.signature_sha256 or ""
+        if not cur_sha or not _etag_matches(if_match, cur_sha):
+            return _lab_v22_error(
+                412,
+                "PRECONDITION_FAILED",
+                "电子签名已被其他请求更新，请刷新后重试",
+            )
+
     prev_sha = person.signature_sha256
     person.signature_data = None
     person.signature_mime = None

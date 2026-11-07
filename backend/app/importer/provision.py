@@ -805,6 +805,7 @@ async def provision_import_job(
         "roster_rows": roster_rows,
         "signature_result": sig_result,
     }
+    public_stats: dict[str, object] = dict(stats_payload)
     if changed_sig_snapshots:
         stats_payload["_pre_merge_signatures"] = changed_sig_snapshots
 
@@ -841,7 +842,7 @@ async def provision_import_job(
         ),
         "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
         "rag_doc_key": doc_key,
-        "stats": stats_payload,
+        "stats": public_stats,
         "signature_result": sig_result,
         "warnings": sig_extra_warnings,
         "roster_text": roster_text,
