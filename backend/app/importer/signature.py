@@ -289,7 +289,8 @@ def bind_proposal_signatures(
         header_row = grids[t_idx][h_idx]
         matched: int | None = None
         for c_idx, cell_text in enumerate(header_row):
-            if SIG_HEADER_RE.search(normalize_cell_text(cell_text)):
+            compact_header = re.sub(r"\s+", "", normalize_cell_text(cell_text))
+            if SIG_HEADER_RE.search(compact_header):
                 matched = c_idx
                 break
         header_sig_col_by_table[key] = matched

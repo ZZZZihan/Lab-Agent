@@ -24,7 +24,15 @@ from app.importer.matching import normalize_person_name, split_names
 from app.importer.parser import parse_proposal_docx
 from app.importer.reader import extract_embedded_images
 from app.importer.signature import validate_signature_image
-from app.models import ImportJob, LabAchievement, LabFacility, LabPerson, LabProject, User
+from app.models import (
+    AuditEvent,
+    ImportJob,
+    LabAchievement,
+    LabFacility,
+    LabPerson,
+    LabProject,
+    User,
+)
 from httpx import AsyncClient
 from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
@@ -114,6 +122,7 @@ def build_proposal_docx_with_10_signatures(
     unexpected_cell_sig: bool = False,
     ambiguous_pi_sig: bool = False,
     nearby_pi_diagram: bool = False,
+    spaced_sig_header: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
 ) -> bytes:
@@ -143,7 +152,8 @@ def build_proposal_docx_with_10_signatures(
         ("焦良晨", "无", "数据安全/隐私保护", "硕士", "天津工业大学", "2431101226"),
         ("武越", "无", "软件测试/质量管理", "硕士", "天津工业大学", "2431111321"),
     ]
-    t_team = doc.add_table(rows=3 + len(members), cols=8)
+    team_cols = 9 if spaced_sig_header else 8
+    t_team = doc.add_table(rows=3 + len(members), cols=team_cols)
     t_team.cell(0, 0).text = "申请人姓名"
     t_team.cell(0, 1).text = "郭建民"
     t_team.cell(0, 2).text = "专业职称"
@@ -158,7 +168,11 @@ def build_proposal_docx_with_10_signatures(
     t_team.cell(1, 2).text = "最后学位"
     t_team.cell(1, 3).text = "硕士"
 
-    headers = ["项目组成员", "姓名", "证件号", "专业职务", "研究专长", "学位", "工作单位", "本人签字"]
+    headers = (
+        ["项目组成员", "姓名", "证件号", "专业职务", "研究专长", "学位", "工作单位", "本人签\n字", "备注"]
+        if spaced_sig_header
+        else ["项目组成员", "姓名", "证件号", "专业职务", "研究专长", "学位", "工作单位", "本人签字"]
+    )
     for c_idx, h_text in enumerate(headers):
         t_team.cell(2, c_idx).text = h_text
 
@@ -171,6 +185,8 @@ def build_proposal_docx_with_10_signatures(
         t_team.cell(r_idx, 4).text = m_spec
         t_team.cell(r_idx, 5).text = m_deg
         t_team.cell(r_idx, 6).text = m_aff
+        if spaced_sig_header:
+            t_team.cell(r_idx, 8).text = "无"
 
         sig_para = t_team.cell(r_idx, 7).paragraphs[0]
         if m_idx == 1 or m_idx == 7:
@@ -538,6 +554,13 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     assert len(nearby_parsed["preview"]["signatures"]) == 10
     assert nearby_parsed["preview"]["signatures"][0]["person_temp_id"] == "p1"
 
+    # Edge case 3c: Spaced/line-broken signature header ("本人签\n字") followed by a "备注" column
+    spaced_hdr_docx = build_proposal_docx_with_10_signatures(spaced_sig_header=True)
+    spaced_hdr_parsed = parse_proposal_docx("spaced_hdr.docx", spaced_hdr_docx)
+    spaced_hdr_codes = [w["code"] for w in spaced_hdr_parsed["preview"]["warnings"]]
+    assert "SIGNATURE_UNEXPECTED_CELL" not in spaced_hdr_codes
+    assert len(spaced_hdr_parsed["preview"]["signatures"]) == 10
+
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)
     corrupt_parsed = parse_proposal_docx("corrupt.docx", corrupt_docx)
@@ -776,6 +799,29 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert wan_still_upload is not None
         assert wan_still_upload.signature_source == "upload"
         assert wan_still_upload.signature_sha256 == manual_sha
+
+    # 4b) Re-merge the same reverted job4 -> signature blobs are preserved and reapplied (no missing_blob rejection)
+    r_remerge4 = await client.post(
+        f"/api/v1/admin/imports/{job4_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_remerge4.status_code == 200, r_remerge4.text
+    remerge4_sig = r_remerge4.json()["signature_result"]
+    assert remerge4_sig["saved"] >= 1
+    assert remerge4_sig["rejected"] == 0
+    async with maker() as session:
+        guo_remerged = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_remerged is not None
+        assert guo_remerged.signature_sha256 == guo_orig_sha
+        assert guo_remerged.signature_source == "docx_import"
+
+    # Revert job4 again so step 5 starts with guo having no signature
+    r_rev4_again = await client.post(
+        f"/api/v1/admin/imports/{job4_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev4_again.status_code == 200, r_rev4_again.text
 
     # 5) Out-of-order revert: merge job A (None -> S1) then merge job B (S1 -> S2);
     #    reverting job A first rebases job B's snapshot to None, so reverting job B restores None (not S1)
@@ -1728,3 +1774,21 @@ async def test_basket_format_zip_and_selected_docx_export(
     for shape in doc_annex.inline_shapes:
         assert shape.width <= docx.shared.Inches(1.51)
         assert shape.height <= docx.shared.Inches(0.46)
+
+    # 4) Verify lab.signature.read audit events recorded for single, zip, and docx_export channels
+    r_single_sig = await client.get(
+        f"/api/v1/lab/people/{p1_id}/signature", headers=admin_headers
+    )
+    assert r_single_sig.status_code == 200
+    async with maker() as session:
+        read_audits = list(
+            await session.scalars(
+                select(AuditEvent).where(AuditEvent.action == "lab.signature.read")
+            )
+        )
+    channels = {str((ev.detail or {}).get("channel")) for ev in read_audits}
+    assert {"single", "zip", "docx_export"}.issubset(channels)
+    for ev in read_audits:
+        assert "person_id" in (ev.detail or {})
+        assert "sha256" in (ev.detail or {})
+        assert "signature_data" not in (ev.detail or {})

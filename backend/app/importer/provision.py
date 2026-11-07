@@ -736,8 +736,25 @@ async def provision_import_job(
                     "signature_source": p_existing.signature_source,
                 }
 
+        existing_stats_blobs = (
+            (job.stats or {}).get("_signature_blobs")
+            if isinstance(job.stats, dict)
+            else None
+        )
+        raw_preview_blobs = preview.get("_signature_blobs")
+        effective_sig_blobs: dict[str, object] = {}
+        if isinstance(raw_preview_blobs, dict) and raw_preview_blobs:
+            effective_sig_blobs = dict(raw_preview_blobs)
+        elif isinstance(existing_stats_blobs, dict) and existing_stats_blobs:
+            effective_sig_blobs = dict(existing_stats_blobs)
+        sig_preview = (
+            {**preview, "_signature_blobs": effective_sig_blobs}
+            if effective_sig_blobs
+            and not (isinstance(raw_preview_blobs, dict) and raw_preview_blobs)
+            else preview
+        )
         sig_result, sig_extra_warnings = persist_import_signatures(
-            preview=preview,
+            preview=sig_preview,
             imported_people_by_key=imported_people_by_key,
             skip_signature_ids=body.skip_signature_ids,
             ambiguous_keys=ambiguous_person_keys,
@@ -808,6 +825,8 @@ async def provision_import_job(
     public_stats: dict[str, object] = dict(stats_payload)
     if changed_sig_snapshots:
         stats_payload["_pre_merge_signatures"] = changed_sig_snapshots
+    if effective_sig_blobs:
+        stats_payload["_signature_blobs"] = effective_sig_blobs
 
     job.rag_document_id = rag_doc.id if rag_doc is not None else None
     job.stats = stats_payload

@@ -2510,8 +2510,22 @@ async def execute_merge(
                 "signature_source": p_existing.signature_source,
             }
 
+    cur_stats = dict(job.stats or {})
+    raw_preview_blobs = preview.get("_signature_blobs")
+    raw_stats_blobs = cur_stats.get("_signature_blobs")
+    effective_sig_blobs: dict[str, object] = {}
+    if isinstance(raw_preview_blobs, dict) and raw_preview_blobs:
+        effective_sig_blobs = dict(raw_preview_blobs)
+    elif isinstance(raw_stats_blobs, dict) and raw_stats_blobs:
+        effective_sig_blobs = dict(raw_stats_blobs)
+    sig_preview = (
+        {**preview, "_signature_blobs": effective_sig_blobs}
+        if effective_sig_blobs
+        and not (isinstance(raw_preview_blobs, dict) and raw_preview_blobs)
+        else preview
+    )
     sig_result, sig_extra_warnings = persist_import_signatures(
-        preview=preview,
+        preview=sig_preview,
         imported_people_by_key=imported_people_by_key,
         skip_signature_ids=body.skip_signature_ids,
     )
@@ -2523,7 +2537,8 @@ async def execute_merge(
         cleaned_preview["warnings"] = cur_prev_warnings
     job.preview = cleaned_preview
 
-    cur_stats = dict(job.stats or {})
+    if effective_sig_blobs:
+        cur_stats["_signature_blobs"] = effective_sig_blobs
     prior_job_sig_snaps: dict[str, dict[str, str | None]] = {}
     raw_prior_snaps = cur_stats.get("_pre_merge_signatures")
     if isinstance(raw_prior_snaps, dict):
@@ -2828,6 +2843,15 @@ async def revert_import_merge(
         if isinstance(pre_status, str) and pre_status in ("parsed", "provisioned")
         else ("provisioned" if job.provisioned_at is not None else "parsed")
     )
+    saved_sig_blobs = cur_stats.get("_signature_blobs")
+    if (
+        isinstance(saved_sig_blobs, dict)
+        and saved_sig_blobs
+        and isinstance(job.preview, dict)
+    ):
+        restored_preview = dict(job.preview)
+        restored_preview["_signature_blobs"] = dict(saved_sig_blobs)
+        job.preview = restored_preview
     job.stats = cur_stats
     job.status = restored_status
     await session.flush()

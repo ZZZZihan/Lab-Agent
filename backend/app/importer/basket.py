@@ -321,10 +321,10 @@ async def prepare_signatures_zip(
     *,
     raw_person_ids: Sequence[object],
     filename_template: Literal["seq_name", "name", "name_id"] | str = "seq_name",
-) -> tuple[bytes, int, int]:
+) -> tuple[bytes, int, int, list[dict[str, str]]]:
     """Build an uncompressed (ZIP_STORED) signature archive with UTF-8 BOM manifest.csv (Spec v2.2 §6.2).
 
-    Returns `(zip_bytes, included_count, missing_or_skipped_count)`.
+    Returns `(zip_bytes, included_count, missing_or_skipped_count, included_signatures)`.
     """
     if len(raw_person_ids) == 0 or len(raw_person_ids) > MAX_ZIP_PERSONS:
         raise BasketError(
@@ -368,6 +368,7 @@ async def prepare_signatures_zip(
     total_image_bytes = 0
     included_count = 0
     missing_count = 0
+    included_signatures: list[dict[str, str]] = []
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_STORED) as zf:
         for seq, (raw_id, uid) in enumerate(deduped_ids, start=1):
@@ -465,6 +466,9 @@ async def prepare_signatures_zip(
 
             zf.writestr(candidate_name, sig_bytes, compress_type=zipfile.ZIP_STORED)
             included_count += 1
+            included_signatures.append(
+                {"person_id": str(person.id), "sha256": check.sha256}
+            )
             manifest_rows.append(
                 [
                     str(seq),
@@ -510,7 +514,7 @@ async def prepare_signatures_zip(
             compress_type=zipfile.ZIP_STORED,
         )
 
-    return zip_buf.getvalue(), included_count, missing_count
+    return zip_buf.getvalue(), included_count, missing_count, included_signatures
 
 
 async def iter_bytes_chunks(
@@ -533,10 +537,10 @@ async def build_selected_docx(
     include_person_bio: bool = False,
     include_support_note: bool = True,
     include_signatures_annex: bool = False,
-) -> tuple[bytes, int]:
+) -> tuple[bytes, int, list[dict[str, str]]]:
     """Generate a `.docx` document for selected reuse basket items (Spec v2.2 §6.3).
 
-    Returns `(docx_bytes, warnings_count)`.
+    Returns `(docx_bytes, warnings_count, embedded_signatures)`.
     """
     batch_res = await fetch_and_format_batch_items(
         session,
@@ -565,6 +569,7 @@ async def build_selected_docx(
             doc.add_paragraph(str(line))
 
     warnings_count = 0
+    embedded_signatures: list[dict[str, str]] = []
     selected_person_ids: list[uuid.UUID] = []
     seen_p_ids: set[uuid.UUID] = set()
     for it in internal_items:
@@ -646,10 +651,16 @@ async def build_selected_docx(
                 else:
                     run.add_picture(io.BytesIO(sig_bytes), height=Inches(max_h_in))
                 embedded_total += check.size
+                embedded_signatures.append(
+                    {
+                        "person_id": str(person.id),
+                        "sha256": check.sha256 or (person.signature_sha256 or ""),
+                    }
+                )
             except Exception:
                 row_cells[3].text = "（签名数据异常，已跳过）"
                 warnings_count += 1
 
     out_buf = io.BytesIO()
     doc.save(out_buf)
-    return out_buf.getvalue(), warnings_count
+    return out_buf.getvalue(), warnings_count, embedded_signatures

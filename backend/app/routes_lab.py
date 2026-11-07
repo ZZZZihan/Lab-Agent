@@ -2901,7 +2901,7 @@ async def download_person_signature(
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    await _user(session, actor)
+    user = await _user(session, actor)
     uid = _parse_person_uuid(person_id)
     if uid is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
@@ -2923,6 +2923,20 @@ async def download_person_signature(
 
     etag = f'"{person.signature_sha256}"'
     if _etag_matches(request.headers.get("if-none-match"), person.signature_sha256):
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=str(person.id),
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": str(person.id),
+                "sha256": person.signature_sha256,
+                "channel": "single",
+            },
+        )
         return Response(
             status_code=304,
             headers={
@@ -2939,6 +2953,21 @@ async def download_person_signature(
             "SIGNATURE_CORRUPT_IN_STORAGE",
             "存储中的电子签名数据异常",
         )
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab.signature.read",
+        resource_type="lab_person",
+        resource_id=str(person.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "person_id": str(person.id),
+            "sha256": check.sha256,
+            "channel": "single",
+        },
+    )
 
     ext = MIME_TO_EXT.get(check.mime, "bin")
     safe_name = sanitize_filename_part(person.name)
@@ -3146,18 +3175,40 @@ async def delete_person_signature(
 @router.post("/lab/people/signatures:zip", response_model=None)
 async def download_people_signatures_zip(
     body: SignaturesZipBody,
+    request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    await _user(session, actor)
+    user = await _user(session, actor)
     try:
-        zip_bytes, included_count, missing_count = await prepare_signatures_zip(
+        (
+            zip_bytes,
+            included_count,
+            missing_count,
+            included_signatures,
+        ) = await prepare_signatures_zip(
             session,
             raw_person_ids=body.person_ids,
             filename_template=body.filename_template,
         )
     except BasketError as exc:
         return _lab_v22_error(exc.status, exc.code, exc.message)
+
+    for sig_item in included_signatures:
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=sig_item["person_id"],
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": sig_item["person_id"],
+                "sha256": sig_item["sha256"],
+                "channel": "zip",
+            },
+        )
 
     content_disp = build_rfc5987_content_disposition(
         "lab-signatures.zip",
@@ -3179,14 +3230,15 @@ async def download_people_signatures_zip(
 @router.post("/lab/export:selected", response_model=None)
 async def export_selected_basket_docx(
     body: ExportSelectedBody,
+    request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    await _user(session, actor)
+    user = await _user(session, actor)
     raw_items = [{"entity": it.entity, "id": it.id} for it in body.items]
     opts = body.options
     try:
-        docx_bytes, warnings_count = await build_selected_docx(
+        docx_bytes, warnings_count, embedded_signatures = await build_selected_docx(
             session,
             title=body.title,
             raw_items=raw_items,
@@ -3203,6 +3255,22 @@ async def export_selected_basket_docx(
             exc.code,
             exc.message,
             missing=exc.missing,
+        )
+
+    for sig_item in embedded_signatures:
+        await write_audit(
+            settings=_settings(request),
+            actor_id=user.id,
+            action="lab.signature.read",
+            resource_type="lab_person",
+            resource_id=sig_item["person_id"],
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={
+                "person_id": sig_item["person_id"],
+                "sha256": sig_item["sha256"],
+                "channel": "docx_export",
+            },
         )
 
     doc_title_safe = sanitize_filename_part(body.title or "课题申报素材汇编")
