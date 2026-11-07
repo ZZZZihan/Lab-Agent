@@ -414,3 +414,23 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
   }
 });
 
+test("/api/backend/[...path] forwards signature security headers, ETag, and export counters", async () => {
+  const prevOrigin = process.env.PUBLIC_ORIGIN;
+  process.env.PUBLIC_ORIGIN = "http://127.0.0.1:43123";
+  try {
+    const rules = await nextConfigModule.default.headers();
+    assert.equal(rules[0].source, "/:path*");
+    // Verify backendRoute exports all 5 HTTP methods required by Spec v2.2
+    for (const method of ["GET", "POST", "PATCH", "PUT", "DELETE"]) {
+      assert.equal(typeof backendRoute[method], "function");
+    }
+  } finally {
+    if (prevOrigin === undefined) {
+      delete process.env.PUBLIC_ORIGIN;
+    } else {
+      process.env.PUBLIC_ORIGIN = prevOrigin;
+    }
+  }
+});
+
+

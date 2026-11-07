@@ -153,3 +153,37 @@ Added `backend/tests/test_full_e2e_flow.py` (`3 passed`), exercising:
 7. **`scripts/demo.sh` — Actionable Linux Docker Bridge Diagnostic for `app.embed_check`**:
    - *Symptom*: On Linux without `--linux-embed`, step 3a verified `http://127.0.0.1:11434/api/version` on the host, but step 5 `docker compose exec -T api python -m app.embed_check` failed without explaining that host `systemd` Ollama bound to `127.0.0.1:11434` is unreachable from the Docker bridge via `host.docker.internal:11434`.
    - *Fix*: Added a clear Linux diagnostic in step 5 when `app.embed_check` fails and `LINUX_EMBED != "true"`, instructing the user to re-run `./scripts/demo.sh --linux-embed` or bind host Ollama to `0.0.0.0:11434`.
+
+---
+
+## 5. Phase 1.5, Phase 2, Spec v2.2 & PR-38 Modular Decoupling E2E Verification (2026-11-07)
+
+- **Base Commit (`main`)**: `0c9aa8a` (PR-32 `#53` `dbec325`, PR-33 `#52` `6e29524`, PR-34 `#54` `0d53fa4`, PR-35 `#55` `7974cfd`, PR-36 `#56` `34d6932`, PR-37 `#57` `5aa05f3`, PR-38 `#58` `0c9aa8a`)
+- **Verification Suite**: `backend/tests/test_lab_s10_s14_proxy_e2e.py` + full backend (`183 / 183 passed`) & frontend (`6 / 6 passed`, `15 / 15` Next.js 16.4.5 routes built) gates.
+
+### 5.1 Live S1–S14 Web Proxy (`/api/session` + `/api/backend/*`) & ASGI Verification Table
+
+| Step | Result | Time (ms) | Verified Contract & Assertions |
+| :--- | :---: | ---: | :--- |
+| `S1 health` | PASS | 142.9 | `/api/v1/health` database, redis, and embedding fingerprint check. |
+| `S2 login` | PASS | 837.2 | 4 seeded accounts authenticated. |
+| `S3 viewer upload` | PASS | 141.1 | Viewer upload rejected with `403`. |
+| `S4 member upload` | PASS | 479.4 | Member document upload + indexing (`status=ready`). |
+| `S5 cited QA` | PASS | 382.2 | Grounded SSE answer with valid citations (`chars=48`). |
+| `S6 refusal` | PASS | 374.7 | Out-of-corpus refusal (`reason=low_evidence_score`). |
+| `S7 ACL isolation` | PASS | 776.6 | Restricted group `helios` isolation (`zn=404`, `lk=200`). |
+| `S8 audit trail` | PASS | 97.4 | Hash-chained audit log verification (`events=42`, `actions=6`). |
+| `S9 cleanup` | PASS | 150.0 | Temporary document deletion and cleanup. |
+| `S10 coldstart+10sig` | PASS | 2877.9 | `.docx` with 10 signatures (`mc:AlternateContent`), Step 2 preview, `skip_signature_ids` (`saved=9, skipped=1`), zero `_signature_blobs` leak, zero PII (`assert_no_pii`), 3-in-1 tolerant login, and `/change-password`. |
+| `S11 temporal+revert` | PASS | 4222.1 | `2026-03` -> `2024-03` (`time_regression=True`, `keep_newer` + `fill_blank`) -> `2027-03` (`upgrade` + `keep_manual`), `restore-imported`, and 3-job `A(S1)->B(S2)->C(S1)` out-of-order `revert(A)` preserving `S1` via `prev_writer_job_id`. |
+| `S12 person dossier` | PASS | 340.7 | `GET /api/backend/lab/people/{id}/dossier` attribution (`pi`/`participant`, `first_author`/`coauthor`), homonym `name_ambiguous=True` + `match="ambiguous"`, SQL query count `4 <= 4`, and deferred `signature_data` column. |
+| `S13 signature CRUD` | PASS | 912.9 | `GET/PUT/DELETE /api/backend/lab/people/{id}/signature` with `ETag`, `If-None-Match -> 304`, stale `If-Match -> 412`, `> 2.5 MiB -> 413 SIGNATURE_TOO_LARGE`, `X-Content-Type-Options: nosniff`, and `Content-Security-Policy: default-src 'none'; sandbox`. |
+| `S14 reuse basket` | PASS | 1416.4 | `POST /api/backend/lab/format/batch` (4 entity kinds, `include_relationship_note`, `include_support_note`, `404 NOT_FOUND` `error.missing`), `POST /api/backend/lab/people/signatures:zip` (`manifest.csv`, `X-Signature-Count-Included=2`, `X-Signature-Count-Missing=1`), and `POST /api/backend/lab/export:selected` (`.docx` with scaled signature images + `X-Export-Warnings-Count=1`). |
+
+### 5.2 Spec §9.2.D 30-Item Lab QA Eval & GPU Retrieval Regression Gate
+
+- **`tests/test_lab_qa_eval.py` (`1 passed in 18.64s`)**:
+  - `hit@5`: **`1.0000`** (`>= 0.85`), `fact_recall`: **`1.0000`** (`>= 0.80`), `refusal_accuracy`: **`1.0000`** (`>= 0.90`), `pii_leak_rate`: **`0.0000`** (`== 0.0`).
+- **`flock ~/.lab-agent/locks/gpu.lock uv run python -m evals.run_eval --check && uv run python -m evals.report --check`**:
+  - `embedder=qwen3-embedding:8b`, `selected_mode=hybrid_rrf`, `recall_at_5=1.0000`, `mrr=0.9524`, `multi_chunk_recall_at_5=1.0000`, `citation_f1_when_answered=0.8889`, `search_latency_ms` p50/p95 = `133.73 ms / 150.52 ms`.
+
