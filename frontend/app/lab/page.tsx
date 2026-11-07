@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
@@ -218,6 +218,7 @@ export default function LabAssetsPage() {
   const [restoringFieldKey, setRestoringFieldKey] = useState<string | null>(
     null,
   );
+  const editSessionSeqRef = useRef(0);
 
   // Admin 3-Step Import Wizard state
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -750,6 +751,8 @@ export default function LabAssetsPage() {
     type: TabKey,
     item: LabPersonItem | LabProjectItem | LabAchievementItem | LabFacilityItem,
   ) {
+    editSessionSeqRef.current += 1;
+    setEditSaving(false);
     setEditError("");
     setEditType(type);
     setEditItem(item);
@@ -768,6 +771,7 @@ export default function LabAssetsPage() {
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!editItem) return;
+    const capturedSeq = editSessionSeqRef.current;
     setEditError("");
     setStatusBanner("");
     setEditSaving(true);
@@ -789,7 +793,9 @@ export default function LabAssetsPage() {
         }
       }
       if (Object.keys(payload).length === 0) {
-        setEditModalOpen(false);
+        if (editSessionSeqRef.current === capturedSeq) {
+          setEditModalOpen(false);
+        }
         return;
       }
       const res = await updateLabEntity(editType, editItem.id, payload);
@@ -802,16 +808,22 @@ export default function LabAssetsPage() {
         | LabAchievementItem
         | LabFacilityItem
         | undefined;
-      if (updatedEntity) {
-        setEditItem(updatedEntity);
+      if (editSessionSeqRef.current === capturedSeq) {
+        if (updatedEntity) {
+          setEditItem(updatedEntity);
+        }
+        setEditModalOpen(false);
       }
-      setEditModalOpen(false);
       setStatusBanner("已保存修改并记录字段级人工溯源");
       await loadAll();
     } catch (err) {
-      setEditError(err instanceof ApiError ? err.message : t.error);
+      if (editSessionSeqRef.current === capturedSeq) {
+        setEditError(err instanceof ApiError ? err.message : t.error);
+      }
     } finally {
-      setEditSaving(false);
+      if (editSessionSeqRef.current === capturedSeq) {
+        setEditSaving(false);
+      }
     }
   }
 
@@ -823,6 +835,12 @@ export default function LabAssetsPage() {
     setError("");
     setEditError("");
     setStatusBanner("");
+    const capturedSeq = editSessionSeqRef.current;
+    const wasEditingTarget =
+      editModalOpen &&
+      editItem !== null &&
+      editItem.id === itemId &&
+      editType === type;
     const opKey = `${itemId}:${field}`;
     setRestoringFieldKey(opKey);
     try {
@@ -836,7 +854,11 @@ export default function LabAssetsPage() {
         | LabAchievementItem
         | LabFacilityItem
         | undefined;
-      if (updatedEntity && editItem && editItem.id === itemId) {
+      if (
+        updatedEntity &&
+        wasEditingTarget &&
+        editSessionSeqRef.current === capturedSeq
+      ) {
         setEditItem(updatedEntity);
         const rec = updatedEntity as unknown as Record<string, unknown>;
         const restoredVal = rec[field];
@@ -854,13 +876,13 @@ export default function LabAssetsPage() {
       await loadAll();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : t.error;
-      if (editModalOpen) {
+      if (wasEditingTarget && editSessionSeqRef.current === capturedSeq) {
         setEditError(msg);
       } else {
         setError(msg);
       }
     } finally {
-      setRestoringFieldKey(null);
+      setRestoringFieldKey((prev) => (prev === opKey ? null : prev));
     }
   }
 
@@ -1775,7 +1797,16 @@ export default function LabAssetsPage() {
         )}
 
         {/* Phase 2 Online Edit & Field Provenance Restore Dialog */}
-        <Dialog open={editModalOpen} onOpenChange={setEditModalOpen}>
+        <Dialog
+          open={editModalOpen}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              editSessionSeqRef.current += 1;
+              setEditSaving(false);
+            }
+            setEditModalOpen(nextOpen);
+          }}
+        >
           <DialogContent className="max-w-2xl max-h-[88vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>
@@ -1888,7 +1919,11 @@ export default function LabAssetsPage() {
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => setEditModalOpen(false)}
+                    onClick={() => {
+                      editSessionSeqRef.current += 1;
+                      setEditSaving(false);
+                      setEditModalOpen(false);
+                    }}
                   >
                     {t.cancel}
                   </Button>
