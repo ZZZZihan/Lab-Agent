@@ -81,6 +81,7 @@ def _parse_jpeg_dimensions(raw: bytes) -> tuple[int, int] | None:
     width: int | None = None
     height: int | None = None
     saw_sos = False
+    saw_eoi = False
     while pos < len(raw):
         if raw[pos] != 0xFF:
             return None
@@ -93,8 +94,10 @@ def _parse_jpeg_dimensions(raw: bytes) -> tuple[int, int] | None:
         if marker in (0x00, 0xFF):
             return None
         if marker == 0xD9:
-            # EOI reached before SOS
-            return None
+            if not saw_sos or width is None or height is None:
+                return None
+            saw_eoi = True
+            break
         if marker in (0xD8, 0x01) or (0xD0 <= marker <= 0xD7):
             continue
         if pos + 2 > len(raw):
@@ -112,13 +115,34 @@ def _parse_jpeg_dimensions(raw: bytes) -> tuple[int, int] | None:
         if marker == 0xDA:
             if width is None or height is None:
                 return None
-            # Require at least 1 byte of entropy data / EOI after SOS header
             if pos + seg_len >= len(raw):
                 return None
+            pos += seg_len
+            scan_start = pos
+            while pos < len(raw):
+                if raw[pos] != 0xFF:
+                    pos += 1
+                    continue
+                marker_ff_pos = pos
+                while pos < len(raw) and raw[pos] == 0xFF:
+                    pos += 1
+                if pos >= len(raw):
+                    return None
+                nxt = raw[pos]
+                if nxt == 0x00 or (0xD0 <= nxt <= 0xD7):
+                    # Stuffed 0xFF00 byte or RST0..RST7 restart marker inside entropy scan
+                    pos += 1
+                    continue
+                if marker_ff_pos <= scan_start:
+                    return None
+                pos = marker_ff_pos
+                break
+            else:
+                return None
             saw_sos = True
-            break
+            continue
         pos += seg_len
-    if not saw_sos or width is None or height is None:
+    if not saw_sos or not saw_eoi or width is None or height is None:
         return None
     return width, height
 

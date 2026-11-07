@@ -9,7 +9,7 @@ from typing import Any
 from app.models import LabAchievement, LabProject
 
 ZERO_WIDTH_AND_SPACE_RE = re.compile(r"[\s​-‏﻿　]+")
-MIDDLE_DOT_RE = re.compile(r"[·•．⋅∙]")
+MIDDLE_DOT_RE = re.compile(r"[·•．⋅∙・]")
 TRAILING_PAREN_RE = re.compile(r"[\s*#†‡]*[（(\[【][^）)\]】]*[）)\]】][\s*#†‡]*$")
 TRAILING_MARK_RE = re.compile(r"[\s*#†‡¹²³⁴⁵⁶⁷⁸⁹⁰]+$")
 TRAILING_ROLE_WORD_RE = re.compile(
@@ -20,7 +20,7 @@ PARTICIPANT_CLAUSE_RE = re.compile(
     r"(?:主要参与人|参与人员|参与成员|课题组成员|项目组成员|参与人|参加人|成员)\s*[:：]\s*([^。；;\n]+)"
 )
 PARTICIPANT_INLINE_RE = re.compile(
-    r"([一-龥·•．\s、，,]{2,40}?)\s*[（(]?(?:参与|参加)[)）]?(?=[，,。；;\s]|$)"
+    r"([一-龥·•．⋅∙・\s、，,]{2,40}?)\s*[（(]?(?:参与|参加)[)）]?(?=[，,。；;\s]|$)"
 )
 
 NOISE_TOKENS: frozenset[str] = frozenset(
@@ -105,7 +105,9 @@ def split_names(raw: str | None) -> list[str]:
 
         # Check if segment contains space-separated Chinese names vs a single spaced Chinese name
         parts = [p for p in re.split(r"[\s　]+", s) if p]
-        if len(parts) > 1 and all(re.match(r"^[一-龥·•．*#†‡（()）]+$", p) for p in parts):
+        if len(parts) > 1 and all(
+            re.match(r"^[一-龥·•．⋅∙・*#†‡（()）]+$", p) for p in parts
+        ):
             cleaned_parts = [normalize_person_name(p) for p in parts]
             # If every part has length >= 2, treat space as separator between multiple Chinese names
             if all(len(cp) >= 2 for cp in cleaned_parts if cp):
@@ -132,15 +134,8 @@ def _is_valid_name_token(tok: str) -> bool:
     return True
 
 
-def build_ilike_pattern(raw_name: str) -> str:
-    """Build a safe SQL ILIKE pattern with `%`, `_`, `\\` escaped.
-
-    Uses character-interleaved `%` for 2..6 char CJK names so spaced variants like `'万 振 凯'`
-    are also recalled by PostgreSQL before exact Python token verification.
-    """
-    norm_name = normalize_person_name(raw_name)
-    source = norm_name or (raw_name or "").strip()
-    if not source:
+def _chars_to_ilike(chars: str) -> str:
+    if not chars:
         return "%"
 
     def _esc(ch: str) -> str:
@@ -148,11 +143,67 @@ def build_ilike_pattern(raw_name: str) -> str:
             return f"\\{ch}"
         return ch
 
-    if 2 <= len(source) <= 64:
-        inner = "%".join(_esc(c) for c in source)
+    if 2 <= len(chars) <= 64:
+        inner = "%".join(_esc(c) for c in chars)
         return f"%{inner}%"
-    escaped = "".join(_esc(c) for c in source)
+    escaped = "".join(_esc(c) for c in chars)
     return f"%{escaped}%"
+
+
+def build_ilike_pattern(raw_name: str) -> str:
+    """Build a safe SQL ILIKE pattern with `%`, `_`, `\\` escaped.
+
+    Strips middle-dot variants before interleaving `%` so any middle dot (`·`, `•`, `・`, etc.)
+    or internal whitespace in database columns is matched by `%` before exact Python verification.
+    """
+    norm_name = normalize_person_name(raw_name)
+    source = MIDDLE_DOT_RE.sub("", norm_name or (raw_name or "").strip())
+    return _chars_to_ilike(source)
+
+
+def build_ilike_patterns(raw_name: str) -> list[str]:
+    """Return SQL ILIKE patterns covering middle-dot and NFKC/fullwidth variants."""
+    base_pat = build_ilike_pattern(raw_name)
+    patterns: list[str] = [base_pat]
+
+    norm_name = normalize_person_name(raw_name)
+    source = MIDDLE_DOT_RE.sub("", norm_name or (raw_name or "").strip())
+    if source and any(("a" <= ch <= "z") or ("0" <= ch <= "9") for ch in source):
+        fw_lower = "".join(
+            chr(ord(ch) + 0xFEE0)
+            if ("a" <= ch <= "z") or ("0" <= ch <= "9")
+            else ch
+            for ch in source
+        )
+        fw_pat = _chars_to_ilike(fw_lower)
+        if fw_pat not in patterns:
+            patterns.append(fw_pat)
+
+        nfkc_cased = MIDDLE_DOT_RE.sub(
+            "",
+            ZERO_WIDTH_AND_SPACE_RE.sub(
+                "", unicodedata.normalize("NFKC", str(raw_name or ""))
+            ),
+        )
+        fw_cased = "".join(
+            chr(ord(ch) + 0xFEE0)
+            if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9")
+            else ch
+            for ch in nfkc_cased
+        )
+        fw_cased_pat = _chars_to_ilike(fw_cased)
+        if fw_cased_pat not in patterns:
+            patterns.append(fw_cased_pat)
+
+    raw_stripped = MIDDLE_DOT_RE.sub(
+        "", ZERO_WIDTH_AND_SPACE_RE.sub("", (raw_name or "").strip())
+    )
+    if raw_stripped:
+        raw_pat = _chars_to_ilike(raw_stripped)
+        if raw_pat not in patterns:
+            patterns.append(raw_pat)
+
+    return patterns
 
 
 def _extract_project_participant_tokens(project: LabProject | Any) -> list[str]:

@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.db import get_engine, get_sessionmaker
 from app.importer.matching import normalize_person_name, split_names
 from app.importer.parser import parse_proposal_docx
+from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
 from app.importer.reader import extract_embedded_images
 from app.importer.signature import validate_signature_image
 from app.models import (
@@ -483,10 +484,22 @@ def test_signature_validator_formats_and_bounds() -> None:
         assert chk.error_code == "SIGNATURE_REJECTED_FORMAT"
         assert chk.sha256 is None
 
-    # Corrupt / truncated PNG, JPEG, WebP
+    # Corrupt / truncated PNG, JPEG (including truncated after SOS without EOI), WebP
     assert validate_signature_image(png_bytes[:-8]).error_code == "SIGNATURE_CORRUPT"
     assert validate_signature_image(jpg_bytes[:15]).error_code == "SIGNATURE_CORRUPT"
+    assert validate_signature_image(jpg_bytes[:-2]).error_code == "SIGNATURE_CORRUPT"
     bad_webp = b"RIFF" + struct.pack("<I", 9999) + b"WEBP" + b"VP8 " + struct.pack("<I", 10) + b"0" * 10
+
+    # PII redaction beside ASCII contact labels while preserving 64-char SHA-256 hex hashes
+    synth_mob = "138" + "12345678"
+    scrubbed_txt, scrub_cnt = scrub_free_text(
+        f"联系电话Tel{synth_mob}，座机Tel022-83951234，签名哈希{c_jpg.sha256}"
+    )
+    assert scrub_cnt == 2
+    assert scrubbed_txt == f"联系电话Tel[已脱敏]，座机Tel[已脱敏]，签名哈希{c_jpg.sha256}"
+    with pytest.raises(PIILeakError):
+        assert_no_pii(f"联系电话Tel{synth_mob}")
+    assert_no_pii(scrubbed_txt)
     assert validate_signature_image(bad_webp).error_code == "SIGNATURE_CORRUPT"
 
     # Bad dimensions (< 8x8, > 6000, > 20M pixels)
@@ -1425,6 +1438,59 @@ async def test_person_dossier_attribution_and_query_budget(
     assert john_dos["counts"]["outputs_total"] == 1
     assert john_dos["counts"]["outputs_first_author"] == 1
 
+    # Regression check: middle-dot variant ("买买提·艾力" vs "买买提•艾力") and fullwidth Latin variant
+    async with maker() as session:
+        p_maimaiti = LabPerson(
+            name="买买提·艾力",
+            title="副教授",
+            affiliation="天津工业大学",
+            project_role="member",
+            entity_fingerprint="a6" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        ach_maimaiti = LabAchievement(
+            kind="paper",
+            title="Middle Dot Variant Attribution Paper",
+            first_author="买买提•艾力",
+            authors_text="买买提•艾力, 张三",
+            venue="自动化学报",
+            year=2026,
+            raw_text="买买提•艾力: Middle Dot Variant Attribution Paper, 2026.",
+            parse_quality="structured",
+            entity_fingerprint="c6" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        ach_john_fw = LabAchievement(
+            kind="paper",
+            title="Fullwidth Latin Author Variant Paper",
+            first_author="Ｊｏｈｎ Ｓｍｉｔｈ",
+            authors_text="Ｊｏｈｎ Ｓｍｉｔｈ",
+            venue="IEEE TKDE",
+            year=2026,
+            raw_text="Ｊｏｈｎ Ｓｍｉｔｈ: Fullwidth Latin Author Variant Paper, 2026.",
+            parse_quality="structured",
+            entity_fingerprint="c7" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        session.add_all([p_maimaiti, ach_maimaiti, ach_john_fw])
+        await session.commit()
+        maimaiti_id = str(p_maimaiti.id)
+
+    r_mmt_dos = await client.get(
+        f"/api/v1/lab/people/{maimaiti_id}/dossier", headers=admin_headers
+    )
+    assert r_mmt_dos.status_code == 200
+    assert r_mmt_dos.json()["counts"]["outputs_first_author"] == 1
+
+    r_john_fw_dos = await client.get(
+        f"/api/v1/lab/people/{john_id}/dossier", headers=admin_headers
+    )
+    assert r_john_fw_dos.status_code == 200
+    assert r_john_fw_dos.json()["counts"]["outputs_first_author"] == 2
+
     # Duplicate normalized name ("张 三") triggers name_ambiguous=True and match="ambiguous"
     async with maker() as session:
         p_zhang_dup = LabPerson(
@@ -1792,3 +1858,26 @@ async def test_basket_format_zip_and_selected_docx_export(
         assert "person_id" in (ev.detail or {})
         assert "sha256" in (ev.detail or {})
         assert "signature_data" not in (ev.detail or {})
+
+    # 5) Verify XML illegal control characters (\u000b, \x07) in title or entity text do not cause 500
+    async with maker() as session:
+        proj_obj = await session.get(LabProject, uuid.UUID(proj_id))
+        assert proj_obj is not None
+        proj_obj.title = "智能评测\x0b关键技术\x07研究"
+        await session.commit()
+
+    r_doc_ctrl = await client.post(
+        "/api/v1/lab/export:selected",
+        headers=admin_headers,
+        json={
+            "title": "课题申报\x0b素材\x07汇编",
+            "items": [{"entity": "project", "id": proj_id}],
+            "options": {"include_signatures_annex": False},
+        },
+    )
+    assert r_doc_ctrl.status_code == 200
+    doc_ctrl = docx.Document(io.BytesIO(r_doc_ctrl.content))
+    ctrl_text = "\n".join(p.text for p in doc_ctrl.paragraphs)
+    assert "\x0b" not in ctrl_text and "\x07" not in ctrl_text
+    assert "课题申报素材汇编" in ctrl_text
+    assert "智能评测关键技术研究" in ctrl_text

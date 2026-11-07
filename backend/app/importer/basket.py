@@ -40,7 +40,15 @@ MIME_TO_EXT: dict[str, str] = {
 }
 
 SAFE_FILENAME_CHAR_RE = re.compile(r"[^一-龥A-Za-z0-9_-]+")
+XML_ILLEGAL_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")
 _CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def sanitize_xml_text(text: str | None) -> str:
+    """Remove XML 1.0 illegal control characters while preserving \\t, \\n, \\r (Spec v2.2 §5.0)."""
+    if not text:
+        return ""
+    return XML_ILLEGAL_CTRL_RE.sub("", text)
 
 SECTION_ORDER: tuple[tuple[str, str], ...] = (
     ("person", "一、项目组成员"),
@@ -138,17 +146,25 @@ def _format_single_entity(
     include_support_note: bool = True,
 ) -> str:
     if canon_kind == "person":
-        return format_person_application(entity_obj, include_bio=include_person_bio)
+        return sanitize_xml_text(
+            format_person_application(entity_obj, include_bio=include_person_bio)
+        )
     if canon_kind == "project":
-        return format_project_application(entity_obj, include_relationship=False)
+        return sanitize_xml_text(
+            format_project_application(entity_obj, include_relationship=False)
+        )
     if canon_kind == "output":
         if style == "plain":
-            return format_achievement_application(entity_obj, include_support=False)
-        return format_achievement_application(
-            entity_obj, include_support=include_support_note
+            return sanitize_xml_text(
+                format_achievement_application(entity_obj, include_support=False)
+            )
+        return sanitize_xml_text(
+            format_achievement_application(
+                entity_obj, include_support=include_support_note
+            )
         )
     if canon_kind == "facility":
-        return format_facility_application(entity_obj)
+        return sanitize_xml_text(format_facility_application(entity_obj))
     return ""
 
 
@@ -554,7 +570,7 @@ async def build_selected_docx(
     internal_items: list[dict[str, Any]] = batch_res["_internal_items"]  # type: ignore[assignment]
     sections: list[dict[str, Any]] = batch_res["_sections"]  # type: ignore[assignment]
 
-    doc_title = (title or "").strip() or "课题申报素材汇编"
+    doc_title = sanitize_xml_text(title).strip() or "课题申报素材汇编"
     shanghai_today = datetime.now(UTC).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
     doc = docx.Document()
@@ -564,9 +580,9 @@ async def build_selected_docx(
     for sec in sections:
         heading = sec.get("heading")
         if heading:
-            doc.add_heading(str(heading), level=2)
+            doc.add_heading(sanitize_xml_text(str(heading)), level=2)
         for line in sec.get("lines") or []:
-            doc.add_paragraph(str(line))
+            doc.add_paragraph(sanitize_xml_text(str(line)))
 
     warnings_count = 0
     embedded_signatures: list[dict[str, str]] = []
@@ -602,10 +618,10 @@ async def build_selected_docx(
                 continue
             row_cells = table.add_row().cells
             row_cells[0].text = str(seq)
-            row_cells[1].text = person.name
+            row_cells[1].text = sanitize_xml_text(person.name)
             role_label = "负责人" if person.project_role == "applicant" else "成员"
             role_title = " / ".join(filter(None, [role_label, person.title]))
-            row_cells[2].text = role_title
+            row_cells[2].text = sanitize_xml_text(role_title)
 
             sig_bytes = person.signature_data
             if sig_bytes is None:

@@ -6,15 +6,20 @@ import json
 import re
 
 # 18-digit ID card (regardless of checksum — err on the side of safety)
-ID18_RE = re.compile(r"(?<![0-9A-Za-z])\d{17}[\dXx](?![0-9A-Za-z])")
+ID18_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?![0-9Xx])")
 # 15-digit legacy ID card
-ID15_RE = re.compile(r"(?<![0-9A-Za-z])\d{15}(?![0-9A-Za-z])")
+ID15_RE = re.compile(r"(?<!\d)\d{15}(?!\d)")
 # 11-digit mainland mobile phone
 MOBILE_RE = re.compile(
-    r"(?<![0-9A-Za-z])(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?![0-9A-Za-z])"
+    r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)"
 )
 # Landline with area code hyphen (e.g. 022-83951234)
-TEL_RE = re.compile(r"(?<![0-9A-Za-z])0\d{2,3}-\d{7,8}(?![0-9A-Za-z])")
+TEL_RE = re.compile(r"(?<!\d)0\d{2,3}-\d{7,8}(?!\d)")
+
+_UUID_RE = re.compile(
+    r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"
+)
+_HEX64_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])")
 
 PII_REPLACEMENT = "[已脱敏]"
 
@@ -27,7 +32,7 @@ def is_pii_id_or_phone(value: str | None) -> bool:
     """Return True if value matches an ID card or phone number pattern."""
     if not value:
         return False
-    cleaned = value.strip()
+    cleaned = _HEX64_RE.sub("", _UUID_RE.sub("", value.strip()))
     if not cleaned:
         return False
     compact = re.sub(r"[\s-]+", "", cleaned)
@@ -49,18 +54,23 @@ def scrub_free_text(text: str | None) -> tuple[str, int]:
     """
     if not text:
         return "", 0
+    preserved: list[tuple[str, str]] = []
+
+    def _stash(match: re.Match[str]) -> str:
+        idx = len(preserved)
+        alpha_id = "".join(chr(ord("A") + int(d)) for d in str(idx))
+        token = f"\x00__SAFE_{alpha_id}__\x00"
+        preserved.append((token, match.group(0)))
+        return token
+
+    out = _HEX64_RE.sub(_stash, _UUID_RE.sub(_stash, text))
     total = 0
-    out = text
     for pattern in (ID18_RE, ID15_RE, MOBILE_RE, TEL_RE):
         out, count = pattern.subn(PII_REPLACEMENT, out)
         total += count
+    for token, orig in preserved:
+        out = out.replace(token, orig)
     return out, total
-
-
-_UUID_RE = re.compile(
-    r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"
-)
-_HEX64_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])")
 
 
 def assert_no_pii(payload: str | dict[str, object] | list[object]) -> None:

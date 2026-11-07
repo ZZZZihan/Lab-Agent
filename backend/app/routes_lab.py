@@ -40,7 +40,7 @@ from app.importer.formatters import (
     render_lab_profile_markdown,
 )
 from app.importer.matching import (
-    build_ilike_pattern,
+    build_ilike_patterns,
     classify_achievement_for_person,
     classify_project_for_person,
 )
@@ -2765,12 +2765,12 @@ async def get_person_dossier(
         or (person.user_id is not None and person.user_id == actor.id)
     )
     target_norm = normalize_dossier_name(person.name)
-    ilike_pat = build_ilike_pattern(person.name)
+    ilike_pats = build_ilike_patterns(person.name)
 
     same_name_rows = list(
         await session.execute(
             select(LabPerson.id, LabPerson.name).where(
-                LabPerson.name.ilike(ilike_pat, escape="\\")
+                or_(*[LabPerson.name.ilike(p, escape="\\") for p in ilike_pats])
             )
         )
     )
@@ -2784,9 +2784,15 @@ async def get_person_dossier(
 
     proj_stmt = select(LabProject).where(
         or_(
-            LabProject.pi_name.ilike(ilike_pat, escape="\\"),
-            LabProject.raw_text.ilike(ilike_pat, escape="\\"),
-            LabProject.relationship_note.ilike(ilike_pat, escape="\\"),
+            *[
+                col.ilike(p, escape="\\")
+                for p in ilike_pats
+                for col in (
+                    LabProject.pi_name,
+                    LabProject.raw_text,
+                    LabProject.relationship_note,
+                )
+            ]
         )
     )
     cand_projects = list(await session.scalars(proj_stmt))
@@ -2817,9 +2823,15 @@ async def get_person_dossier(
 
     ach_stmt = select(LabAchievement).where(
         or_(
-            LabAchievement.first_author.ilike(ilike_pat, escape="\\"),
-            LabAchievement.authors_text.ilike(ilike_pat, escape="\\"),
-            LabAchievement.raw_text.ilike(ilike_pat, escape="\\"),
+            *[
+                col.ilike(p, escape="\\")
+                for p in ilike_pats
+                for col in (
+                    LabAchievement.first_author,
+                    LabAchievement.authors_text,
+                    LabAchievement.raw_text,
+                )
+            ]
         )
     )
     cand_achievements = list(await session.scalars(ach_stmt))
