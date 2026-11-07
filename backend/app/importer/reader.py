@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import posixpath
 import re
@@ -22,6 +23,8 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 MAX_EMBEDDED_IMAGE_READ_BYTES = 2_097_152 + 1  # Read up to 2 MiB + 1 byte to trigger SIGNATURE_TOO_LARGE safely
+MAX_IMPORT_IMAGE_COUNT = 64
+MAX_IMPORT_DEDUP_IMAGE_BYTES = 32 * 1024 * 1024  # 32 MiB
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class EmbeddedImage:
     rel_id: str  # r:embed or r:id
     media_path: str  # e.g. word/media/image2.jpeg
     data: bytes
+    quota_exceeded: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +325,80 @@ def extract_body_blocks_and_images(
 
         body_elems = _iter_body_elements(body)
         table_counter = 0
+        extracted_count = 0
+        seen_digests: set[bytes] = set()
+        dedup_bytes = 0
+        quota_hit = False
+
+        def _append_embedded_image(
+            *,
+            location_kind: Literal["table_cell", "paragraph"],
+            table_index: int | None,
+            row_index: int | None,
+            cell_index: int | None,
+            block_index: int,
+            rel_id: str,
+            media_path: str,
+        ) -> None:
+            nonlocal extracted_count, dedup_bytes, quota_hit
+            if quota_hit:
+                return
+            if media_path not in zip_names:
+                return
+            if extracted_count >= MAX_IMPORT_IMAGE_COUNT:
+                quota_hit = True
+                images.append(
+                    EmbeddedImage(
+                        location_kind=location_kind,
+                        table_index=table_index,
+                        row_index=row_index,
+                        cell_index=cell_index,
+                        block_index=block_index,
+                        rel_id=rel_id,
+                        media_path=media_path,
+                        data=b"",
+                        quota_exceeded=True,
+                    )
+                )
+                return
+            data = _read_media(media_path)
+            if data is None:
+                return
+            digest = hashlib.sha256(data).digest()
+            is_new_digest = digest not in seen_digests
+            if is_new_digest and dedup_bytes + len(data) > MAX_IMPORT_DEDUP_IMAGE_BYTES:
+                quota_hit = True
+                media_cache.pop(media_path, None)
+                images.append(
+                    EmbeddedImage(
+                        location_kind=location_kind,
+                        table_index=table_index,
+                        row_index=row_index,
+                        cell_index=cell_index,
+                        block_index=block_index,
+                        rel_id=rel_id,
+                        media_path=media_path,
+                        data=b"",
+                        quota_exceeded=True,
+                    )
+                )
+                return
+            if is_new_digest:
+                seen_digests.add(digest)
+                dedup_bytes += len(data)
+            extracted_count += 1
+            images.append(
+                EmbeddedImage(
+                    location_kind=location_kind,
+                    table_index=table_index,
+                    row_index=row_index,
+                    cell_index=cell_index,
+                    block_index=block_index,
+                    rel_id=rel_id,
+                    media_path=media_path,
+                    data=data,
+                )
+            )
 
         for block_idx, elem in enumerate(body_elems):
             if elem.tag == f"{{{W_NS}}}p":
@@ -337,20 +415,14 @@ def extract_body_blocks_and_images(
                     media_path = rels.get(rel_id)
                     if not media_path:
                         continue
-                    data = _read_media(media_path)
-                    if data is None:
-                        continue
-                    images.append(
-                        EmbeddedImage(
-                            location_kind="paragraph",
-                            table_index=None,
-                            row_index=None,
-                            cell_index=None,
-                            block_index=block_idx,
-                            rel_id=rel_id,
-                            media_path=media_path,
-                            data=data,
-                        )
+                    _append_embedded_image(
+                        location_kind="paragraph",
+                        table_index=None,
+                        row_index=None,
+                        cell_index=None,
+                        block_index=block_idx,
+                        rel_id=rel_id,
+                        media_path=media_path,
                     )
             elif elem.tag == f"{{{W_NS}}}tbl":
                 t_idx = table_counter
@@ -376,20 +448,14 @@ def extract_body_blocks_and_images(
                             media_path = rels.get(rel_id)
                             if not media_path:
                                 continue
-                            data = _read_media(media_path)
-                            if data is None:
-                                continue
-                            images.append(
-                                EmbeddedImage(
-                                    location_kind="table_cell",
-                                    table_index=t_idx,
-                                    row_index=r_idx,
-                                    cell_index=c_idx,
-                                    block_index=block_idx,
-                                    rel_id=rel_id,
-                                    media_path=media_path,
-                                    data=data,
-                                )
+                            _append_embedded_image(
+                                location_kind="table_cell",
+                                table_index=t_idx,
+                                row_index=r_idx,
+                                cell_index=c_idx,
+                                block_index=block_idx,
+                                rel_id=rel_id,
+                                media_path=media_path,
                             )
 
     return blocks, images
@@ -398,4 +464,4 @@ def extract_body_blocks_and_images(
 def extract_embedded_images(raw_bytes: bytes) -> list[EmbeddedImage]:
     """Return all embedded images from `.docx` bytes with their structural locations."""
     _, images = extract_body_blocks_and_images(raw_bytes)
-    return images
+    return [img for img in images if not img.quota_exceeded]

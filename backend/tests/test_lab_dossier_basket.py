@@ -830,6 +830,58 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     assert "SIGNATURE_REJECTED_FORMAT" in corrupt_codes
     assert len(corrupt_parsed["preview"]["signatures"]) == 9
 
+    # Edge case 5: PI has no signature in [anchor-3, anchor+1], only an unrelated diagram at anchor+2 -> never bound to PI
+    no_pi_plus2_docx = build_proposal_docx_with_10_signatures(
+        blank_member_with_no_pi_sig=True,
+        nearby_pi_diagram=True,
+    )
+    no_pi_plus2_parsed = parse_proposal_docx("no_pi_plus2.docx", no_pi_plus2_docx)
+    assert all(
+        s["person_temp_id"] != "p1"
+        for s in no_pi_plus2_parsed["preview"]["signatures"]
+    )
+    assert len(no_pi_plus2_parsed["preview"]["signatures"]) == 9
+
+    # Edge case 6: >64 embedded images (65 members with unique signatures) -> capped at 64 and emits SIG_IMPORT_QUOTA
+    quota_doc = docx.Document()
+    t_quota_cover = quota_doc.add_table(rows=2, cols=2)
+    t_quota_cover.cell(0, 0).text = "项目名称"
+    t_quota_cover.cell(0, 1).text = "超配额签名导入测试项目"
+    t_quota_cover.cell(1, 0).text = "项目申请人"
+    t_quota_cover.cell(1, 1).text = "郭建民"
+
+    t_quota_team = quota_doc.add_table(rows=1 + 65, cols=6)
+    for c_i, h_val in enumerate(
+        ["姓名", "专业职务", "研究专长", "学位", "工作单位", "本人签字"]
+    ):
+        t_quota_team.cell(0, c_i).text = h_val
+    cn_chars = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸"
+    for m_i in range(65):
+        r_i = 1 + m_i
+        name_suffix = cn_chars[m_i // 10] + cn_chars[m_i % 10]
+        t_quota_team.cell(r_i, 0).text = f"陈{name_suffix}"
+        t_quota_team.cell(r_i, 1).text = "讲师"
+        t_quota_team.cell(r_i, 2).text = "人工智能"
+        t_quota_team.cell(r_i, 3).text = "博士"
+        t_quota_team.cell(r_i, 4).text = "天津工业大学"
+        t_quota_team.cell(r_i, 5).paragraphs[0].add_run().add_picture(
+            io.BytesIO(make_png_bytes(40 + (m_i % 30), 20 + (m_i // 30), fill_byte=(10 + m_i) % 250))
+        )
+    quota_buf = io.BytesIO()
+    quota_doc.save(quota_buf)
+    quota_docx_bytes = quota_buf.getvalue()
+    assert len(extract_embedded_images(quota_docx_bytes)) == 64
+    quota_parsed = parse_proposal_docx("quota65.docx", quota_docx_bytes)
+    assert len(quota_parsed["preview"]["signatures"]) == 64
+    quota_warns = [
+        w
+        for w in quota_parsed["preview"]["warnings"]
+        if w.get("code") == "SIG_IMPORT_QUOTA"
+    ]
+    assert len(quota_warns) == 1
+    assert quota_warns[0]["max_images"] == 64
+    assert quota_warns[0]["max_total_bytes"] == 32 * 1024 * 1024
+
     # Empirical check against real sample .docx if present on this machine
     if REAL_SAMPLE_DOCX.is_file():
         real_parsed = parse_proposal_docx(REAL_SAMPLE_DOCX.name, REAL_SAMPLE_DOCX.read_bytes())

@@ -10,7 +10,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app.importer.reader import BodyBlock, EmbeddedImage, normalize_cell_text, normalize_label
+from app.importer.reader import (
+    MAX_IMPORT_DEDUP_IMAGE_BYTES,
+    MAX_IMPORT_IMAGE_COUNT,
+    BodyBlock,
+    EmbeddedImage,
+    normalize_cell_text,
+    normalize_label,
+)
 from app.models import LabPerson
 
 logger = logging.getLogger(__name__)
@@ -332,6 +339,39 @@ def bind_proposal_signatures(
     blobs: dict[str, str] = {}
     bound_by_temp_id: dict[str, dict[str, object]] = {}
 
+    max_import_images = MAX_IMPORT_IMAGE_COUNT
+    max_import_dedup_bytes = MAX_IMPORT_DEDUP_IMAGE_BYTES
+    allowed_images: list[EmbeddedImage] = []
+    seen_digests: set[bytes] = set()
+    dedup_bytes = 0
+    quota_exceeded = False
+
+    for img in embedded_images:
+        if getattr(img, "quota_exceeded", False):
+            quota_exceeded = True
+            break
+        digest = hashlib.sha256(img.data).digest()
+        added_bytes = 0 if digest in seen_digests else len(img.data)
+        if (
+            len(allowed_images) >= max_import_images
+            or dedup_bytes + added_bytes > max_import_dedup_bytes
+        ):
+            quota_exceeded = True
+            break
+        seen_digests.add(digest)
+        dedup_bytes += added_bytes
+        allowed_images.append(img)
+
+    if quota_exceeded:
+        warnings.append(
+            {
+                "code": "SIG_IMPORT_QUOTA",
+                "max_images": max_import_images,
+                "max_total_bytes": max_import_dedup_bytes,
+            }
+        )
+    embedded_images = allowed_images
+
     # Index table cell images by (table_index, row_index)
     table_row_images: dict[tuple[int, int], list[tuple[int, EmbeddedImage]]] = {}
     for img_idx, img in enumerate(embedded_images):
@@ -575,7 +615,7 @@ def bind_proposal_signatures(
                 in_window = [
                     (idx, img)
                     for idx, img in unconsumed_non_member_imgs
-                    if -3 <= (img.block_index - anchor_b) <= 2
+                    if -3 <= (img.block_index - anchor_b) <= 1
                 ]
                 if not in_window:
                     continue
