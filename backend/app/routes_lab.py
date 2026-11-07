@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 import docx
 from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
@@ -30,6 +30,24 @@ from app.importer.formatters import (
 from app.importer.parser import parse_proposal_docx, reparse_preview_payload
 from app.importer.people import assign_people_identities, clean_email, normalize_person_name
 from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
+from app.importer.provenance import (
+    ACHIEVEMENT_MANAGED_FIELDS,
+    FACILITY_MANAGED_FIELDS,
+    PERSON_MANAGED_FIELDS,
+    PROJECT_MANAGED_FIELDS,
+    MergePreviewRequest,
+    MergeRequest,
+    backfill_field_provenance,
+    build_merge_preview,
+    build_provenance_map,
+    execute_merge,
+    fallback_entity_provenance_summary,
+    get_entity_json_value,
+    record_entity_import_provenance,
+    record_manual_field_edit,
+    restore_entity_imported_fields,
+    revert_import_merge,
+)
 from app.importer.provision import (
     ProvisionError,
     ProvisionRequest,
@@ -148,6 +166,13 @@ class BatchFormatBody(BaseModel):
     include_relationship: bool = False
 
 
+class RestoreImportedBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field: str | None = None
+    fields: list[str] | None = None
+
+
 def _scrub_str(val: str | None) -> str | None:
     if val is None:
         return None
@@ -215,7 +240,10 @@ def _serialize_import_job(
     return payload
 
 
-def _serialize_person(person: LabPerson) -> dict[str, object]:
+def _serialize_person(
+    person: LabPerson,
+    provenance: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "id": str(person.id),
         "user_id": str(person.user_id) if person.user_id else None,
@@ -236,10 +264,18 @@ def _serialize_person(person: LabPerson) -> dict[str, object]:
         ),
         "application_text": format_person_application(person, include_bio=False),
         "application_text_with_bio": format_person_application(person, include_bio=True),
+        "provenance": (
+            provenance
+            if provenance is not None
+            else fallback_entity_provenance_summary("person", person)
+        ),
     }
 
 
-def _serialize_project(project: LabProject) -> dict[str, object]:
+def _serialize_project(
+    project: LabProject,
+    provenance: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "id": str(project.id),
         "title": project.title,
@@ -266,10 +302,18 @@ def _serialize_project(project: LabProject) -> dict[str, object]:
         "application_text_with_rel": format_project_application(
             project, include_relationship=True
         ),
+        "provenance": (
+            provenance
+            if provenance is not None
+            else fallback_entity_provenance_summary("project", project)
+        ),
     }
 
 
-def _serialize_achievement(achievement: LabAchievement) -> dict[str, object]:
+def _serialize_achievement(
+    achievement: LabAchievement,
+    provenance: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "id": str(achievement.id),
         "kind": achievement.kind,
@@ -295,10 +339,18 @@ def _serialize_achievement(achievement: LabAchievement) -> dict[str, object]:
         "application_text_plain": format_achievement_application(
             achievement, include_support=False
         ),
+        "provenance": (
+            provenance
+            if provenance is not None
+            else fallback_entity_provenance_summary("achievement", achievement)
+        ),
     }
 
 
-def _serialize_facility(facility: LabFacility) -> dict[str, object]:
+def _serialize_facility(
+    facility: LabFacility,
+    provenance: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "id": str(facility.id),
         "category": facility.category,
@@ -313,6 +365,11 @@ def _serialize_facility(facility: LabFacility) -> dict[str, object]:
             str(facility.source_import_id) if facility.source_import_id else None
         ),
         "application_text": format_facility_application(facility),
+        "provenance": (
+            provenance
+            if provenance is not None
+            else fallback_entity_provenance_summary("facility", facility)
+        ),
     }
 
 
@@ -852,6 +909,154 @@ async def provision_import(
     return result
 
 
+@router.post("/admin/imports/{job_id}/merge-preview")
+async def merge_preview_import_job(
+    job_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    body: MergePreviewRequest | None = Body(default=None),
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_merge_preview",
+        resource_type="import_job",
+        resource_id=str(job_id),
+    )
+    try:
+        preview = await build_merge_preview(
+            session,
+            job_id=job_id,
+            as_of_time_override=body.as_of_time if body is not None else None,
+        )
+    except ProvisionError as exc:
+        raise APIError(exc.status, exc.code, exc.message) from exc
+    await session.commit()
+    return preview
+
+
+@router.post("/admin/imports/{job_id}/merge")
+async def merge_import_job(
+    job_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    body: MergeRequest | None = Body(default=None),
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_proposal_merge",
+        resource_type="import_job",
+        resource_id=str(job_id),
+    )
+    merge_body = body if body is not None else MergeRequest()
+    try:
+        result = await execute_merge(
+            session,
+            job_id=job_id,
+            actor_id=actor.id,
+            body=merge_body,
+            embedder=_embedder(request),
+        )
+    except ProvisionError as exc:
+        raise APIError(exc.status, exc.code, exc.message) from exc
+
+    await session.commit()
+    raw_stats = result.get("stats")
+    stats: dict[str, Any] = raw_stats if isinstance(raw_stats, dict) else {}
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="import_proposal_merged",
+        resource_type="import_job",
+        resource_id=str(job_id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "added_entities": int(stats.get("added_entities") or 0),
+            "updated_fields": int(stats.get("updated_fields") or 0),
+            "kept_fields": int(stats.get("kept_fields") or 0),
+            "forced_fields": int(stats.get("forced_fields") or 0),
+        },
+    )
+    return result
+
+
+@router.post("/admin/imports/{job_id}/revert")
+async def revert_import_job(
+    job_id: uuid.UUID,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_merge_revert",
+        resource_type="import_job",
+        resource_id=str(job_id),
+    )
+    try:
+        result = await revert_import_merge(
+            session,
+            job_id=job_id,
+            actor_id=actor.id,
+            embedder=_embedder(request),
+        )
+    except ProvisionError as exc:
+        raise APIError(exc.status, exc.code, exc.message) from exc
+
+    await session.commit()
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="import_merge_reverted",
+        resource_type="import_job",
+        resource_id=str(job_id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "reverted_fields": result.get("reverted_fields"),
+            "deleted_entities": result.get("deleted_entities"),
+            "job_status": str(result.get("job_status") or ""),
+        },
+    )
+    return result
+
+
+@router.post("/admin/imports/backfill-provenance")
+async def backfill_imports_provenance(
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_backfill_provenance",
+        resource_type="import_job",
+    )
+    result = await backfill_field_provenance(session)
+    await session.commit()
+    raw_disc = result.get("discrepancies")
+    disc_count = len(raw_disc) if isinstance(raw_disc, list) else 0
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="import_provenance_backfilled",
+        resource_type="import_job",
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "backfilled_entries": result.get("backfilled_entries"),
+            "discrepancies": disc_count,
+        },
+    )
+    return result
+
+
 @router.get("/lab/overview")
 async def lab_overview(
     actor: Annotated[Actor, Depends(_actor)],
@@ -880,8 +1085,8 @@ async def lab_overview(
     )
     latest_job = await session.scalar(
         select(ImportJob)
-        .where(ImportJob.status == "provisioned")
-        .order_by(ImportJob.provisioned_at.desc())
+        .where(ImportJob.status.in_(("provisioned", "merged")))
+        .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
         .limit(1)
     )
 
@@ -946,7 +1151,10 @@ async def list_lab_people(
             or needle in (p.affiliation or "").lower()
             or needle in (p.bio or "").lower()
         ]
-    return {"people": [_serialize_person(p) for p in rows]}
+    prov_map = await build_provenance_map(session, "person", rows)
+    return {
+        "people": [_serialize_person(p, provenance=prov_map.get(p.id)) for p in rows]
+    }
 
 
 @router.get("/lab/projects")
@@ -978,7 +1186,10 @@ async def list_lab_projects(
             or needle in (p.pi_name or "").lower()
             or needle in (p.relationship_note or "").lower()
         ]
-    return {"projects": [_serialize_project(p) for p in rows]}
+    prov_map = await build_provenance_map(session, "project", rows)
+    return {
+        "projects": [_serialize_project(p, provenance=prov_map.get(p.id)) for p in rows]
+    }
 
 
 @router.get("/lab/achievements")
@@ -1011,7 +1222,12 @@ async def list_lab_achievements(
             or needle in (a.support_note or "").lower()
             or needle in (a.raw_text or "").lower()
         ]
-    return {"achievements": [_serialize_achievement(a) for a in rows]}
+    prov_map = await build_provenance_map(session, "achievement", rows)
+    return {
+        "achievements": [
+            _serialize_achievement(a, provenance=prov_map.get(a.id)) for a in rows
+        ]
+    }
 
 
 @router.get("/lab/facilities")
@@ -1040,7 +1256,12 @@ async def list_lab_facilities(
             or needle in (f.usage_scenario or "").lower()
             or needle in (f.raw_text or "").lower()
         ]
-    return {"facilities": [_serialize_facility(f) for f in rows]}
+    prov_map = await build_provenance_map(session, "facility", rows)
+    return {
+        "facilities": [
+            _serialize_facility(f, provenance=prov_map.get(f.id)) for f in rows
+        ]
+    }
 
 
 async def _resolve_source_import_id(
@@ -1203,6 +1424,12 @@ async def update_lab_person(
             if candidate_t1_fp == old_fp:
                 t1_login = linked_user.login_name
 
+    old_vals = {
+        f: get_entity_json_value("person", person, f)
+        for f in PERSON_MANAGED_FIELDS
+    }
+    touched_fields: list[str] = []
+
     fields_set = body.model_fields_set
     if "name" in fields_set:
         cleaned_name = normalize_person_name(_scrub_str(body.name) or "")
@@ -1213,18 +1440,25 @@ async def update_lab_person(
         person.name = cleaned_name
     if "email" in fields_set:
         person.email = clean_email(body.email)
+        touched_fields.append("email")
     if "title" in fields_set:
         person.title = _scrub_str(body.title)
+        touched_fields.append("title")
     if "admin_duty" in fields_set:
         person.admin_duty = _scrub_str(body.admin_duty)
+        touched_fields.append("admin_duty")
     if "tutor_role" in fields_set:
         person.tutor_role = _scrub_str(body.tutor_role)
+        touched_fields.append("tutor_role")
     if "research_specialty" in fields_set:
         person.research_specialty = _scrub_str(body.research_specialty)
+        touched_fields.append("research_specialty")
     if "degree" in fields_set:
         person.degree = _scrub_str(body.degree)
+        touched_fields.append("degree")
     if "affiliation" in fields_set:
         person.affiliation = _scrub_str(body.affiliation)
+        touched_fields.append("affiliation")
     if "project_role" in fields_set and body.project_role is not None:
         pr = body.project_role.strip().lower()
         if pr not in ("applicant", "member"):
@@ -1232,8 +1466,10 @@ async def update_lab_person(
         if actor.role != "admin" and pr != person.project_role:
             raise APIError(403, "forbidden", "仅管理员可修改成员姓名或项目角色")
         person.project_role = pr
+        touched_fields.append("project_role")
     if "bio" in fields_set:
         person.bio = _scrub_str(body.bio)
+        touched_fields.append("bio")
 
     if any(f in fields_set for f in ("name", "affiliation", "email")):
         if is_t1_person:
@@ -1266,9 +1502,21 @@ async def update_lab_person(
             raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
         person.entity_fingerprint = new_person_fp
 
-    serialized_person = _serialize_person(person)
-    assert_no_pii(serialized_person)
+    for fld in touched_fields:
+        await record_manual_field_edit(
+            session,
+            entity_type="person",
+            entity=person,
+            field=fld,
+            old_val=old_vals.get(fld),
+            new_val=get_entity_json_value("person", person, fld),
+            actor_id=user.id,
+        )
     await session.flush()
+
+    prov_map = await build_provenance_map(session, "person", [person])
+    serialized_person = _serialize_person(person, provenance=prov_map.get(person.id))
+    assert_no_pii(serialized_person)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1287,7 +1535,7 @@ async def update_lab_person(
         ip=_client_ip(request),
         detail={"rag_doc_key": doc_key},
     )
-    return {"person": _serialize_person(person), "rag_doc_key": doc_key}
+    return {"person": serialized_person, "rag_doc_key": doc_key}
 
 
 @router.post("/lab/projects")
@@ -1375,7 +1623,19 @@ async def create_lab_project(
     )
     session.add(project)
     await session.flush()
-    assert_no_pii(_serialize_project(project))
+    await record_entity_import_provenance(
+        session,
+        entity_type="project",
+        entity=project,
+        job_id=body.source_import_id,
+        as_of_time=as_of_date,
+        recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
+    )
+    await session.flush()
+    prov_map = await build_provenance_map(session, "project", [project])
+    serialized_proj = _serialize_project(project, provenance=prov_map.get(project.id))
+    assert_no_pii(serialized_proj)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1383,7 +1643,7 @@ async def create_lab_project(
         actor_id=user.id,
     )
     await session.commit()
-    return {"project": _serialize_project(project), "rag_doc_key": doc_key}
+    return {"project": serialized_proj, "rag_doc_key": doc_key}
 
 
 @router.patch("/lab/projects/{project_id}")
@@ -1408,27 +1668,41 @@ async def update_lab_project(
         require_owner=True,
     )
 
+    old_vals = {
+        f: get_entity_json_value("project", project, f)
+        for f in PROJECT_MANAGED_FIELDS
+    }
+    touched_fields: list[str] = []
+
     if "title" in fields_set:
         t_clean = _scrub_str(body.title)
         if not t_clean:
             raise APIError(422, "invalid_title", "项目名称不能为空")
         project.title = t_clean
+        touched_fields.append("title")
     if "funder" in fields_set:
         project.funder = _scrub_str(body.funder)
+        touched_fields.append("funder")
     if "grant_no" in fields_set:
         project.grant_no = _scrub_str(body.grant_no)
+        touched_fields.append("grant_no")
     if "pi_name" in fields_set:
         project.pi_name = _scrub_str(body.pi_name)
+        touched_fields.append("pi_name")
     if "lab_role" in fields_set and body.lab_role is not None:
         lr = body.lab_role.strip().lower()
         if lr in ("host", "participant", "unknown"):
             project.lab_role = lr
+            touched_fields.append("lab_role")
     if "start_date" in fields_set:
         project.start_date = _parse_iso_date(body.start_date)
+        touched_fields.append("start_date")
     if "end_date" in fields_set:
         project.end_date = _parse_iso_date(body.end_date)
+        touched_fields.append("end_date")
     if "amount_wan" in fields_set:
         project.amount_wan = _parse_decimal(body.amount_wan)
+        touched_fields.append("amount_wan")
     if "as_of_time" in fields_set and body.as_of_time is not None:
         parsed_as_of = _parse_iso_date(body.as_of_time)
         if parsed_as_of is not None:
@@ -1444,23 +1718,33 @@ async def update_lab_project(
         "unknown",
     ):
         project.status = explicit_status
+        touched_fields.append("status")
         if "status_source" not in fields_set or not (body.status_source or "").strip():
             project.status_source = "explicit"
+            touched_fields.append("status_source")
     if "status_source" in fields_set and body.status_source is not None:
         ss = body.status_source.strip().lower()
         if ss in ("explicit", "inferred"):
             project.status_source = ss
+            if "status_source" not in touched_fields:
+                touched_fields.append("status_source")
     if project.status_source == "inferred" and explicit_status is None:
         if project.end_date is not None and project.as_of_time is not None:
             project.status = (
                 "completed" if project.end_date < project.as_of_time else "ongoing"
             )
+            if "status" not in touched_fields:
+                touched_fields.append("status")
         elif project.end_date is None:
             project.status = "unknown"
+            if "status" not in touched_fields:
+                touched_fields.append("status")
     if "relationship_note" in fields_set:
         project.relationship_note = _scrub_str(body.relationship_note)
+        touched_fields.append("relationship_note")
     if "raw_text" in fields_set:
         project.raw_text = _scrub_str(body.raw_text) or project.title
+        touched_fields.append("raw_text")
 
     new_proj_fp = project_fp(
         grant_no=project.grant_no,
@@ -1477,8 +1761,24 @@ async def update_lab_project(
         raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
     project.entity_fingerprint = new_proj_fp
 
+    status_changed = old_vals.get("status") != get_entity_json_value(
+        "project", project, "status"
+    )
+    for fld in touched_fields:
+        await record_manual_field_edit(
+            session,
+            entity_type="project",
+            entity=project,
+            field=fld,
+            old_val=old_vals.get(fld),
+            new_val=get_entity_json_value("project", project, fld),
+            actor_id=user.id,
+            force_record=(fld == "status_source" and status_changed),
+        )
     await session.flush()
-    assert_no_pii(_serialize_project(project))
+    prov_map = await build_provenance_map(session, "project", [project])
+    serialized_proj = _serialize_project(project, provenance=prov_map.get(project.id))
+    assert_no_pii(serialized_proj)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1486,7 +1786,7 @@ async def update_lab_project(
         actor_id=user.id,
     )
     await session.commit()
-    return {"project": _serialize_project(project), "rag_doc_key": doc_key}
+    return {"project": serialized_proj, "rag_doc_key": doc_key}
 
 
 @router.delete("/lab/projects/{project_id}")
@@ -1571,7 +1871,21 @@ async def create_lab_achievement(
     )
     session.add(achievement)
     await session.flush()
-    assert_no_pii(_serialize_achievement(achievement))
+    await record_entity_import_provenance(
+        session,
+        entity_type="achievement",
+        entity=achievement,
+        job_id=body.source_import_id,
+        as_of_time=as_of_date,
+        recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
+    )
+    await session.flush()
+    prov_map = await build_provenance_map(session, "achievement", [achievement])
+    serialized_ach = _serialize_achievement(
+        achievement, provenance=prov_map.get(achievement.id)
+    )
+    assert_no_pii(serialized_ach)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1579,7 +1893,7 @@ async def create_lab_achievement(
         actor_id=user.id,
     )
     await session.commit()
-    return {"achievement": _serialize_achievement(achievement), "rag_doc_key": doc_key}
+    return {"achievement": serialized_ach, "rag_doc_key": doc_key}
 
 
 @router.patch("/lab/achievements/{achievement_id}")
@@ -1604,27 +1918,41 @@ async def update_lab_achievement(
         require_owner=True,
     )
 
+    old_vals = {
+        f: get_entity_json_value("achievement", achievement, f)
+        for f in ACHIEVEMENT_MANAGED_FIELDS
+    }
+    touched_fields: list[str] = []
+
     if "kind" in fields_set and body.kind is not None:
         k_clean = body.kind.strip().lower()
         if k_clean in ACHIEVEMENT_KIND_LABELS:
             achievement.kind = k_clean
+            touched_fields.append("kind")
     if "title" in fields_set:
         t_clean = _scrub_str(body.title)
         if not t_clean:
             raise APIError(422, "invalid_title", "成果名称不能为空")
         achievement.title = t_clean
+        touched_fields.append("title")
     if "first_author" in fields_set:
         achievement.first_author = _scrub_str(body.first_author)
+        touched_fields.append("first_author")
     if "authors_text" in fields_set:
         achievement.authors_text = _scrub_str(body.authors_text)
+        touched_fields.append("authors_text")
     if "venue" in fields_set:
         achievement.venue = _scrub_str(body.venue)
+        touched_fields.append("venue")
     if "year" in fields_set:
         achievement.year = body.year
+        touched_fields.append("year")
     if "support_note" in fields_set:
         achievement.support_note = _scrub_str(body.support_note)
+        touched_fields.append("support_note")
     if "raw_text" in fields_set:
         achievement.raw_text = _scrub_str(body.raw_text) or achievement.title
+        touched_fields.append("raw_text")
 
     new_ach_fp = achievement_fp(
         kind=achievement.kind,
@@ -1643,8 +1971,22 @@ async def update_lab_achievement(
         raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
     achievement.entity_fingerprint = new_ach_fp
 
+    for fld in touched_fields:
+        await record_manual_field_edit(
+            session,
+            entity_type="achievement",
+            entity=achievement,
+            field=fld,
+            old_val=old_vals.get(fld),
+            new_val=get_entity_json_value("achievement", achievement, fld),
+            actor_id=user.id,
+        )
     await session.flush()
-    assert_no_pii(_serialize_achievement(achievement))
+    prov_map = await build_provenance_map(session, "achievement", [achievement])
+    serialized_ach = _serialize_achievement(
+        achievement, provenance=prov_map.get(achievement.id)
+    )
+    assert_no_pii(serialized_ach)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1652,7 +1994,7 @@ async def update_lab_achievement(
         actor_id=user.id,
     )
     await session.commit()
-    return {"achievement": _serialize_achievement(achievement), "rag_doc_key": doc_key}
+    return {"achievement": serialized_ach, "rag_doc_key": doc_key}
 
 
 @router.delete("/lab/achievements/{achievement_id}")
@@ -1729,7 +2071,19 @@ async def create_lab_facility(
     )
     session.add(facility)
     await session.flush()
-    assert_no_pii(_serialize_facility(facility))
+    await record_entity_import_provenance(
+        session,
+        entity_type="facility",
+        entity=facility,
+        job_id=body.source_import_id,
+        as_of_time=as_of_date,
+        recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
+    )
+    await session.flush()
+    prov_map = await build_provenance_map(session, "facility", [facility])
+    serialized_fac = _serialize_facility(facility, provenance=prov_map.get(facility.id))
+    assert_no_pii(serialized_fac)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1737,7 +2091,7 @@ async def create_lab_facility(
         actor_id=user.id,
     )
     await session.commit()
-    return {"facility": _serialize_facility(facility), "rag_doc_key": doc_key}
+    return {"facility": serialized_fac, "rag_doc_key": doc_key}
 
 
 @router.patch("/lab/facilities/{facility_id}")
@@ -1754,21 +2108,33 @@ async def update_lab_facility(
     user = await _require_lab_editor(session, actor, admin_only=True)
     fields_set = body.model_fields_set
 
+    old_vals = {
+        f: get_entity_json_value("facility", facility, f)
+        for f in FACILITY_MANAGED_FIELDS
+    }
+    touched_fields: list[str] = []
+
     if "category" in fields_set and body.category is not None:
         facility.category = _scrub_str(body.category) or facility.category
+        touched_fields.append("category")
     if "name" in fields_set:
         n_clean = _scrub_str(body.name)
         if not n_clean:
             raise APIError(422, "invalid_name", "设备名称不能为空")
         facility.name = n_clean
+        touched_fields.append("name")
     if "spec" in fields_set:
         facility.spec = _scrub_str(body.spec)
+        touched_fields.append("spec")
     if "value_wan" in fields_set:
         facility.value_wan = _parse_decimal(body.value_wan)
+        touched_fields.append("value_wan")
     if "usage_scenario" in fields_set:
         facility.usage_scenario = _scrub_str(body.usage_scenario)
+        touched_fields.append("usage_scenario")
     if "raw_text" in fields_set:
         facility.raw_text = _scrub_str(body.raw_text) or facility.name
+        touched_fields.append("raw_text")
 
     new_fac_fp = facility_fp(
         category=facility.category,
@@ -1785,8 +2151,20 @@ async def update_lab_facility(
         raise APIError(409, "duplicate_entity", "修改后的记录与已有资产指纹冲突")
     facility.entity_fingerprint = new_fac_fp
 
+    for fld in touched_fields:
+        await record_manual_field_edit(
+            session,
+            entity_type="facility",
+            entity=facility,
+            field=fld,
+            old_val=old_vals.get(fld),
+            new_val=get_entity_json_value("facility", facility, fld),
+            actor_id=user.id,
+        )
     await session.flush()
-    assert_no_pii(_serialize_facility(facility))
+    prov_map = await build_provenance_map(session, "facility", [facility])
+    serialized_fac = _serialize_facility(facility, provenance=prov_map.get(facility.id))
+    assert_no_pii(serialized_fac)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -1794,7 +2172,155 @@ async def update_lab_facility(
         actor_id=user.id,
     )
     await session.commit()
-    return {"facility": _serialize_facility(facility), "rag_doc_key": doc_key}
+    return {"facility": serialized_fac, "rag_doc_key": doc_key}
+
+
+@router.post("/lab/{entity_type}/{entity_id}/restore-imported")
+async def restore_lab_entity_imported(
+    entity_type: str,
+    entity_id: uuid.UUID,
+    body: RestoreImportedBody,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    raw_type = entity_type.strip().lower()
+    type_map: dict[str, Literal["person", "project", "achievement", "facility"]] = {
+        "people": "person",
+        "person": "person",
+        "projects": "project",
+        "project": "project",
+        "achievements": "achievement",
+        "achievement": "achievement",
+        "facilities": "facility",
+        "facility": "facility",
+    }
+    norm_type = type_map.get(raw_type)
+    if norm_type is None:
+        raise APIError(400, "invalid_entity_type", f"不支持的实体类型: {entity_type}")
+
+    fields_to_restore: list[str] = []
+    if body.field and body.field.strip():
+        fields_to_restore.append(body.field.strip())
+    if body.fields:
+        for f in body.fields:
+            if f and f.strip() and f.strip() not in fields_to_restore:
+                fields_to_restore.append(f.strip())
+    if not fields_to_restore:
+        raise APIError(422, "field_required", "请提供需要恢复为导入值的字段名 field")
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+
+    entity: Any
+    user: User
+    if norm_type == "person":
+        user = await _user(session, actor)
+        entity = await session.scalar(
+            select(LabPerson).where(LabPerson.id == entity_id).with_for_update()
+        )
+        if entity is None:
+            raise APIError(404, "not_found", "成员档案不存在")
+        if actor.role != "admin" and entity.user_id != user.id:
+            raise APIError(403, "forbidden", "仅管理员或本人可恢复成员字段")
+        if "project_role" in fields_to_restore and actor.role != "admin":
+            await _require_admin(
+                request,
+                actor,
+                operation="restore_lab_person_project_role",
+                resource_type="lab_person",
+                resource_id=str(entity_id),
+            )
+    elif norm_type == "project":
+        entity = await session.scalar(
+            select(LabProject).where(LabProject.id == entity_id).with_for_update()
+        )
+        if entity is None:
+            raise APIError(404, "not_found", "项目记录不存在")
+        user = await _require_lab_editor(
+            session, actor, owner_name=entity.pi_name, require_owner=True
+        )
+    elif norm_type == "achievement":
+        entity = await session.scalar(
+            select(LabAchievement)
+            .where(LabAchievement.id == entity_id)
+            .with_for_update()
+        )
+        if entity is None:
+            raise APIError(404, "not_found", "成果记录不存在")
+        user = await _require_lab_editor(
+            session, actor, owner_name=entity.first_author, require_owner=True
+        )
+    else:
+        entity = await session.scalar(
+            select(LabFacility).where(LabFacility.id == entity_id).with_for_update()
+        )
+        if entity is None:
+            raise APIError(404, "not_found", "设备记录不存在")
+        user = await _require_lab_editor(session, actor, admin_only=True)
+
+    try:
+        restored = await restore_entity_imported_fields(
+            session,
+            entity_type=norm_type,
+            entity=entity,
+            fields=fields_to_restore,
+        )
+    except ProvisionError as exc:
+        raise APIError(exc.status, exc.code, exc.message) from exc
+
+    if norm_type == "project" and "pi_name" in fields_to_restore:
+        await _require_lab_editor(
+            session,
+            actor,
+            owner_name=entity.pi_name,
+            new_owner_name=entity.pi_name or "",
+            require_owner=True,
+        )
+    elif norm_type == "achievement" and "first_author" in fields_to_restore:
+        await _require_lab_editor(
+            session,
+            actor,
+            owner_name=entity.first_author,
+            new_owner_name=entity.first_author or "",
+            require_owner=True,
+        )
+
+    await session.flush()
+    prov_map = await build_provenance_map(session, norm_type, [entity])
+    if norm_type == "person":
+        serialized = _serialize_person(entity, provenance=prov_map.get(entity.id))
+    elif norm_type == "project":
+        serialized = _serialize_project(entity, provenance=prov_map.get(entity.id))
+    elif norm_type == "achievement":
+        serialized = _serialize_achievement(entity, provenance=prov_map.get(entity.id))
+    else:
+        serialized = _serialize_facility(entity, provenance=prov_map.get(entity.id))
+    assert_no_pii(serialized)
+
+    doc_key, _ = await sync_lab_profile_rag(
+        session,
+        embedder=_embedder(request),
+        actor_id=user.id,
+    )
+    await session.commit()
+
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_field_restored_imported",
+        resource_type=f"lab_{norm_type}",
+        resource_id=str(entity.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"fields": restored, "rag_doc_key": doc_key},
+    )
+    return {
+        **serialized,
+        norm_type: serialized,
+        "item": serialized,
+        "restored_fields": restored,
+        "rag_doc_key": doc_key,
+    }
 
 
 @router.delete("/lab/facilities/{facility_id}")
@@ -1944,7 +2470,7 @@ async def export_lab_assets(
     )
     latest_job = await session.scalar(
         select(ImportJob)
-        .where(ImportJob.status == "provisioned")
+        .where(ImportJob.status.in_(("provisioned", "merged")))
         .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
         .limit(1)
     )
