@@ -144,14 +144,24 @@ def _format_single_entity(
     style: str = "nsfc_standard",
     include_person_bio: bool = False,
     include_support_note: bool = True,
+    include_relationship_note: bool | None = None,
 ) -> str:
     if canon_kind == "person":
         return sanitize_xml_text(
             format_person_application(entity_obj, include_bio=include_person_bio)
         )
     if canon_kind == "project":
+        if style == "plain":
+            return sanitize_xml_text(
+                format_project_application(entity_obj, include_relationship=False)
+            )
+        inc_rel = (
+            include_support_note
+            if include_relationship_note is None
+            else include_relationship_note
+        )
         return sanitize_xml_text(
-            format_project_application(entity_obj, include_relationship=False)
+            format_project_application(entity_obj, include_relationship=inc_rel)
         )
     if canon_kind == "output":
         if style == "plain":
@@ -177,6 +187,7 @@ async def fetch_and_format_batch_items(
     group_by_entity: bool = True,
     include_person_bio: bool = False,
     include_support_note: bool = True,
+    include_relationship_note: bool | None = None,
 ) -> dict[str, object]:
     """Fetch requested entities in <= 4 SQL queries (never loading signature_data) and format them (Spec v2.2 §6.1)."""
     uuids_by_kind: dict[str, set[uuid.UUID]] = {
@@ -272,6 +283,7 @@ async def fetch_and_format_batch_items(
             style=style,
             include_person_bio=include_person_bio,
             include_support_note=include_support_note,
+            include_relationship_note=include_relationship_note,
         )
         formatted_items.append(
             {
@@ -561,6 +573,7 @@ async def build_selected_docx(
     group_by_entity: bool = True,
     include_person_bio: bool = False,
     include_support_note: bool = True,
+    include_relationship_note: bool | None = None,
     include_signatures_annex: bool = False,
 ) -> tuple[bytes, int, list[dict[str, str]]]:
     """Generate a `.docx` document for selected reuse basket items (Spec v2.2 §6.3).
@@ -575,6 +588,7 @@ async def build_selected_docx(
         group_by_entity=group_by_entity,
         include_person_bio=include_person_bio,
         include_support_note=include_support_note,
+        include_relationship_note=include_relationship_note,
     )
     internal_items: list[dict[str, Any]] = batch_res["_internal_items"]  # type: ignore[assignment]
     sections: list[dict[str, Any]] = batch_res["_sections"]  # type: ignore[assignment]

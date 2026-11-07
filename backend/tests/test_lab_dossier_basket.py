@@ -2546,6 +2546,7 @@ async def test_basket_format_zip_and_selected_docx_export(
             start_date=date(2024, 12, 1),
             status="ongoing",
             status_source="explicit",
+            relationship_note="为本课题提供算法基础。",
             raw_text="《智能评测关键技术研究》(AGE240005),郭建民主持,天津市教委,2024年12月立项,在研。",
             entity_fingerprint="d6" * 32,
             as_of_time=date(2026, 4, 26),
@@ -2615,6 +2616,21 @@ async def test_basket_format_zip_and_selected_docx_export(
     assert "三、前期研究成果" in fmt_data["combined_text"]
     assert "四、基础条件与设备" in fmt_data["combined_text"]
     assert "郭建民学术简历段落" in fmt_data["combined_text"]
+    assert "为本课题提供算法基础。" in fmt_data["combined_text"]
+
+    r_fmt_no_rel = await client.post(
+        "/api/v1/lab/format/batch",
+        headers=admin_headers,
+        json={
+            "items": [{"entity": "project", "id": proj_id}],
+            "options": {
+                "include_support_note": True,
+                "include_relationship_note": False,
+            },
+        },
+    )
+    assert r_fmt_no_rel.status_code == 200
+    assert "为本课题提供算法基础。" not in r_fmt_no_rel.json()["combined_text"]
 
     # Ungrouped with paren numbering
     r_fmt_ungrouped = await client.post(
