@@ -1999,13 +1999,13 @@ async def execute_merge(
             f_rows = by_ef.setdefault((entity_type, entity.id, field), [])
             ch = change_by_ef.get((entity_type, entity.id, field))
 
-            for old_r in f_rows:
-                if (
-                    old_r.source_job_id == job.id
-                    and old_r.source_kind == "import"
-                    and not old_r.superseded
-                ):
-                    old_r.superseded = True
+            prior_job_rows = [
+                old_r
+                for old_r in f_rows
+                if old_r.source_job_id == job.id
+                and old_r.source_kind == "import"
+                and not old_r.superseded
+            ]
 
             imp_row = FieldProvenance(
                 entity_type=entity_type,
@@ -2050,6 +2050,10 @@ async def execute_merge(
                         imp_row.superseded = True
                 elif cat in ("updated", "fill_blank") and chosen_act == "keep_current":
                     imp_row.superseded = True
+
+            if not imp_row.superseded:
+                for old_r in prior_job_rows:
+                    old_r.superseded = True
 
             await session.flush()
             eff = effective_value(f_rows)
