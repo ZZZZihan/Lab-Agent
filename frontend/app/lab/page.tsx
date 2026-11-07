@@ -471,6 +471,7 @@ export default function LabAssetsPage() {
     } else {
       setBasketItems([]);
       setBasketOptions(DEFAULT_BASKET_OPTIONS);
+      setSelectedIds({});
     }
     setBasketHydratedForUser(userId);
   }
@@ -506,8 +507,15 @@ export default function LabAssetsPage() {
       if (parsed) {
         setBasketItems(parsed.items);
         setBasketOptions(parsed.options);
+        const nextSelected: Record<string, boolean> = {};
+        for (const it of parsed.items) {
+          nextSelected[it.id] = true;
+        }
+        setSelectedIds(nextSelected);
       } else {
         setBasketItems([]);
+        setBasketOptions(DEFAULT_BASKET_OPTIONS);
+        setSelectedIds({});
       }
     }
     window.addEventListener("storage", handleStorage);
@@ -658,6 +666,7 @@ export default function LabAssetsPage() {
           } else {
             setBasketItems([]);
             setBasketOptions(DEFAULT_BASKET_OPTIONS);
+            setSelectedIds({});
           }
           setBasketHydratedForUser(uid);
 
