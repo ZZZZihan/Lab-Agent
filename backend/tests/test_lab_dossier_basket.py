@@ -17,6 +17,7 @@ import docx
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from app.audit import sanitize_detail
 from app.auth import hash_password, issue_token
 from app.config import get_settings
 from app.db import get_engine, get_sessionmaker
@@ -128,6 +129,7 @@ def build_proposal_docx_with_10_signatures(
     nearby_pi_diagram: bool = False,
     spaced_sig_header: bool = False,
     blank_member_with_no_pi_sig: bool = False,
+    unit_leader_stamp_section: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
 ) -> bytes:
@@ -227,6 +229,13 @@ def build_proposal_docx_with_10_signatures(
         pi_sig_p.add_run().add_picture(io.BytesIO(make_png_bytes(80, 40, fill_byte=55)))
     doc.add_paragraph("申请人（签章）：          2026年 4月 26 日")
     doc.add_paragraph("三、申请人所在单位意见")
+    if unit_leader_stamp_section:
+        unit_stamp_p = doc.add_paragraph()
+        unit_stamp_p.add_run().add_picture(
+            io.BytesIO(make_png_bytes(110, 55, fill_byte=0x44))
+        )
+        doc.add_paragraph("单位负责人（签章）：          2026年 4月 26 日")
+        doc.add_paragraph("所在单位负责人（签字）：      2026年 4月 26 日")
     p_sec4 = doc.add_paragraph("四、课题设计论证")
     if nearby_pi_diagram:
         p_sec4.add_run().add_picture(io.BytesIO(make_png_bytes(120, 60, fill_byte=88)))
@@ -531,6 +540,16 @@ def test_signature_validator_formats_and_bounds() -> None:
     with pytest.raises(PIILeakError):
         assert_no_pii(f"联系电话Tel{synth_mob}")
     assert_no_pii(scrubbed_txt)
+    phone_like_sha = "16816937983d6576a9b6c96878ac3ffcba4f2af7bf9a327cd5ab5b30e1273a34"
+    sanitized_audit = sanitize_detail(
+        {
+            "person_id": str(uuid.uuid4()),
+            "sha256": phone_like_sha,
+            "hashes": [phone_like_sha],
+            "channel": "single",
+        }
+    )
+    assert sanitized_audit["sha256"] == phone_like_sha
     assert validate_signature_image(bad_webp).error_code == "SIGNATURE_CORRUPT"
 
     # Bad dimensions (< 8x8, > 6000, > 20M pixels)
@@ -614,6 +633,20 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
         s["person_temp_id"] != "p1" for s in blank_mem_parsed["preview"]["signatures"]
     )
     assert len(blank_mem_parsed["preview"]["signatures"]) == 9
+
+    # Edge case 3e: Unit leader signature section ("单位负责人（签章）：") after PI signature does not match PI anchor or trigger SIGNATURE_AMBIGUOUS_PI
+    unit_ldr_docx = build_proposal_docx_with_10_signatures(
+        unit_leader_stamp_section=True
+    )
+    unit_ldr_parsed = parse_proposal_docx("unit_ldr.docx", unit_ldr_docx)
+    unit_ldr_codes = [w["code"] for w in unit_ldr_parsed["preview"]["warnings"]]
+    assert "SIGNATURE_AMBIGUOUS_PI" not in unit_ldr_codes
+    assert len(unit_ldr_parsed["preview"]["signatures"]) == 10
+    assert unit_ldr_parsed["preview"]["signatures"][0]["person_temp_id"] == "p1"
+    assert (
+        unit_ldr_parsed["preview"]["signatures"][0]["sha256"]
+        == sigs[0]["sha256"]
+    )
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)

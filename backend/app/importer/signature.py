@@ -25,8 +25,16 @@ JPEG_MAGIC = b"\xff\xd8\xff"
 
 SIG_HEADER_RE = re.compile(r"(签字|签名|签章)")
 PI_ANCHOR_RE = re.compile(
-    r"申请人[（(]?签[章字名][)）]?|负责人[（(]?签[章字名][)）]?|项目负责人签[字章]"
+    r"^(?:项目)?(?:申请人|负责人)[（(]?(?:签章|签字|签名)[)）]?"
 )
+
+
+def _is_pi_anchor_block(text: str) -> bool:
+    for part in re.split(r"[\r\n\t|]+", text or ""):
+        compact = re.sub(r"\s+", "", normalize_cell_text(part))
+        if compact and PI_ANCHOR_RE.match(compact):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -545,7 +553,7 @@ def bind_proposal_signatures(
         pi_name = str(pi_person.get("name") or "")
 
         anchor_blocks = [
-            blk.block_index for blk in body_blocks if PI_ANCHOR_RE.search(blk.text)
+            blk.block_index for blk in body_blocks if _is_pi_anchor_block(blk.text)
         ]
         if anchor_blocks:
             unconsumed_non_member_imgs: list[tuple[int, EmbeddedImage]] = []
