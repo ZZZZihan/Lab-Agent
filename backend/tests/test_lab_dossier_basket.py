@@ -124,6 +124,7 @@ def build_proposal_docx_with_10_signatures(
     ambiguous_pi_sig: bool = False,
     nearby_pi_diagram: bool = False,
     spaced_sig_header: bool = False,
+    blank_member_with_no_pi_sig: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
 ) -> bytes:
@@ -206,10 +207,19 @@ def build_proposal_docx_with_10_signatures(
                 io.BytesIO(make_png_bytes(40, 20, fill_byte=77))
             )
 
+    if blank_member_with_no_pi_sig:
+        blank_row_cells = t_team.add_row().cells
+        blank_row_cells[0].text = "项目组成员"
+        blank_row_cells[1].text = ""
+        blank_row_cells[7].paragraphs[0].add_run().add_picture(
+            io.BytesIO(make_png_bytes(70, 30, fill_byte=0x33))
+        )
+
     # PI commitment block with signature image in preceding paragraph
     doc.add_paragraph("本人承诺上述填报内容真实有效。")
     pi_sig_p = doc.add_paragraph()
-    pi_sig_p.add_run().add_picture(io.BytesIO(make_jpeg_bytes(165, 82, seed=1)))
+    if not blank_member_with_no_pi_sig:
+        pi_sig_p.add_run().add_picture(io.BytesIO(make_jpeg_bytes(165, 82, seed=1)))
     if ambiguous_pi_sig:
         pi_sig_p.add_run().add_picture(io.BytesIO(make_png_bytes(80, 40, fill_byte=55)))
     doc.add_paragraph("申请人（签章）：          2026年 4月 26 日")
@@ -484,8 +494,12 @@ def test_signature_validator_formats_and_bounds() -> None:
         assert chk.error_code == "SIGNATURE_REJECTED_FORMAT"
         assert chk.sha256 is None
 
-    # Corrupt / truncated PNG, JPEG (including truncated after SOS without EOI), WebP
+    # Corrupt / truncated PNG (including IHDR+IEND without IDAT), JPEG (including truncated after SOS without EOI), WebP
     assert validate_signature_image(png_bytes[:-8]).error_code == "SIGNATURE_CORRUPT"
+    ihdr_iend_only_png = png_bytes[:33] + png_bytes[-12:]
+    assert (
+        validate_signature_image(ihdr_iend_only_png).error_code == "SIGNATURE_CORRUPT"
+    )
     assert validate_signature_image(jpg_bytes[:15]).error_code == "SIGNATURE_CORRUPT"
     assert validate_signature_image(jpg_bytes[:-2]).error_code == "SIGNATURE_CORRUPT"
     bad_webp = b"RIFF" + struct.pack("<I", 9999) + b"WEBP" + b"VP8 " + struct.pack("<I", 10) + b"0" * 10
@@ -573,6 +587,16 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     spaced_hdr_codes = [w["code"] for w in spaced_hdr_parsed["preview"]["warnings"]]
     assert "SIGNATURE_UNEXPECTED_CELL" not in spaced_hdr_codes
     assert len(spaced_hdr_parsed["preview"]["signatures"]) == 10
+
+    # Edge case 3d: Blank-name member row with signature + no PI signature -> orphan member signature never bound to PI
+    blank_mem_docx = build_proposal_docx_with_10_signatures(
+        blank_member_with_no_pi_sig=True
+    )
+    blank_mem_parsed = parse_proposal_docx("blank_mem.docx", blank_mem_docx)
+    assert all(
+        s["person_temp_id"] != "p1" for s in blank_mem_parsed["preview"]["signatures"]
+    )
+    assert len(blank_mem_parsed["preview"]["signatures"]) == 9
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)
@@ -914,6 +938,30 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert guo_after_both_reverts.signature_sha256 is None
         assert guo_after_both_reverts.signature_source is None
 
+    # 6) Conflicting person in exclude_keys does not trigger 422 merge_conflict_unresolved
+    async with maker() as session:
+        db_job_b2 = await session.get(ImportJob, uuid.UUID(job_b_id))
+        assert db_job_b2 is not None
+        prev_b2 = dict(db_job_b2.preview or {})
+        ppl_b2 = [dict(p) for p in (prev_b2.get("people") or [])]
+        for p_item in ppl_b2:
+            if p_item.get("name") == "万振凯":
+                p_item["title"] = "特聘冲突教授"
+        prev_b2["people"] = ppl_b2
+        db_job_b2.preview = prev_b2
+        await session.commit()
+
+    r_merge_excl = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": [], "exclude_keys": ["p2"]},
+    )
+    assert r_merge_excl.status_code == 200, r_merge_excl.text
+    async with maker() as session:
+        wan_after_excl = await session.get(LabPerson, uuid.UUID(wan_id))
+        assert wan_after_excl is not None
+        assert wan_after_excl.title == "教授"
+
 
 # ---------------------------------------------------------------------------
 # 5. Signature CRUD, ETag/If-Match, Security Headers & Deferred Loading (§5 & §8.2)
@@ -1149,6 +1197,7 @@ async def test_person_dossier_attribution_and_query_budget(
         "bobjones",
         "张三",
     ]
+    assert split_names("张三、欧阳 娜娜") == ["张三", "欧阳娜娜"]
     assert split_names("Roland, et al.") == ["roland"]
 
     _, admin_headers = await _seed_user_and_token(role="admin", login_name="dos_admin")

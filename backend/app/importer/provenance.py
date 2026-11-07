@@ -866,8 +866,19 @@ def _has_login_conflict(person_dict: dict[str, Any]) -> bool:
     return False
 
 
-def _is_person_excluded(p: dict[str, Any]) -> bool:
-    return bool(p.get("exclude") is True or p.get("override_mode") == "exclude")
+def _is_person_excluded(
+    p: dict[str, Any], exclude_key_set: set[str] | None = None
+) -> bool:
+    pkey = str(p.get("temp_id") or p.get("key") or "").strip()
+    if exclude_key_set and pkey and pkey in exclude_key_set:
+        return True
+    return bool(
+        p.get("exclude") is True
+        or p.get("excluded") is True
+        or p.get("include") is False
+        or p.get("imported") is False
+        or p.get("override_mode") == "exclude"
+    )
 
 
 def _ach_reg_id(kind: str, raw_text: str) -> str:
@@ -1556,6 +1567,7 @@ async def build_merge_preview(
     *,
     job_id: uuid.UUID,
     as_of_time_override: date | None = None,
+    exclude_keys: Sequence[str] | set[str] | None = None,
 ) -> dict[str, object]:
     """Compute Phase 2 temporal merge preview without mutating entity tables (Spec §10.5)."""
     job = await session.get(ImportJob, job_id)
@@ -1603,12 +1615,15 @@ async def build_merge_preview(
         by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(row_obj)
 
     preview: dict[str, Any] = dict(job.preview or {})
+    exclude_key_set = {
+        str(k).strip() for k in (exclude_keys or []) if str(k).strip()
+    }
 
     raw_ppl = preview.get("people")
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict) and not _is_person_excluded(p)
+        if isinstance(p, dict) and not _is_person_excluded(p, exclude_key_set)
     ]
     if ppl_list:
         _assign_people_preserving_explicit_links(
@@ -1928,11 +1943,13 @@ async def execute_merge(
         raise ProvisionError(409, "import_invalid_status", "该导入任务当前状态不可合并")
 
     as_of_date = _resolve_job_as_of(job, body.as_of_time)
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     await _reconcile_job_existing_provenance(session, job.id, as_of_date)
     preview_result = await build_merge_preview(
         session,
         job_id=job_id,
         as_of_time_override=as_of_date,
+        exclude_keys=exclude_key_set,
     )
     raw_changes = preview_result.get("changes")
     changes_list: list[dict[str, object]] = (
@@ -1997,7 +2014,7 @@ async def execute_merge(
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict) and not _is_person_excluded(p)
+        if isinstance(p, dict) and not _is_person_excluded(p, exclude_key_set)
     ]
     if ppl_list:
         _assign_people_preserving_explicit_links(

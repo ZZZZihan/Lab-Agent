@@ -54,8 +54,9 @@ def _parse_png_dimensions(raw: bytes) -> tuple[int, int] | None:
         return None
     if b"IEND" not in raw[-12:]:
         return None
-    # Walk PNG chunks to verify structural integrity (no truncated chunk)
+    # Walk PNG chunks to verify structural integrity (no truncated chunk) and require non-empty IDAT
     pos = 8
+    saw_idat = False
     saw_iend = False
     while pos < len(raw):
         if pos + 8 > len(raw):
@@ -65,11 +66,15 @@ def _parse_png_dimensions(raw: bytes) -> tuple[int, int] | None:
         next_pos = pos + 8 + c_len + 4
         if next_pos > len(raw):
             return None
+        if c_type == b"IDAT" and c_len > 0:
+            saw_idat = True
         if c_type == b"IEND":
+            if not saw_idat:
+                return None
             saw_iend = True
             break
         pos = next_pos
-    if not saw_iend:
+    if not saw_iend or not saw_idat:
         return None
     return width, height
 
@@ -320,6 +325,61 @@ def bind_proposal_signatures(
         header_sig_col_by_table[key] = matched
         return matched
 
+    _member_header_labels: frozenset[str] = frozenset(
+        {
+            "姓名",
+            "证件号",
+            "证件号码",
+            "身份证号",
+            "学号",
+            "工号",
+            "学号/工号",
+            "专业职务",
+            "专业职称",
+            "技术职称",
+            "专业技术职务",
+            "职称",
+            "职务",
+            "行政职务",
+            "担任导师",
+            "研究专长",
+            "学位",
+            "最后学位",
+            "最终学位",
+            "最高学位",
+            "学历学位",
+            "工作单位",
+            "单位",
+            "单位名称",
+            "所在单位",
+            "所在单位名称",
+            "电子信箱",
+            "电子邮箱",
+            "邮箱",
+            "联系电话",
+            "手机",
+            "电话",
+            "出生年月",
+            "出生日期",
+            "性别",
+        }
+    )
+
+    # Mark entire recognized member-table regions (from header row to end of table) so unparsed/blank-name
+    # member rows are also excluded from PI signature candidates.
+    for tbl_i, grid in enumerate(grids):
+        for row_i, row in enumerate(grid):
+            labels = [normalize_label(c) for c in row if c.strip()]
+            if any(lbl in ("男", "女") for lbl in labels):
+                continue
+            if "姓名" in labels and (
+                sum(1 for lbl in labels if lbl in _member_header_labels) >= 3
+                or _find_sig_col_in_header(tbl_i, row_i) is not None
+            ):
+                for mr_idx in range(row_i, len(grid)):
+                    member_table_rows.add((tbl_i, mr_idx))
+                break
+
     # Rule 1: Member table row signature cells
     for person in people:
         temp_id = str(person.get("temp_id") or person.get("key") or "")
@@ -340,6 +400,9 @@ def bind_proposal_signatures(
         if t_idx < 0 or t_idx >= len(grids) or r_idx < 0 or r_idx >= len(grids[t_idx]):
             continue
 
+        if isinstance(h_idx, int) and 0 <= h_idx < len(grids[t_idx]):
+            for mr_idx in range(h_idx, len(grids[t_idx])):
+                member_table_rows.add((t_idx, mr_idx))
         member_table_rows.add((t_idx, r_idx))
         row_cells = grids[t_idx][r_idx]
         if not row_cells:

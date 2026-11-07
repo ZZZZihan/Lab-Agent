@@ -94,28 +94,6 @@ def split_names(raw: str | None) -> list[str]:
         s = seg.strip()
         if not s:
             continue
-        # Remove trailing parentheticals before checking internal spaces
-        prev = None
-        while prev != s:
-            prev = s
-            s = TRAILING_PAREN_RE.sub("", s).strip()
-            s = TRAILING_MARK_RE.sub("", s).strip()
-        if not s:
-            continue
-
-        # Check if segment contains space-separated Chinese names vs a single spaced Chinese name
-        parts = [p for p in re.split(r"[\s　]+", s) if p]
-        if len(parts) > 1 and all(
-            re.match(r"^[一-龥·•．⋅∙・*#†‡（()）]+$", p) for p in parts
-        ):
-            cleaned_parts = [normalize_person_name(p) for p in parts]
-            # If every part has length >= 2, treat space as separator between multiple Chinese names
-            if all(len(cp) >= 2 for cp in cleaned_parts if cp):
-                for cp in cleaned_parts:
-                    if _is_valid_name_token(cp):
-                        tokens.append(cp)
-                continue
-
         norm_tok = normalize_person_name(s)
         if _is_valid_name_token(norm_tok):
             tokens.append(norm_tok)
