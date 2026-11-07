@@ -130,6 +130,7 @@ def build_proposal_docx_with_10_signatures(
     spaced_sig_header: bool = False,
     blank_member_with_no_pi_sig: bool = False,
     unit_leader_stamp_section: bool = False,
+    pi_sig_in_commitment_table: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
 ) -> bytes:
@@ -220,14 +221,23 @@ def build_proposal_docx_with_10_signatures(
             io.BytesIO(make_png_bytes(70, 30, fill_byte=0x33))
         )
 
-    # PI commitment block with signature image in preceding paragraph
-    doc.add_paragraph("本人承诺上述填报内容真实有效。")
-    pi_sig_p = doc.add_paragraph()
-    if not blank_member_with_no_pi_sig:
-        pi_sig_p.add_run().add_picture(io.BytesIO(make_jpeg_bytes(165, 82, seed=1)))
-    if ambiguous_pi_sig:
-        pi_sig_p.add_run().add_picture(io.BytesIO(make_png_bytes(80, 40, fill_byte=55)))
-    doc.add_paragraph("申请人（签章）：          2026年 4月 26 日")
+    # PI commitment block with signature image in preceding paragraph or non-member commitment table
+    if pi_sig_in_commitment_table:
+        t_pi = doc.add_table(rows=1, cols=2)
+        t_pi.cell(0, 0).text = "申请人承诺：上述内容属实"
+        pi_cell_p = t_pi.cell(0, 1).paragraphs[0]
+        pi_cell_p.text = "申请人（签章）："
+        pi_cell_p.add_run().add_picture(
+            io.BytesIO(make_jpeg_bytes(165, 82, seed=1))
+        )
+    else:
+        doc.add_paragraph("本人承诺上述填报内容真实有效。")
+        pi_sig_p = doc.add_paragraph()
+        if not blank_member_with_no_pi_sig:
+            pi_sig_p.add_run().add_picture(io.BytesIO(make_jpeg_bytes(165, 82, seed=1)))
+        if ambiguous_pi_sig:
+            pi_sig_p.add_run().add_picture(io.BytesIO(make_png_bytes(80, 40, fill_byte=55)))
+        doc.add_paragraph("申请人（签章）：          2026年 4月 26 日")
     doc.add_paragraph("三、申请人所在单位意见")
     if unit_leader_stamp_section:
         unit_stamp_p = doc.add_paragraph()
@@ -645,6 +655,24 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     assert unit_ldr_parsed["preview"]["signatures"][0]["person_temp_id"] == "p1"
     assert (
         unit_ldr_parsed["preview"]["signatures"][0]["sha256"]
+        == sigs[0]["sha256"]
+    )
+
+    # Edge case 3f: PI signature in a non-member commitment table where cell 0 has commitment text and cell 1 has "申请人（签章）：" + image
+    pi_tbl_docx = build_proposal_docx_with_10_signatures(
+        pi_sig_in_commitment_table=True
+    )
+    pi_tbl_parsed = parse_proposal_docx("pi_tbl.docx", pi_tbl_docx)
+    pi_tbl_sig_warns = [
+        w
+        for w in pi_tbl_parsed["preview"]["warnings"]
+        if str(w.get("code", "")).startswith("SIGNATURE_")
+    ]
+    assert pi_tbl_sig_warns == []
+    assert len(pi_tbl_parsed["preview"]["signatures"]) == 10
+    assert pi_tbl_parsed["preview"]["signatures"][0]["person_temp_id"] == "p1"
+    assert (
+        pi_tbl_parsed["preview"]["signatures"][0]["sha256"]
         == sigs[0]["sha256"]
     )
 

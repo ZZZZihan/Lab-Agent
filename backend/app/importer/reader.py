@@ -176,6 +176,27 @@ def iter_document_tables(doc: Any) -> list[Any]:
     ]
 
 
+def _extract_element_lines_text(elem: Any) -> str:
+    """Extract normalized text from `<w:p>` or `<w:tbl>`, preserving cell, paragraph, and `<w:br/>` boundaries."""
+    paragraphs = (
+        [elem]
+        if elem.tag == f"{{{W_NS}}}p"
+        else list(elem.iter(f"{{{W_NS}}}p"))
+    )
+    lines: list[str] = []
+    for p in paragraphs:
+        chunks: list[str] = []
+        for node in p.iter():
+            if node.tag == f"{{{W_NS}}}t":
+                chunks.append(node.text or "")
+            elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
+                chunks.append("\n")
+        norm_p = normalize_cell_text("".join(chunks))
+        if norm_p:
+            lines.append(norm_p)
+    return "\n".join(lines)
+
+
 def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
     """Extract embedded image relationship IDs (`a:blip/@r:embed` and `v:imagedata/@r:id`).
 
@@ -273,9 +294,7 @@ def extract_body_blocks_and_images(
 
         for block_idx, elem in enumerate(body_elems):
             if elem.tag == f"{{{W_NS}}}p":
-                text = normalize_cell_text(
-                    "".join(t.text or "" for t in elem.iter(f"{{{W_NS}}}t"))
-                )
+                text = _extract_element_lines_text(elem)
                 blocks.append(
                     BodyBlock(
                         block_index=block_idx,
@@ -306,9 +325,7 @@ def extract_body_blocks_and_images(
             elif elem.tag == f"{{{W_NS}}}tbl":
                 t_idx = table_counter
                 table_counter += 1
-                text = normalize_cell_text(
-                    "".join(t.text or "" for t in elem.iter(f"{{{W_NS}}}t"))
-                )
+                text = _extract_element_lines_text(elem)
                 blocks.append(
                     BodyBlock(
                         block_index=block_idx,
