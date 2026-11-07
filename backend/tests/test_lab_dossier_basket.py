@@ -957,6 +957,8 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         db_job = await session.get(ImportJob, uuid.UUID(job_id))
         assert db_job is not None
         assert "_signature_blobs" not in (db_job.preview or {})
+        job1_pre_sigs = (db_job.stats or {}).get("_pre_merge_signatures")
+        assert isinstance(job1_pre_sigs, dict)
         people_rows = list(await session.scalars(select(LabPerson)))
         assert len(people_rows) == 10
         for lp in people_rows:
@@ -964,6 +966,14 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
             assert lp.signature_sha256 is not None and len(lp.signature_sha256) == 64
             assert lp.signature_updated_at is not None
             assert lp.signature_source == "docx_import"
+            assert job1_pre_sigs.get(str(lp.id)) == {
+                "signature_data_b64": None,
+                "signature_mime": None,
+                "signature_sha256": None,
+                "signature_updated_at": None,
+                "signature_source": None,
+                "applied_sha256": lp.signature_sha256,
+            }
         first_updated_map = {lp.id: lp.signature_updated_at for lp in people_rows}
         wan_person = next(lp for lp in people_rows if lp.name == "万振凯")
         wan_id = str(wan_person.id)
@@ -1352,6 +1362,63 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert zhao_after_rev is not None
         assert zhao_after_rev.signature_source == "upload"
         assert zhao_after_rev.signature_sha256 == zhao_manual_sha
+
+    # 8) Out-of-order revert starting from initial provision job (job_id) that created Xu Guowei (p3) with S1:
+    #    job_b replaces p3's signature with S2; reverting job_id first rebases job_b's snapshot from S1 to None,
+    #    so reverting job_b afterward clears p3's signature to None instead of resurrecting S1.
+    async with maker() as session:
+        xu_p = await session.scalar(select(LabPerson).where(LabPerson.name == "徐国伟"))
+        assert xu_p is not None
+        xu_id = str(xu_p.id)
+        xu_orig_sha = xu_p.signature_sha256
+        assert xu_orig_sha is not None
+
+        db_job_b4 = await session.get(ImportJob, uuid.UUID(job_b_id))
+        assert db_job_b4 is not None
+        prev_b4 = dict(db_job_b4.preview or {})
+        sigs_b4 = [dict(s) for s in (prev_b4.get("signatures") or [])]
+        for s_item in sigs_b4:
+            if s_item.get("person_temp_id") == "p3":
+                s_item["sha256"] = s2_sha
+                s_item["mime"] = "image/png"
+        prev_b4["signatures"] = sigs_b4
+        blobs_b4 = dict(prev_b4.get("_signature_blobs") or {})
+        blobs_b4[s2_sha] = base64.b64encode(s2_bytes).decode("ascii")
+        prev_b4["_signature_blobs"] = blobs_b4
+        db_job_b4.preview = prev_b4
+        await session.commit()
+
+    r_merge_b4 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": [], "exclude_keys": ["p2"]},
+    )
+    assert r_merge_b4.status_code == 200, r_merge_b4.text
+    async with maker() as session:
+        xu_after_b4 = await session.get(LabPerson, uuid.UUID(xu_id))
+        assert xu_after_b4 is not None
+        assert xu_after_b4.signature_sha256 == s2_sha
+
+    r_rev_job1 = await client.post(
+        f"/api/v1/admin/imports/{job_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_job1.status_code == 200, r_rev_job1.text
+    async with maker() as session:
+        xu_after_rev_job1 = await session.get(LabPerson, uuid.UUID(xu_id))
+        assert xu_after_rev_job1 is not None
+        assert xu_after_rev_job1.signature_sha256 == s2_sha
+
+    r_rev_b4 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev_b4.status_code == 200, r_rev_b4.text
+    async with maker() as session:
+        xu_after_rev_b4 = await session.get(LabPerson, uuid.UUID(xu_id))
+        assert xu_after_rev_b4 is not None
+        assert xu_after_rev_b4.signature_sha256 is None
+        assert xu_after_rev_b4.signature_source is None
 
 
 # ---------------------------------------------------------------------------

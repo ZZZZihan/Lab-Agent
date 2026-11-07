@@ -770,6 +770,16 @@ async def provision_import_job(
                     **snap,
                     "applied_sha256": p_existing.signature_sha256,
                 }
+        for p_new in inserted_people:
+            if p_new.signature_sha256 is not None:
+                changed_sig_snapshots[str(p_new.id)] = {
+                    "signature_data_b64": None,
+                    "signature_mime": None,
+                    "signature_sha256": None,
+                    "signature_updated_at": None,
+                    "signature_source": None,
+                    "applied_sha256": p_new.signature_sha256,
+                }
         cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}
         if sig_extra_warnings:
             cur_prev_warnings = list(cleaned_preview.get("warnings") or [])

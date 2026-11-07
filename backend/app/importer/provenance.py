@@ -2618,6 +2618,16 @@ async def execute_merge(
                 **snap,
                 "applied_sha256": p_existing.signature_sha256,
             }
+    for p_new in new_people_by_fp.values():
+        if p_new.signature_sha256 is not None:
+            prior_job_sig_snaps[str(p_new.id)] = {
+                "signature_data_b64": None,
+                "signature_mime": None,
+                "signature_sha256": None,
+                "signature_updated_at": None,
+                "signature_source": None,
+                "applied_sha256": p_new.signature_sha256,
+            }
     if prior_job_sig_snaps:
         cur_stats["_pre_merge_signatures"] = prior_job_sig_snaps
     if job.status in ("parsed", "provisioned"):
