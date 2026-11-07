@@ -133,6 +133,8 @@ def build_proposal_docx_with_10_signatures(
     blank_member_with_no_pi_sig: bool = False,
     unit_leader_stamp_section: bool = False,
     pi_sig_in_commitment_table: bool = False,
+    applicant_in_member_table: bool = False,
+    applicant_member_sig_matches_pi: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
     wrap_alternate_content: bool = False,
@@ -222,6 +224,23 @@ def build_proposal_docx_with_10_signatures(
         blank_row_cells[1].text = ""
         blank_row_cells[7].paragraphs[0].add_run().add_picture(
             io.BytesIO(make_png_bytes(70, 30, fill_byte=0x33))
+        )
+
+    if applicant_in_member_table:
+        app_row_cells = t_team.add_row().cells
+        app_row_cells[0].text = "项目组成员"
+        app_row_cells[1].text = "郭建民"
+        app_row_cells[3].text = "正高级实验师"
+        app_row_cells[4].text = "智能评测与大模型安全"
+        app_row_cells[5].text = "硕士"
+        app_row_cells[6].text = "天津工业大学"
+        app_mem_sig = (
+            make_jpeg_bytes(165, 82, seed=1)
+            if applicant_member_sig_matches_pi
+            else make_png_bytes(75, 35, fill_byte=0x5A)
+        )
+        app_row_cells[7].paragraphs[0].add_run().add_picture(
+            io.BytesIO(app_mem_sig)
         )
 
     # PI commitment block with signature image in preceding paragraph or non-member commitment table
@@ -730,6 +749,48 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     ]
     assert alt_sig_warns == []
     assert len(alt_parsed["preview"]["signatures"]) == 10
+
+    # Edge case 3h: Applicant appears in member table with different vs identical signature image vs PI commitment section
+    conflict_docx = build_proposal_docx_with_10_signatures(
+        applicant_in_member_table=True,
+        applicant_member_sig_matches_pi=False,
+    )
+    conflict_parsed = parse_proposal_docx("pi_conflict.docx", conflict_docx)
+    conflict_sigs = conflict_parsed["preview"]["signatures"]
+    assert len(conflict_sigs) == 10
+    expected_member_pi_sha = hashlib.sha256(
+        make_png_bytes(75, 35, fill_byte=0x5A)
+    ).hexdigest()
+    expected_commit_pi_sha = hashlib.sha256(
+        make_jpeg_bytes(165, 82, seed=1)
+    ).hexdigest()
+    assert conflict_sigs[0]["person_temp_id"] == "p1"
+    assert conflict_sigs[0]["source_kind"] == "member_table_cell"
+    assert conflict_sigs[0]["sha256"] == expected_member_pi_sha
+    conflict_warns = [
+        w
+        for w in conflict_parsed["preview"]["warnings"]
+        if w.get("code") == "SIG_PI_CONFLICT"
+    ]
+    assert len(conflict_warns) == 1
+    assert conflict_warns[0]["person_temp_id"] == "p1"
+    assert conflict_warns[0]["person_name"] == "郭建民"
+    assert conflict_warns[0]["member_sha256"] == expected_member_pi_sha
+    assert conflict_warns[0]["pi_sha256"] == expected_commit_pi_sha
+
+    same_pi_docx = build_proposal_docx_with_10_signatures(
+        applicant_in_member_table=True,
+        applicant_member_sig_matches_pi=True,
+    )
+    same_pi_parsed = parse_proposal_docx("pi_same.docx", same_pi_docx)
+    same_pi_sigs = same_pi_parsed["preview"]["signatures"]
+    assert len(same_pi_sigs) == 10
+    assert same_pi_sigs[0]["person_temp_id"] == "p1"
+    assert same_pi_sigs[0]["sha256"] == expected_commit_pi_sha
+    assert all(
+        w.get("code") != "SIG_PI_CONFLICT"
+        for w in same_pi_parsed["preview"]["warnings"]
+    )
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)

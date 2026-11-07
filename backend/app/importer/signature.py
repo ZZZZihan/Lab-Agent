@@ -543,8 +543,7 @@ def bind_proposal_signatures(
         (
             p
             for p in people
-            if (p.get("project_role") == "applicant" or p.get("role") == "pi")
-            and str(p.get("temp_id") or p.get("key") or "") not in bound_by_temp_id
+            if p.get("project_role") == "applicant" or p.get("role") == "pi"
         ),
         None,
     )
@@ -626,6 +625,20 @@ def bind_proposal_signatures(
                             "media_path": pi_img.media_path,
                         }
                     )
+                elif pi_temp_id in bound_by_temp_id:
+                    existing_sig = bound_by_temp_id[pi_temp_id]
+                    existing_sha = str(existing_sig.get("sha256") or "")
+                    if existing_sha != check.sha256:
+                        warnings.append(
+                            {
+                                "code": "SIG_PI_CONFLICT",
+                                "person_temp_id": pi_temp_id,
+                                "person_name": pi_name,
+                                "member_sha256": existing_sha,
+                                "pi_sha256": check.sha256,
+                                "media_path": pi_img.media_path,
+                            }
+                        )
                 else:
                     blobs.setdefault(
                         check.sha256, base64.b64encode(pi_img.data).decode("ascii")
