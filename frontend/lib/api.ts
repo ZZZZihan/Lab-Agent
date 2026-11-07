@@ -87,21 +87,46 @@ export type ChatEvent = {
   error?: string;
 };
 
+export type MissingBasketRef = {
+  entity?: string;
+  kind?: string;
+  id: string | number;
+};
+
 export class ApiError extends Error {
   code: string;
   status: number;
-  constructor(status: number, code: string, message: string) {
+  missing?: MissingBasketRef[];
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    missing?: MissingBasketRef[],
+  ) {
     super(message);
     this.status = status;
     this.code = code;
+    if (missing) {
+      this.missing = missing;
+    }
   }
 }
 
 async function parseError(response: Response): Promise<ApiError> {
   try {
     const body = (await response.json()) as {
-      error?: { code?: string; message?: string };
-      detail?: { code?: string; message?: string } | string;
+      error?: {
+        code?: string;
+        message?: string;
+        missing?: MissingBasketRef[];
+      };
+      detail?:
+        | {
+            code?: string;
+            message?: string;
+            missing?: MissingBasketRef[];
+          }
+        | string;
     };
     const detailObj =
       body.detail && typeof body.detail === "object" ? body.detail : undefined;
@@ -114,7 +139,12 @@ async function parseError(response: Response): Promise<ApiError> {
       detailObj?.message ||
       detailStr ||
       response.statusText;
-    return new ApiError(response.status, code, message);
+    const missing = Array.isArray(body.error?.missing)
+      ? body.error.missing
+      : Array.isArray(detailObj?.missing)
+        ? detailObj.missing
+        : undefined;
+    return new ApiError(response.status, code, message, missing);
   } catch {
     return new ApiError(response.status, "request_failed", response.statusText);
   }
@@ -813,6 +843,7 @@ export type BatchFormatOptions = {
   with_support?: boolean;
   include_support_note?: boolean;
   with_relation?: boolean;
+  include_relationship_note?: boolean;
   include_bio?: boolean;
   include_person_bio?: boolean;
   numbering?: "none" | "arabic" | "decimal" | "bracket";
@@ -848,6 +879,7 @@ export type ExportSelectedOptions = {
   with_support?: boolean;
   include_support_note?: boolean;
   with_relation?: boolean;
+  include_relationship_note?: boolean;
   include_bio?: boolean;
   include_person_bio?: boolean;
   numbering?: "none" | "arabic" | "decimal" | "bracket";
@@ -1031,12 +1063,19 @@ export async function formatLabBatch(
 ): Promise<BatchFormatResponse> {
   const rawNumbering = options?.numbering ?? "bracket";
   const backendNumbering = rawNumbering === "arabic" ? "decimal" : rawNumbering;
+  const includeSupportNote =
+    options?.include_support_note ?? options?.with_support ?? true;
+  const includeRelationshipNote =
+    options?.include_relationship_note ??
+    options?.with_relation ??
+    includeSupportNote;
   const backendOptions = {
     style: options?.style ?? "nsfc_standard",
     numbering: backendNumbering,
     group_by_entity: options?.group_by_entity ?? options?.group_by_kind ?? false,
     include_person_bio: options?.include_person_bio ?? options?.include_bio ?? false,
-    include_support_note: options?.include_support_note ?? options?.with_support ?? true,
+    include_support_note: includeSupportNote,
+    include_relationship_note: includeRelationshipNote,
     include_signatures_annex: options?.include_signatures_annex ?? false,
   };
   const res = await api<BatchFormatResponse>("lab/format/batch", {
@@ -1112,12 +1151,19 @@ export async function exportSelectedLabAssets(
   const rawNumbering = options?.numbering ?? "bracket";
   const backendNumbering = rawNumbering === "arabic" ? "decimal" : rawNumbering;
   const title = options?.title ?? "写本子素材汇总";
+  const includeSupportNote =
+    options?.include_support_note ?? options?.with_support ?? true;
+  const includeRelationshipNote =
+    options?.include_relationship_note ??
+    options?.with_relation ??
+    includeSupportNote;
   const backendOptions = {
     style: options?.style ?? "nsfc_standard",
     numbering: backendNumbering,
     group_by_entity: options?.group_by_entity ?? options?.group_by_kind ?? true,
     include_person_bio: options?.include_person_bio ?? options?.include_bio ?? false,
-    include_support_note: options?.include_support_note ?? options?.with_support ?? true,
+    include_support_note: includeSupportNote,
+    include_relationship_note: includeRelationshipNote,
     include_signatures_annex:
       options?.include_signatures_annex ?? options?.include_signatures ?? true,
   };

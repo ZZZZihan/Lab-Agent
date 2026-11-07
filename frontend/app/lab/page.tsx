@@ -79,12 +79,27 @@ const ALLOWED_SIGNATURE_MIMES = new Set([
 
 const DEFAULT_BASKET_OPTIONS: BasketOptions = {
   with_support: true,
-  with_relation: false,
+  with_relation: true,
   numbering: "bracket",
   group_by_kind: true,
   include_signatures: true,
   naming: "seq_name",
 };
+
+function normalizeBasketEntityKind(raw?: string): BasketEntityKind {
+  const lower = (raw || "").trim().toLowerCase();
+  if (lower === "project" || lower === "projects") return "project";
+  if (
+    lower === "achievement" ||
+    lower === "achievements" ||
+    lower === "output" ||
+    lower === "outputs"
+  ) {
+    return "achievement";
+  }
+  if (lower === "facility" || lower === "facilities") return "facility";
+  return "person";
+}
 
 type EditableFieldConfig = {
   key: string;
@@ -395,6 +410,7 @@ export default function LabAssetsPage() {
   const [sigError, setSigError] = useState("");
   const [sigStatusMsg, setSigStatusMsg] = useState("");
   const dossierAbortRef = useRef<AbortController | null>(null);
+  const dossierReqSeqRef = useRef(0);
   const sigFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // ==========================================================================
@@ -531,9 +547,11 @@ export default function LabAssetsPage() {
     }
     const controller = new AbortController();
     dossierAbortRef.current = controller;
+    const reqSeq = ++dossierReqSeqRef.current;
 
     setDossierOpen(true);
     setDossierPersonId(personId);
+    setDossier((prev) => (prev?.person.id === personId ? prev : null));
     setDossierLoading(true);
     setDossierError("");
     setDossierNotFound(false);
@@ -549,7 +567,9 @@ export default function LabAssetsPage() {
 
     try {
       const data = await getPersonDossier(personId, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || dossierReqSeqRef.current !== reqSeq) {
+        return;
+      }
       setDossier(data);
       const initProjChecks: Record<string, boolean> = {};
       for (const proj of data.projects || []) {
@@ -563,7 +583,9 @@ export default function LabAssetsPage() {
       }
       setDossierCheckedAchievements(initAchChecks);
     } catch (err) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || dossierReqSeqRef.current !== reqSeq) {
+        return;
+      }
       if (
         err instanceof ApiError &&
         (err.status === 404 ||
@@ -580,13 +602,14 @@ export default function LabAssetsPage() {
         setDossierError(msg);
       }
     } finally {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && dossierReqSeqRef.current === reqSeq) {
         setDossierLoading(false);
       }
     }
   }
 
   function closePersonDossier() {
+    dossierReqSeqRef.current += 1;
     if (dossierAbortRef.current) {
       dossierAbortRef.current.abort();
       dossierAbortRef.current = null;
@@ -635,6 +658,18 @@ export default function LabAssetsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    if (typeof window !== "undefined") {
+      const initialPerson = new URLSearchParams(window.location.search).get(
+        "person",
+      );
+      if (
+        initialPerson &&
+        initialPerson.trim() &&
+        dossierReqSeqRef.current === 0
+      ) {
+        void fetchDossierById(initialPerson.trim());
+      }
+    }
     Promise.all([
       currentUser(),
       api<LabOverview>("lab/overview"),
@@ -670,53 +705,6 @@ export default function LabAssetsPage() {
             setSelectedIds({});
           }
           setBasketHydratedForUser(uid);
-
-          const initialPerson = new URLSearchParams(
-            window.location.search,
-          ).get("person");
-          if (initialPerson && initialPerson.trim()) {
-            const pid = initialPerson.trim();
-            setDossierOpen(true);
-            setDossierPersonId(pid);
-            setDossierLoading(true);
-            getPersonDossier(pid)
-              .then((data) => {
-                if (cancelled) return;
-                setDossier(data);
-                const initProjChecks: Record<string, boolean> = {};
-                for (const proj of data.projects || []) {
-                  initProjChecks[proj.id] = proj.match !== "ambiguous";
-                }
-                setDossierCheckedProjects(initProjChecks);
-                const achList = data.achievements || data.outputs || [];
-                const initAchChecks: Record<string, boolean> = {};
-                for (const ach of achList) {
-                  initAchChecks[ach.id] = ach.match !== "ambiguous";
-                }
-                setDossierCheckedAchievements(initAchChecks);
-              })
-              .catch((err: unknown) => {
-                if (cancelled) return;
-                if (
-                  err instanceof ApiError &&
-                  (err.status === 404 ||
-                    err.code.toUpperCase() === "PERSON_NOT_FOUND" ||
-                    err.code === "not_found")
-                ) {
-                  setDossierNotFound(true);
-                  setDossier(null);
-                } else {
-                  setDossierError(
-                    err instanceof ApiError
-                      ? mapLabErrorCode(err.code, err.message)
-                      : "无法加载成员全息档案袋，请稍后重试",
-                  );
-                }
-              })
-              .finally(() => {
-                if (!cancelled) setDossierLoading(false);
-              });
-          }
         }
       })
       .catch((err: unknown) => {
@@ -728,6 +716,10 @@ export default function LabAssetsPage() {
       });
     return () => {
       cancelled = true;
+      if (dossierAbortRef.current) {
+        dossierAbortRef.current.abort();
+        dossierAbortRef.current = null;
+      }
     };
   }, [t.error]);
 
@@ -1411,7 +1403,9 @@ export default function LabAssetsPage() {
   // ==========================================================================
   // Reuse Basket 3 Batch Actions (§6.4)
   // ==========================================================================
-  function buildLocalFallbackBatchText(): string {
+  function buildLocalFallbackBatchText(
+    sourceItems: BasketItem[] = basketItems,
+  ): string {
     const peopleMap = new Map(people.map((p) => [p.id, p]));
     const projectMap = new Map(projects.map((p) => [p.id, p]));
     const achievementMap = new Map(achievements.map((a) => [a.id, a]));
@@ -1419,12 +1413,12 @@ export default function LabAssetsPage() {
 
     const orderedItems = basketOptions.group_by_kind
       ? ([
-          ...basketItems.filter((i) => i.kind === "person"),
-          ...basketItems.filter((i) => i.kind === "project"),
-          ...basketItems.filter((i) => i.kind === "achievement"),
-          ...basketItems.filter((i) => i.kind === "facility"),
+          ...sourceItems.filter((i) => i.kind === "person"),
+          ...sourceItems.filter((i) => i.kind === "project"),
+          ...sourceItems.filter((i) => i.kind === "achievement"),
+          ...sourceItems.filter((i) => i.kind === "facility"),
         ] as BasketItem[])
-      : basketItems;
+      : sourceItems;
 
     const blocks: string[] = [];
     let seq = 0;
@@ -1507,11 +1501,65 @@ export default function LabAssetsPage() {
         setStatusBanner(`已复制 ${okCount} 项标准申报书格式文本`);
       }
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? mapLabErrorCode(err.code, err.message)
-          : t.error,
-      );
+      if (
+        err instanceof ApiError &&
+        Array.isArray(err.missing) &&
+        err.missing.length > 0
+      ) {
+        const missingKeys = Array.from(
+          new Set(
+            err.missing.map((m) =>
+              basketKey(
+                normalizeBasketEntityKind(m.entity || m.kind),
+                String(m.id),
+              ),
+            ),
+          ),
+        );
+        setBasketMissingIds(missingKeys);
+        const missingSet = new Set(missingKeys);
+        const validItems = basketItems.filter(
+          (it) => !missingSet.has(basketKey(it.kind, it.id)),
+        );
+        if (validItems.length > 0) {
+          try {
+            const retryRes = await formatLabBatch(
+              validItems.map((it) => ({ kind: it.kind, id: it.id })),
+              {
+                with_support: basketOptions.with_support,
+                with_relation: basketOptions.with_relation,
+                numbering: basketOptions.numbering,
+                separator: "blank_line",
+                group_by_kind: basketOptions.group_by_kind,
+              },
+            );
+            const retryText =
+              retryRes.text || buildLocalFallbackBatchText(validItems);
+            try {
+              await navigator.clipboard.writeText(retryText);
+            } catch {
+              setClipboardFallbackText(retryText);
+            }
+            const okCount =
+              retryRes.stats?.ok ?? retryRes.count ?? validItems.length;
+            setStatusBanner(
+              `已复制 ${okCount} 项（${missingKeys.length} 项已不存在，可从素材篮移除）`,
+            );
+            return;
+          } catch {
+            // Fall through to error message while keeping basketMissingIds populated
+          }
+        }
+        setError(
+          `${mapLabErrorCode(err.code, err.message)}（共 ${missingKeys.length} 项缺失，可从素材篮移除后重试）`,
+        );
+      } else {
+        setError(
+          err instanceof ApiError
+            ? mapLabErrorCode(err.code, err.message)
+            : t.error,
+        );
+      }
     } finally {
       setBasketActionLoading(null);
     }
@@ -1556,6 +1604,7 @@ export default function LabAssetsPage() {
     if (basketItems.length === 0) return;
     setError("");
     setStatusBanner("");
+    setBasketMissingIds([]);
     setBasketActionLoading("docx");
     try {
       const res = await exportSelectedLabAssets(
@@ -1582,11 +1631,32 @@ export default function LabAssetsPage() {
         );
       }
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? mapLabErrorCode(err.code, err.message)
-          : "导出所选素材失败，请稍后重试",
-      );
+      if (
+        err instanceof ApiError &&
+        Array.isArray(err.missing) &&
+        err.missing.length > 0
+      ) {
+        const missingKeys = Array.from(
+          new Set(
+            err.missing.map((m) =>
+              basketKey(
+                normalizeBasketEntityKind(m.entity || m.kind),
+                String(m.id),
+              ),
+            ),
+          ),
+        );
+        setBasketMissingIds(missingKeys);
+        setError(
+          `${mapLabErrorCode(err.code, err.message)}（共 ${missingKeys.length} 项缺失，可从素材篮移除后重试）`,
+        );
+      } else {
+        setError(
+          err instanceof ApiError
+            ? mapLabErrorCode(err.code, err.message)
+            : "导出所选素材失败，请稍后重试",
+        );
+      }
     } finally {
       setBasketActionLoading(null);
     }
@@ -2292,9 +2362,28 @@ export default function LabAssetsPage() {
         </div>
 
         {error ? (
-          <p role="alert" className="text-[13px] text-destructive">
-            {error}
-          </p>
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-destructive"
+          >
+            <span>{error}</span>
+            {basketMissingIds.length > 0 && !statusBanner ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => {
+                  removeItemsFromBasket(new Set(basketMissingIds));
+                  setBasketMissingIds([]);
+                  setError("");
+                  setStatusBanner("已从写本子素材篮移除不存在的条目");
+                }}
+              >
+                从素材篮移除缺失项 ({basketMissingIds.length})
+              </Button>
+            ) : null}
+          </div>
         ) : null}
 
         {statusBanner ? (
@@ -2313,6 +2402,7 @@ export default function LabAssetsPage() {
                 onClick={() => {
                   removeItemsFromBasket(new Set(basketMissingIds));
                   setBasketMissingIds([]);
+                  setError("");
                   setStatusBanner("已从写本子素材篮移除不存在的条目");
                 }}
               >

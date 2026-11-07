@@ -303,11 +303,12 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
     assert.equal(dossier.achievements[0].relation_role, "first_author");
     assert.equal(dossier.achievements[1].relation, "coauthor");
 
-    // 2. formatLabBatch sends entity and strict BatchFormatOptions
+    // 2. formatLabBatch sends entity and strict BatchFormatOptions including include_relationship_note
     const batchRes = await apiModule.formatLabBatch(
       [{ kind: "person", id: "p-1" }],
       {
         with_support: true,
+        with_relation: true,
         include_bio: true,
         numbering: "arabic",
         group_by_kind: true,
@@ -324,6 +325,7 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
         group_by_entity: true,
         include_person_bio: true,
         include_support_note: true,
+        include_relationship_note: true,
         include_signatures_annex: false,
       },
     });
@@ -348,6 +350,7 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
       ],
       {
         with_support: false,
+        with_relation: false,
         include_bio: false,
         numbering: "bracket",
         group_by_kind: true,
@@ -371,6 +374,7 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
         group_by_entity: true,
         include_person_bio: false,
         include_support_note: false,
+        include_relationship_note: false,
         include_signatures_annex: true,
       },
     });
@@ -382,6 +386,29 @@ test("Spec v2.2 API helpers match strict backend Pydantic schemas and normalize 
     );
     const delHeaders = new Headers(delCall.init.headers);
     assert.equal(delHeaders.get("If-Match"), '"abc123sha"');
+
+    // 6. 404 NOT_FOUND from formatLabBatch preserves error.missing on ApiError
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "NOT_FOUND",
+            message: "部分素材不存在或已删除",
+            missing: [{ entity: "project", id: "proj-stale" }],
+          },
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
+    await assert.rejects(
+      () => apiModule.formatLabBatch([{ kind: "project", id: "proj-stale" }]),
+      (err) => {
+        assert.equal(err instanceof apiModule.ApiError, true);
+        assert.equal(err.status, 404);
+        assert.equal(err.code, "NOT_FOUND");
+        assert.deepEqual(err.missing, [{ entity: "project", id: "proj-stale" }]);
+        return true;
+      },
+    );
   } finally {
     globalThis.fetch = prevFetch;
   }

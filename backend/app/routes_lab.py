@@ -190,6 +190,7 @@ class BatchFormatOptions(BaseModel):
     group_by_entity: bool = True
     include_person_bio: bool = False
     include_support_note: bool = True
+    include_relationship_note: bool | None = None
     include_signatures_annex: bool = False
 
 
@@ -2470,6 +2471,7 @@ async def batch_format_lab_assets(
                 group_by_entity=opts.group_by_entity,
                 include_person_bio=opts.include_person_bio,
                 include_support_note=opts.include_support_note,
+                include_relationship_note=opts.include_relationship_note,
             )
         except BasketError as exc:
             return _lab_v22_error(
@@ -3334,6 +3336,7 @@ async def export_selected_basket_docx(
             group_by_entity=opts.group_by_entity,
             include_person_bio=opts.include_person_bio,
             include_support_note=opts.include_support_note,
+            include_relationship_note=opts.include_relationship_note,
             include_signatures_annex=opts.include_signatures_annex,
         )
     except BasketError as exc:
