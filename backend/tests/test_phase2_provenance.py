@@ -1126,6 +1126,7 @@ async def test_phase2_revert_merge_and_backfill_provenance(
         project_fp,
     )
     from app.importer.provenance import (
+        _extract_project_incoming,
         _match_existing_achievement,
         _match_existing_facility,
         _match_existing_person,
@@ -1283,6 +1284,41 @@ async def test_phase2_revert_merge_and_backfill_provenance(
         )
         is None
     )
+
+    # Regression check: _extract_project_incoming treats uninferable status (inferred + unknown, no end_date) as None
+    _, _, uninf_fields = _extract_project_incoming(
+        {
+            "title": "无状态与结题日期的存量项目",
+            "status": "unknown",
+            "status_source": "inferred",
+            "end_date": None,
+        },
+        date(2026, 6, 1),
+    )
+    assert uninf_fields["status"] is None
+    assert uninf_fields["status_source"] is None
+
+    # Regression check: correcting an already-merged job's as_of_time reconciles its FieldProvenance rows and entity effective values
+    remerge_2022 = await client.post(
+        f"/api/v1/admin/imports/{job_2026['job_id']}/merge",
+        headers=headers,
+        json={"as_of_time": "2022-01-01", "decisions": []},
+    )
+    assert remerge_2022.status_code == 200, remerge_2022.text
+    ppl_reconciled = await client.get("/api/v1/lab/people", headers=headers)
+    wan_reconciled = next(
+        p for p in ppl_reconciled.json()["people"] if p["name"] == "万振凯"
+    )
+    assert wan_reconciled["title"] == "副教授"
+    assert wan_reconciled["as_of_time"] == "2023-05-01"
+
+    # Re-merge job_2026 back to 2026-06-01 before testing revert
+    remerge_2026_back = await client.post(
+        f"/api/v1/admin/imports/{job_2026['job_id']}/merge",
+        headers=headers,
+        json={"as_of_time": "2026-06-01", "decisions": []},
+    )
+    assert remerge_2026_back.status_code == 200, remerge_2026_back.text
 
     # Count User accounts before revert
     async with maker() as session:

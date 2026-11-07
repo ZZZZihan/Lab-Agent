@@ -750,6 +750,7 @@ def _extract_project_incoming(
     status_source = str(proj_dict.get("status_source") or "explicit").strip()
     if status_source == "inferred" and end_d is not None:
         status = "completed" if end_d < as_of_date else "ongoing"
+    is_uninferable_status = status == "unknown" and status_source == "inferred"
     raw_text = str(proj_dict.get("raw_text") or title).strip()
     fp_val = str(proj_dict.get("fingerprint") or "") or project_fp(
         grant_no=grant_no,
@@ -765,8 +766,8 @@ def _extract_project_incoming(
         "start_date": start_d.isoformat() if start_d is not None else None,
         "end_date": end_d.isoformat() if end_d is not None else None,
         "amount_wan": normalize_field_json_value("project", "amount_wan", amt_wan),
-        "status": status,
-        "status_source": status_source,
+        "status": None if is_uninferable_status else status,
+        "status_source": None if is_uninferable_status else status_source,
         "relationship_note": normalize_field_json_value(
             "project", "relationship_note", proj_dict.get("relationship_note")
         ),
@@ -1401,6 +1402,105 @@ def _consolidate_incoming_fields(
             acc_fields[field] = inc_val
 
 
+async def _reconcile_job_existing_provenance(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    new_as_of: date,
+) -> None:
+    """Reconcile existing FieldProvenance rows and affected entities when a job's as_of_time changes."""
+    job_rows = list(
+        await session.scalars(
+            select(FieldProvenance).where(
+                FieldProvenance.source_job_id == job_id,
+                FieldProvenance.superseded.is_(False),
+            )
+        )
+    )
+    model_map: dict[EntityType, Any] = {
+        "person": LabPerson,
+        "project": LabProject,
+        "achievement": LabAchievement,
+        "facility": LabFacility,
+    }
+    affected_entities: set[tuple[EntityType, uuid.UUID]] = set()
+    has_date_change = any(r.as_of_time != new_as_of for r in job_rows)
+    for r in job_rows:
+        if r.as_of_time != new_as_of:
+            r.as_of_time = new_as_of
+        if r.entity_type in MANAGED_FIELDS:
+            affected_entities.add((r.entity_type, r.entity_id))  # type: ignore[arg-type]
+
+    for etype, model_cls in model_map.items():
+        src_ents = list(
+            await session.scalars(
+                select(model_cls).where(model_cls.source_import_id == job_id)
+            )
+        )
+        for ent in src_ents:
+            if ent.as_of_time != new_as_of:
+                has_date_change = True
+                ent.as_of_time = new_as_of
+            affected_entities.add((etype, ent.id))
+
+    if not has_date_change:
+        return
+
+    await session.flush()
+
+    for etype, eid in affected_entities:
+        model_cls = model_map[etype]
+        ent = await session.get(model_cls, eid)
+        if ent is None:
+            continue
+        ent_rows = list(
+            await session.scalars(
+                select(FieldProvenance).where(
+                    FieldProvenance.entity_type == etype,
+                    FieldProvenance.entity_id == eid,
+                    FieldProvenance.superseded.is_(False),
+                )
+            )
+        )
+        if not ent_rows:
+            continue
+        by_field: dict[str, list[FieldProvenance]] = {}
+        for r in ent_rows:
+            by_field.setdefault(r.field, []).append(r)
+
+        prior_affiliation = getattr(ent, "affiliation", None)
+        prior_email = getattr(ent, "email", None)
+        field_changed = False
+        for field in MANAGED_FIELDS[etype]:
+            f_list = by_field.get(field)
+            if not f_list:
+                continue
+            cur_val = get_entity_json_value(etype, ent, field)
+            eff = effective_value(f_list)
+            eff_val = eff.value if eff is not None else None
+            if eff_val != cur_val:
+                set_entity_field_from_json(etype, ent, field, eff_val)
+                field_changed = True
+
+        if field_changed:
+            await _refresh_and_validate_entity_fingerprint(
+                session,
+                etype,
+                ent,
+                prior_affiliation=prior_affiliation,
+                prior_email=prior_email,
+            )
+
+        non_manual_dates = [
+            r.as_of_time
+            for r in ent_rows
+            if r.source_kind != "manual" and r.as_of_time is not None
+        ]
+        if non_manual_dates:
+            ent.as_of_time = max(non_manual_dates)
+
+    await session.flush()
+
+
 async def build_merge_preview(
     session: AsyncSession,
     *,
@@ -1416,6 +1516,7 @@ async def build_merge_preview(
 
     as_of_date = _resolve_job_as_of(job, as_of_time_override)
     await ensure_baseline_provenance(session)
+    await _reconcile_job_existing_provenance(session, job.id, as_of_date)
 
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
@@ -1760,6 +1861,7 @@ async def execute_merge(
         raise ProvisionError(409, "import_invalid_status", "该导入任务当前状态不可合并")
 
     as_of_date = _resolve_job_as_of(job, body.as_of_time)
+    await _reconcile_job_existing_provenance(session, job.id, as_of_date)
     preview_result = await build_merge_preview(
         session,
         job_id=job_id,
@@ -1867,6 +1969,14 @@ async def execute_merge(
             cur_val = get_entity_json_value(entity_type, entity, field)
             f_rows = by_ef.setdefault((entity_type, entity.id, field), [])
             ch = change_by_ef.get((entity_type, entity.id, field))
+
+            for old_r in f_rows:
+                if (
+                    old_r.source_job_id == job.id
+                    and old_r.source_kind == "import"
+                    and not old_r.superseded
+                ):
+                    old_r.superseded = True
 
             imp_row = FieldProvenance(
                 entity_type=entity_type,
@@ -2065,7 +2175,7 @@ async def execute_merge(
                 end_date=_parse_iso_date(j_fields["end_date"]),
                 amount_wan=_parse_decimal(j_fields["amount_wan"]),
                 status=str(j_fields["status"] or "unknown"),
-                status_source=str(j_fields["status_source"] or "explicit"),
+                status_source=str(j_fields["status_source"] or "inferred"),
                 relationship_note=(
                     j_fields["relationship_note"]
                     if isinstance(j_fields["relationship_note"], str)
