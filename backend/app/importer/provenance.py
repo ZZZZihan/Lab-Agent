@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.importer.fingerprint import (
@@ -382,7 +382,7 @@ async def record_manual_field_edit(
                 source_kind="import" if src_job_id is not None else "legacy",
                 source_job_id=src_job_id,
                 as_of_time=base_as_of,
-                recorded_by=None,
+                recorded_by=actor_id,
                 superseded=False,
             )
         )
@@ -526,6 +526,7 @@ async def restore_entity_imported_fields(
     fields: Sequence[str],
 ) -> list[str]:
     """Supersede active manual overrides on `fields` and restore effective imported values."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     prior_affiliation = getattr(entity, "affiliation", None)
     prior_email = getattr(entity, "email", None)
     restored: list[str] = []
@@ -1083,13 +1084,22 @@ async def ensure_baseline_provenance(session: AsyncSession) -> int:
 
 async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
     """Idempotently backfill `field_provenance` for existing jobs and entities (Spec §10.7)."""
-    await session.execute(
-        delete(FieldProvenance).where(
-            FieldProvenance.source_kind.in_(("import", "legacy")),
-            FieldProvenance.recorded_by.is_(None),
-            FieldProvenance.superseded.is_(False),
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    manual_entity_ids = set(
+        await session.scalars(
+            select(FieldProvenance.entity_id).where(
+                FieldProvenance.source_kind == "manual"
+            )
         )
     )
+    del_stmt = delete(FieldProvenance).where(
+        FieldProvenance.source_kind.in_(("import", "legacy")),
+        FieldProvenance.recorded_by.is_(None),
+        FieldProvenance.superseded.is_(False),
+    )
+    if manual_entity_ids:
+        del_stmt = del_stmt.where(FieldProvenance.entity_id.notin_(manual_entity_ids))
+    await session.execute(del_stmt)
     await session.flush()
 
     jobs = list(
@@ -1340,6 +1350,35 @@ def _resolve_job_as_of(
     return as_of_date
 
 
+def _consolidate_incoming_fields(
+    entity_type: EntityType,
+    entity: Any,
+    acc_fields: dict[str, object],
+    new_fields: dict[str, object],
+) -> None:
+    """Consolidate duplicate incoming entries matching the same existing entity within one job."""
+    for field in MANAGED_FIELDS[entity_type]:
+        inc_val = new_fields.get(field)
+        if _is_blank(inc_val):
+            continue
+        prev_val = acc_fields.get(field)
+        if entity_type == "person" and field == "project_role":
+            if prev_val == "applicant" or inc_val == "applicant":
+                acc_fields[field] = "applicant"
+                continue
+        if entity_type == "project" and field == "status":
+            if prev_val not in (None, "", "unknown") and inc_val == "unknown":
+                continue
+            if prev_val in (None, "", "unknown") and inc_val != "unknown":
+                acc_fields[field] = inc_val
+                continue
+        cur_val = get_entity_json_value(entity_type, entity, field)
+        if _is_blank(prev_val):
+            acc_fields[field] = inc_val
+        elif prev_val == cur_val and inc_val != cur_val:
+            acc_fields[field] = inc_val
+
+
 async def build_merge_preview(
     session: AsyncSession,
     *,
@@ -1502,6 +1541,8 @@ async def build_merge_preview(
             )
 
     # People
+    seen_person_fps = {p.entity_fingerprint for p in existing_people}
+    matched_people_map: dict[uuid.UUID, tuple[LabPerson, dict[str, object]]] = {}
     for p in ppl_list:
         pname, fp_val, p_fields = _extract_person_incoming(p)
         if not pname:
@@ -1510,6 +1551,9 @@ async def build_merge_preview(
             p, pname, fp_val, p_fields, existing_people, inc_name_counts
         )
         if matched_p is None:
+            if fp_val in seen_person_fps:
+                continue
+            seen_person_fps.add(fp_val)
             summary["added"] += 1
             added_entities.append(
                 {
@@ -1521,9 +1565,20 @@ async def build_merge_preview(
                 }
             )
         else:
-            _evaluate_entity_fields("person", matched_p, matched_p.name, p_fields)
+            if matched_p.id not in matched_people_map:
+                acc_p: dict[str, object] = {f: None for f in PERSON_MANAGED_FIELDS}
+                _consolidate_incoming_fields("person", matched_p, acc_p, p_fields)
+                matched_people_map[matched_p.id] = (matched_p, acc_p)
+            else:
+                _consolidate_incoming_fields(
+                    "person", matched_p, matched_people_map[matched_p.id][1], p_fields
+                )
+    for matched_p, acc_p in matched_people_map.values():
+        _evaluate_entity_fields("person", matched_p, matched_p.name, acc_p)
 
     # Projects
+    seen_proj_fps = {p.entity_fingerprint for p in existing_projects}
+    matched_proj_map: dict[uuid.UUID, tuple[LabProject, dict[str, object]]] = {}
     raw_projs = preview.get("projects")
     for proj in (raw_projs if isinstance(raw_projs, list) else []):
         if not isinstance(proj, dict):
@@ -1533,6 +1588,9 @@ async def build_merge_preview(
             continue
         matched_j = _match_existing_project(fp_val, j_fields, existing_projects)
         if matched_j is None:
+            if fp_val in seen_proj_fps:
+                continue
+            seen_proj_fps.add(fp_val)
             summary["added"] += 1
             added_entities.append(
                 {
@@ -1543,9 +1601,20 @@ async def build_merge_preview(
                 }
             )
         else:
-            _evaluate_entity_fields("project", matched_j, matched_j.title, j_fields)
+            if matched_j.id not in matched_proj_map:
+                acc_j: dict[str, object] = {f: None for f in PROJECT_MANAGED_FIELDS}
+                _consolidate_incoming_fields("project", matched_j, acc_j, j_fields)
+                matched_proj_map[matched_j.id] = (matched_j, acc_j)
+            else:
+                _consolidate_incoming_fields(
+                    "project", matched_j, matched_proj_map[matched_j.id][1], j_fields
+                )
+    for matched_j, acc_j in matched_proj_map.values():
+        _evaluate_entity_fields("project", matched_j, matched_j.title, acc_j)
 
     # Achievements
+    seen_ach_fps = {a.entity_fingerprint for a in existing_achievements}
+    matched_ach_map: dict[uuid.UUID, tuple[LabAchievement, dict[str, object]]] = {}
     raw_achs = preview.get("achievements")
     for ach in (raw_achs if isinstance(raw_achs, list) else []):
         if not isinstance(ach, dict):
@@ -1555,6 +1624,9 @@ async def build_merge_preview(
             continue
         matched_a = _match_existing_achievement(fp_val, a_fields, existing_achievements)
         if matched_a is None:
+            if fp_val in seen_ach_fps:
+                continue
+            seen_ach_fps.add(fp_val)
             summary["added"] += 1
             added_entities.append(
                 {
@@ -1565,9 +1637,20 @@ async def build_merge_preview(
                 }
             )
         else:
-            _evaluate_entity_fields("achievement", matched_a, matched_a.title, a_fields)
+            if matched_a.id not in matched_ach_map:
+                acc_a: dict[str, object] = {f: None for f in ACHIEVEMENT_MANAGED_FIELDS}
+                _consolidate_incoming_fields("achievement", matched_a, acc_a, a_fields)
+                matched_ach_map[matched_a.id] = (matched_a, acc_a)
+            else:
+                _consolidate_incoming_fields(
+                    "achievement", matched_a, matched_ach_map[matched_a.id][1], a_fields
+                )
+    for matched_a, acc_a in matched_ach_map.values():
+        _evaluate_entity_fields("achievement", matched_a, matched_a.title, acc_a)
 
     # Facilities
+    seen_fac_fps = {f.entity_fingerprint for f in existing_facilities}
+    matched_fac_map: dict[uuid.UUID, tuple[LabFacility, dict[str, object]]] = {}
     raw_facs = preview.get("facilities")
     for fac in (raw_facs if isinstance(raw_facs, list) else []):
         if not isinstance(fac, dict):
@@ -1577,6 +1660,9 @@ async def build_merge_preview(
             continue
         matched_f = _match_existing_facility(fp_val, f_fields, existing_facilities)
         if matched_f is None:
+            if fp_val in seen_fac_fps:
+                continue
+            seen_fac_fps.add(fp_val)
             summary["added"] += 1
             added_entities.append(
                 {
@@ -1587,7 +1673,16 @@ async def build_merge_preview(
                 }
             )
         else:
-            _evaluate_entity_fields("facility", matched_f, matched_f.name, f_fields)
+            if matched_f.id not in matched_fac_map:
+                acc_f: dict[str, object] = {f: None for f in FACILITY_MANAGED_FIELDS}
+                _consolidate_incoming_fields("facility", matched_f, acc_f, f_fields)
+                matched_fac_map[matched_f.id] = (matched_f, acc_f)
+            else:
+                _consolidate_incoming_fields(
+                    "facility", matched_f, matched_fac_map[matched_f.id][1], f_fields
+                )
+    for matched_f, acc_f in matched_fac_map.values():
+        _evaluate_entity_fields("facility", matched_f, matched_f.name, acc_f)
 
     return {
         "job_id": str(job.id),
@@ -1633,6 +1728,7 @@ async def execute_merge(
     embedder: Embedder,
 ) -> dict[str, object]:
     """Execute Phase 2 temporal merge with admin decisions and RAG re-indexing (Spec §10.5)."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     job = await session.scalar(
         select(ImportJob).where(ImportJob.id == job_id).with_for_update()
     )
@@ -1675,10 +1771,18 @@ async def execute_merge(
         change_by_ef[(etype, eid, fld)] = ch
 
     existing_users = list(await session.scalars(select(User)))
-    existing_people = list(await session.scalars(select(LabPerson)))
-    existing_projects = list(await session.scalars(select(LabProject)))
-    existing_achievements = list(await session.scalars(select(LabAchievement)))
-    existing_facilities = list(await session.scalars(select(LabFacility)))
+    existing_people = list(
+        await session.scalars(select(LabPerson).with_for_update())
+    )
+    existing_projects = list(
+        await session.scalars(select(LabProject).with_for_update())
+    )
+    existing_achievements = list(
+        await session.scalars(select(LabAchievement).with_for_update())
+    )
+    existing_facilities = list(
+        await session.scalars(select(LabFacility).with_for_update())
+    )
 
     used_person_fps = {p.entity_fingerprint for p in existing_people}
     used_person_uids = {p.user_id for p in existing_people if p.user_id is not None}
@@ -1688,7 +1792,9 @@ async def execute_merge(
 
     live_rows = list(
         await session.scalars(
-            select(FieldProvenance).where(FieldProvenance.superseded.is_(False))
+            select(FieldProvenance)
+            .where(FieldProvenance.superseded.is_(False))
+            .with_for_update()
         )
     )
     by_ef: dict[tuple[str, uuid.UUID, str], list[FieldProvenance]] = {}
@@ -1816,6 +1922,7 @@ async def execute_merge(
             entity.as_of_time = as_of_date
 
     # 1. People (NEVER create or mutate User accounts during Phase 2 merge!)
+    matched_people_map: dict[uuid.UUID, tuple[LabPerson, dict[str, object]]] = {}
     for p in ppl_list:
         pname, fp_val, p_fields = _extract_person_incoming(p)
         if not pname:
@@ -1889,12 +1996,21 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
-            existing_people.append(new_person)
             added_count += 1
         else:
-            await _merge_existing_entity("person", matched_p, p_fields)
+            if matched_p.id not in matched_people_map:
+                acc_p: dict[str, object] = {f: None for f in PERSON_MANAGED_FIELDS}
+                _consolidate_incoming_fields("person", matched_p, acc_p, p_fields)
+                matched_people_map[matched_p.id] = (matched_p, acc_p)
+            else:
+                _consolidate_incoming_fields(
+                    "person", matched_p, matched_people_map[matched_p.id][1], p_fields
+                )
+    for matched_p, acc_p in matched_people_map.values():
+        await _merge_existing_entity("person", matched_p, acc_p)
 
     # 2. Projects
+    matched_proj_map: dict[uuid.UUID, tuple[LabProject, dict[str, object]]] = {}
     raw_projs = preview.get("projects")
     for proj in (raw_projs if isinstance(raw_projs, list) else []):
         if not isinstance(proj, dict):
@@ -1948,12 +2064,21 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
-            existing_projects.append(new_proj)
             added_count += 1
         else:
-            await _merge_existing_entity("project", matched_j, j_fields)
+            if matched_j.id not in matched_proj_map:
+                acc_j: dict[str, object] = {f: None for f in PROJECT_MANAGED_FIELDS}
+                _consolidate_incoming_fields("project", matched_j, acc_j, j_fields)
+                matched_proj_map[matched_j.id] = (matched_j, acc_j)
+            else:
+                _consolidate_incoming_fields(
+                    "project", matched_j, matched_proj_map[matched_j.id][1], j_fields
+                )
+    for matched_j, acc_j in matched_proj_map.values():
+        await _merge_existing_entity("project", matched_j, acc_j)
 
     # 3. Achievements
+    matched_ach_map: dict[uuid.UUID, tuple[LabAchievement, dict[str, object]]] = {}
     raw_achs = preview.get("achievements")
     for ach in (raw_achs if isinstance(raw_achs, list) else []):
         if not isinstance(ach, dict):
@@ -2004,12 +2129,21 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
-            existing_achievements.append(new_ach)
             added_count += 1
         else:
-            await _merge_existing_entity("achievement", matched_a, a_fields)
+            if matched_a.id not in matched_ach_map:
+                acc_a: dict[str, object] = {f: None for f in ACHIEVEMENT_MANAGED_FIELDS}
+                _consolidate_incoming_fields("achievement", matched_a, acc_a, a_fields)
+                matched_ach_map[matched_a.id] = (matched_a, acc_a)
+            else:
+                _consolidate_incoming_fields(
+                    "achievement", matched_a, matched_ach_map[matched_a.id][1], a_fields
+                )
+    for matched_a, acc_a in matched_ach_map.values():
+        await _merge_existing_entity("achievement", matched_a, acc_a)
 
     # 4. Facilities
+    matched_fac_map: dict[uuid.UUID, tuple[LabFacility, dict[str, object]]] = {}
     raw_facs = preview.get("facilities")
     for fac in (raw_facs if isinstance(raw_facs, list) else []):
         if not isinstance(fac, dict):
@@ -2047,10 +2181,18 @@ async def execute_merge(
                 as_of_time=as_of_date,
                 recorded_by=actor_id,
             )
-            existing_facilities.append(new_fac)
             added_count += 1
         else:
-            await _merge_existing_entity("facility", matched_f, f_fields)
+            if matched_f.id not in matched_fac_map:
+                acc_f: dict[str, object] = {f: None for f in FACILITY_MANAGED_FIELDS}
+                _consolidate_incoming_fields("facility", matched_f, acc_f, f_fields)
+                matched_fac_map[matched_f.id] = (matched_f, acc_f)
+            else:
+                _consolidate_incoming_fields(
+                    "facility", matched_f, matched_fac_map[matched_f.id][1], f_fields
+                )
+    for matched_f, acc_f in matched_fac_map.values():
+        await _merge_existing_entity("facility", matched_f, acc_f)
 
     cur_stats = dict(job.stats or {})
     if job.status in ("parsed", "provisioned"):
@@ -2097,6 +2239,7 @@ async def revert_import_merge(
     embedder: Embedder,
 ) -> dict[str, object]:
     """Revert a merged ImportJob, recomputing effective field values and cleaning up orphan entities (Spec §10.6)."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     job = await session.scalar(
         select(ImportJob).where(ImportJob.id == job_id).with_for_update()
     )

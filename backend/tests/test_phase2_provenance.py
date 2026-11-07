@@ -629,6 +629,13 @@ async def test_phase2_manual_edit_protection_and_restore_imported(
     assert patch_fac.status_code == 200, patch_fac.text
     assert patch_fac.json()["facility"]["entity_fingerprint"] != orig_fac_fp
 
+    # Running backfill-provenance while a manual identity-field override is active must preserve baseline import provenance
+    bf_fac = await client.post(
+        "/api/v1/admin/imports/backfill-provenance",
+        headers=headers,
+    )
+    assert bf_fac.status_code == 200, bf_fac.text
+
     restore_fac = await client.post(
         f"/api/v1/lab/facilities/{fac_id}/restore-imported",
         headers=headers,
@@ -997,10 +1004,21 @@ async def test_phase2_revert_merge_and_backfill_provenance(
             "project_role": "member",
         }
     )
+    # Include duplicate AGE240005 project entries in the same proposal: first with updated amount_wan=200.00, second repeating old/blank value
+    projects_2026 = list(job_2026["preview"]["projects"])
+    age_entry = dict(projects_2026[0])
+    projects_2026[0] = {**age_entry, "amount_wan": "200.00"}
+    projects_2026.append(
+        {
+            **age_entry,
+            "key": "j_dup_age",
+            "amount_wan": age_entry.get("amount_wan"),
+        }
+    )
     await client.patch(
         f"/api/v1/admin/imports/{job_2026['job_id']}/preview",
         headers=headers,
-        json={"people": people_2026},
+        json={"people": people_2026, "projects": projects_2026},
     )
     merge_resp = await client.post(
         f"/api/v1/admin/imports/{job_2026['job_id']}/merge",
@@ -1040,6 +1058,10 @@ async def test_phase2_revert_merge_and_backfill_provenance(
 
     proj_mid = await client.get("/api/v1/lab/projects", headers=headers)
     assert any(p["grant_no"] == "津科智2025-08" for p in proj_mid.json()["projects"])
+    age_mid = next(
+        p for p in proj_mid.json()["projects"] if p["grant_no"] == "AGE240005"
+    )
+    assert age_mid["amount_wan"] == "200.00"
 
     # Regression check: manually created project (without source_import_id) records manual provenance and survives revert
     manual_proj_resp = await client.post(
