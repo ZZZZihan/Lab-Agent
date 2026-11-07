@@ -784,6 +784,18 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
             "exclude": True,
         }
     )
+    # Same name & affiliation as 林雪莹 (T1 2431101262), but a different T1 student ID (2531109999)
+    c_people.append(
+        {
+            "key": "p97",
+            "name": "林雪莹",
+            "tier": "T1",
+            "cert": "2531109999",
+            "login_name": "2531109999",
+            "affiliation": "天津工业大学",
+            "project_role": "member",
+        }
+    )
     c_achs = list(job_c["preview"]["achievements"])
     c_achs.append(
         {
@@ -795,10 +807,36 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
             "parse_quality": "structured",
         }
     )
+    # Same title & year as patent above, but kind='paper'
+    c_achs.append(
+        {
+            "key": "a98",
+            "kind": "paper",
+            "title": "智能评卷核心发明专利",
+            "year": 2025,
+            "raw_text": "智能评卷核心发明专利，论文，2025年。",
+            "parse_quality": "structured",
+        }
+    )
+    c_facs = list(job_c["preview"]["facilities"])
+    c_facs.append(
+        {
+            "key": "f99",
+            "category": c_facs[0]["category"],
+            "name": c_facs[0]["name"],
+            "spec": "8xH100 异构规格集群",
+            "raw_text": "8xH100 异构规格集群",
+        }
+    )
     patch_prev = await client.patch(
         f"/api/v1/admin/imports/{job_c['job_id']}/preview",
         headers=headers,
-        json={"projects": c_projects, "people": c_people, "achievements": c_achs},
+        json={
+            "projects": c_projects,
+            "people": c_people,
+            "achievements": c_achs,
+            "facilities": c_facs,
+        },
     )
     assert patch_prev.status_code == 200, patch_prev.text
 
@@ -819,9 +857,21 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     assert title_change_c["default_action"] == "adopt_incoming"
     # Excluded person must not appear in added_entities
     assert not any(e["name"] == "已排除测试人员" for e in mp_c["added_entities"])
-    # Distinct patent number with same title/year must be added, not matched
+    # Distinct T1 student ID with same name/affiliation must be added, not matched to existing 林雪莹
     assert any(
-        e["entity_type"] == "achievement" and e["name"] == "智能评卷核心发明专利"
+        e["entity_type"] == "person" and e["name"] == "林雪莹"
+        for e in mp_c["added_entities"]
+    )
+    # Distinct patent number and distinct achievement kind with same title/year must both be added (2 achievements)
+    added_same_title_achs = [
+        e
+        for e in mp_c["added_entities"]
+        if e["entity_type"] == "achievement" and e["name"] == "智能评卷核心发明专利"
+    ]
+    assert len(added_same_title_achs) == 2
+    # Distinct facility spec with same category/name must be added, not matched
+    assert any(
+        e["entity_type"] == "facility" and e["name"] == c_facs[0]["name"]
         for e in mp_c["added_entities"]
     )
     # Distinct grant_no with same title must be added as a new project, not matched to AGE240005

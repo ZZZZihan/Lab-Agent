@@ -842,15 +842,52 @@ def _match_existing_person(
     norm_name = norm(pname)
     norm_aff = norm(str(fields.get("affiliation") or ""))
     if norm_name:
+        inc_email = p_email if isinstance(p_email, str) and p_email else None
+        inc_non_t1_fp = person_fp(
+            tier="T3" if inc_email else "T2",
+            login_name=None,
+            name=pname,
+            affiliation=str(fields.get("affiliation") or "") or None,
+            email=inc_email,
+        )
+        inc_has_t1 = (str(person_dict.get("tier") or "") == "T1") or (
+            fp_val != inc_non_t1_fp
+        )
+
+        def _can_fallback_to_person(p: LabPerson) -> bool:
+            p_non_t1_fp = person_fp(
+                tier="T3" if p.email else "T2",
+                login_name=None,
+                name=p.name,
+                affiliation=p.affiliation,
+                email=p.email,
+            )
+            ex_has_t1 = p.entity_fingerprint != p_non_t1_fp
+            if inc_has_t1 and (ex_has_t1 or p.user_id is not None):
+                return False
+            if (
+                inc_email
+                and p.email
+                and p.email.strip().lower() != inc_email.lower()
+            ):
+                return False
+            return True
+
         same_name_aff = [
             p
             for p in existing_people
-            if norm(p.name) == norm_name and norm(p.affiliation or "") == norm_aff
+            if norm(p.name) == norm_name
+            and norm(p.affiliation or "") == norm_aff
+            and _can_fallback_to_person(p)
         ]
         if len(same_name_aff) == 1:
             return same_name_aff[0]
 
-        same_name = [p for p in existing_people if norm(p.name) == norm_name]
+        same_name = [
+            p
+            for p in existing_people
+            if norm(p.name) == norm_name and _can_fallback_to_person(p)
+        ]
         if len(same_name) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
             return same_name[0]
 
@@ -904,10 +941,13 @@ def _match_existing_achievement(
             return a
     ntitle = norm(str(fields.get("title") or ""))[:120]
     year_val = fields.get("year")
-    inc_kind = str(fields.get("kind") or "other")
-    inc_reg = _ach_reg_id(inc_kind, str(fields.get("raw_text") or ""))
+    inc_kind_raw = str(fields.get("kind") or "other")
+    inc_kind = norm(inc_kind_raw)
+    inc_reg = _ach_reg_id(inc_kind_raw, str(fields.get("raw_text") or ""))
     if ntitle:
         for a in existing_achievements:
+            if norm(str(a.kind or "other")) != inc_kind:
+                continue
             ex_reg = _ach_reg_id(str(a.kind or "other"), str(a.raw_text or ""))
             if inc_reg and ex_reg and inc_reg != ex_reg:
                 continue
@@ -926,8 +966,12 @@ def _match_existing_facility(
             return f
     ncat = norm(str(fields.get("category") or ""))
     nname = norm(str(fields.get("name") or ""))[:120]
+    nspec = norm(str(fields.get("spec") or ""))[:80]
     if nname:
         for f in existing_facilities:
+            ex_spec = norm(f.spec or "")[:80]
+            if nspec and ex_spec and nspec != ex_spec:
+                continue
             if norm(f.category) == ncat and norm(f.name)[:120] == nname:
                 return f
     return None
