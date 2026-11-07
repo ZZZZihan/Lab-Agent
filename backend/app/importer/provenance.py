@@ -2159,6 +2159,36 @@ async def execute_merge(
             )
             added_count += 1
         else:
+            raw_inc_email = p_fields.get("email")
+            inc_email = raw_inc_email if isinstance(raw_inc_email, str) else None
+            inc_aff = str(p_fields.get("affiliation") or "") or None
+            inc_non_t1_fp = person_fp(
+                tier="T3" if inc_email else "T2",
+                login_name=None,
+                name=pname,
+                affiliation=inc_aff,
+                email=inc_email,
+            )
+            inc_has_t1 = (str(p.get("tier") or "") == "T1") or (
+                fp_val != inc_non_t1_fp
+            )
+            ex_non_t1_fp = person_fp(
+                tier="T3" if matched_p.email else "T2",
+                login_name=None,
+                name=matched_p.name,
+                affiliation=matched_p.affiliation,
+                email=matched_p.email,
+            )
+            if (
+                inc_has_t1
+                and matched_p.user_id is None
+                and matched_p.entity_fingerprint == ex_non_t1_fp
+                and matched_p.entity_fingerprint != fp_val
+                and fp_val not in used_person_fps
+            ):
+                used_person_fps.discard(matched_p.entity_fingerprint)
+                matched_p.entity_fingerprint = fp_val
+                used_person_fps.add(fp_val)
             if matched_p.id not in matched_people_map:
                 acc_p: dict[str, object] = {f: None for f in PERSON_MANAGED_FIELDS}
                 _consolidate_incoming_fields("person", matched_p, acc_p, p_fields)
