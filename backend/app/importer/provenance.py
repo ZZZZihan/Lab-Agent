@@ -2570,10 +2570,49 @@ async def execute_merge(
             or p_existing.signature_source != snap["signature_source"]
         )
         if pid_str in prior_job_sig_snaps:
-            if sig_changed_by_this_merge:
-                prior_job_sig_snaps[pid_str]["applied_sha256"] = (
-                    p_existing.signature_sha256
-                )
+            if sig_changed_by_this_merge and snap is not None:
+                old_snap = prior_job_sig_snaps[pid_str]
+                old_applied_sha = old_snap.get("applied_sha256")
+                if isinstance(old_applied_sha, str) and old_applied_sha:
+                    other_merged_jobs = list(
+                        await session.scalars(
+                            select(ImportJob)
+                            .where(
+                                ImportJob.id != job.id,
+                                ImportJob.status.in_(("merged", "provisioned")),
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    for oj in other_merged_jobs:
+                        oj_stats = dict(oj.stats or {})
+                        oj_pre_sigs = oj_stats.get("_pre_merge_signatures")
+                        if not isinstance(oj_pre_sigs, dict):
+                            continue
+                        oj_snap = oj_pre_sigs.get(pid_str)
+                        if (
+                            isinstance(oj_snap, dict)
+                            and oj_snap.get("signature_sha256") == old_applied_sha
+                        ):
+                            new_oj_pre_sigs = dict(oj_pre_sigs)
+                            new_oj_pre_sigs[pid_str] = {
+                                "signature_data_b64": old_snap.get(
+                                    "signature_data_b64"
+                                ),
+                                "signature_mime": old_snap.get("signature_mime"),
+                                "signature_sha256": old_snap.get("signature_sha256"),
+                                "signature_updated_at": old_snap.get(
+                                    "signature_updated_at"
+                                ),
+                                "signature_source": old_snap.get("signature_source"),
+                                "applied_sha256": oj_snap.get("applied_sha256"),
+                            }
+                            oj_stats["_pre_merge_signatures"] = new_oj_pre_sigs
+                            oj.stats = oj_stats
+                prior_job_sig_snaps[pid_str] = {
+                    **snap,
+                    "applied_sha256": p_existing.signature_sha256,
+                }
         elif sig_changed_by_this_merge and snap is not None:
             prior_job_sig_snaps[pid_str] = {
                 **snap,

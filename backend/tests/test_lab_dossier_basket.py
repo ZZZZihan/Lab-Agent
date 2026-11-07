@@ -1178,6 +1178,52 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert guo_after_both_reverts.signature_sha256 is None
         assert guo_after_both_reverts.signature_source is None
 
+    # 5b) Re-merge earlier import A without skipping signature after B replaced S1 with S2:
+    #     A writes S1 again and rebases B's pre-merge snapshot to None while updating A's pre-merge snapshot to S2.
+    #     Reverting A restores B's active S2, and reverting B then restores None.
+    r_merge_a2 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_a2.status_code == 200, r_merge_a2.text
+    r_merge_b2 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge_b2.status_code == 200, r_merge_b2.text
+    r_remerge_a_write = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_remerge_a_write.status_code == 200, r_remerge_a_write.text
+    async with maker() as session:
+        guo_after_remerge_a = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_remerge_a is not None
+        assert guo_after_remerge_a.signature_sha256 == guo_orig_sha
+
+    r_rev_a2 = await client.post(
+        f"/api/v1/admin/imports/{job_a_id}/revert", headers=admin_headers
+    )
+    assert r_rev_a2.status_code == 200, r_rev_a2.text
+    async with maker() as session:
+        guo_after_rev_a2 = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_a2 is not None
+        assert guo_after_rev_a2.signature_sha256 == s2_sha
+        assert guo_after_rev_a2.signature_source == "docx_import"
+
+    r_rev_b2 = await client.post(
+        f"/api/v1/admin/imports/{job_b_id}/revert", headers=admin_headers
+    )
+    assert r_rev_b2.status_code == 200, r_rev_b2.text
+    async with maker() as session:
+        guo_after_rev_b2 = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_after_rev_b2 is not None
+        assert guo_after_rev_b2.signature_sha256 is None
+        assert guo_after_rev_b2.signature_source is None
+
     # 6) Conflicting person in exclude_keys does not trigger 422 merge_conflict_unresolved
     async with maker() as session:
         db_job_b2 = await session.get(ImportJob, uuid.UUID(job_b_id))
