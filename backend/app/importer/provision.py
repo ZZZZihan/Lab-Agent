@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import uuid
@@ -11,9 +12,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 
 from app.auth import hash_password, validate_password
 from app.config import Settings
@@ -200,6 +202,7 @@ async def provision_import_job(
     embedder: Embedder,
 ) -> dict[str, object]:
     """Execute account provisioning, lab asset persistence, and RAG profile indexing."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     job = await session.scalar(
         select(ImportJob).where(ImportJob.id == job_id).with_for_update()
     )
@@ -223,7 +226,9 @@ async def provision_import_job(
         raise ProvisionError(422, "as_of_time_required", "请提供本子基准时间 as_of_time")
 
     existing_users = list(await session.scalars(select(User)))
-    existing_people = list(await session.scalars(select(LabPerson)))
+    existing_people = list(
+        await session.scalars(select(LabPerson).with_for_update())
+    )
     users_by_id = {u.id: u for u in existing_users}
     used_login_names = {
         u.login_name.lower() for u in existing_users if u.login_name is not None
@@ -687,12 +692,67 @@ async def provision_import_job(
                 recorded_by=actor_id,
             )
 
+        inserted_people_ids = {p_ent.id for p_ent in inserted_people}
+        existing_target_ids = {
+            p_ent.id
+            for p_ent in imported_people_by_key.values()
+            if p_ent.id not in inserted_people_ids
+        }
+        existing_target_people: list[LabPerson] = []
+        pre_sig_snapshots: dict[uuid.UUID, dict[str, str | None]] = {}
+        if existing_target_ids:
+            existing_target_people = list(
+                await session.scalars(
+                    select(LabPerson)
+                    .options(undefer(LabPerson.signature_data))
+                    .where(LabPerson.id.in_(existing_target_ids))
+                    .with_for_update()
+                )
+            )
+            for p_existing in existing_target_people:
+                await session.refresh(
+                    p_existing,
+                    attribute_names=[
+                        "signature_data",
+                        "signature_mime",
+                        "signature_sha256",
+                        "signature_updated_at",
+                        "signature_source",
+                    ],
+                )
+                pre_sig_snapshots[p_existing.id] = {
+                    "signature_data_b64": (
+                        base64.b64encode(p_existing.signature_data).decode("ascii")
+                        if p_existing.signature_data is not None
+                        else None
+                    ),
+                    "signature_mime": p_existing.signature_mime,
+                    "signature_sha256": p_existing.signature_sha256,
+                    "signature_updated_at": (
+                        p_existing.signature_updated_at.isoformat()
+                        if p_existing.signature_updated_at is not None
+                        else None
+                    ),
+                    "signature_source": p_existing.signature_source,
+                }
+
         sig_result, sig_extra_warnings = persist_import_signatures(
             preview=preview,
             imported_people_by_key=imported_people_by_key,
             skip_signature_ids=body.skip_signature_ids,
             ambiguous_keys=ambiguous_person_keys,
         )
+        changed_sig_snapshots: dict[str, dict[str, str | None]] = {}
+        for p_existing in existing_target_people:
+            snap = pre_sig_snapshots.get(p_existing.id)
+            if snap is not None and (
+                p_existing.signature_sha256 != snap["signature_sha256"]
+                or p_existing.signature_source != snap["signature_source"]
+            ):
+                changed_sig_snapshots[str(p_existing.id)] = {
+                    **snap,
+                    "applied_sha256": p_existing.signature_sha256,
+                }
         cleaned_preview = {k: v for k, v in preview.items() if k != "_signature_blobs"}
         if sig_extra_warnings:
             cur_prev_warnings = list(cleaned_preview.get("warnings") or [])
@@ -745,6 +805,8 @@ async def provision_import_job(
         "roster_rows": roster_rows,
         "signature_result": sig_result,
     }
+    if changed_sig_snapshots:
+        stats_payload["_pre_merge_signatures"] = changed_sig_snapshots
 
     job.rag_document_id = rag_doc.id if rag_doc is not None else None
     job.stats = stats_payload

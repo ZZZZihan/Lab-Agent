@@ -112,6 +112,7 @@ def build_proposal_docx_with_10_signatures(
     duplicate_row_sig: bool = False,
     unexpected_cell_sig: bool = False,
     ambiguous_pi_sig: bool = False,
+    nearby_pi_diagram: bool = False,
     corrupt_first_member_sig: bool = False,
     inject_external_rel: bool = False,
 ) -> bytes:
@@ -195,7 +196,9 @@ def build_proposal_docx_with_10_signatures(
         pi_sig_p.add_run().add_picture(io.BytesIO(make_png_bytes(80, 40, fill_byte=55)))
     doc.add_paragraph("申请人（签章）：          2026年 4月 26 日")
     doc.add_paragraph("三、申请人所在单位意见")
-    doc.add_paragraph("四、课题设计论证")
+    p_sec4 = doc.add_paragraph("四、课题设计论证")
+    if nearby_pi_diagram:
+        p_sec4.add_run().add_picture(io.BytesIO(make_png_bytes(120, 60, fill_byte=88)))
     doc.add_paragraph("五、完成项目研究的基础和保证")
 
     # Table 2: Main body & T4 foundation with architecture diagram image (should be ignored by signature rules)
@@ -519,12 +522,20 @@ def test_docx_signature_extract_synthetic_and_edge_cases() -> None:
     assert "SIGNATURE_UNEXPECTED_CELL" in unexp_codes
     assert len(unexp_parsed["preview"]["signatures"]) == 10
 
-    # Edge case 3: 2 images in PI commitment window -> SIGNATURE_AMBIGUOUS_PI
+    # Edge case 3: 2 images in PI commitment window at same distance -> SIGNATURE_AMBIGUOUS_PI
     ambig_docx = build_proposal_docx_with_10_signatures(ambiguous_pi_sig=True)
     ambig_parsed = parse_proposal_docx("ambig.docx", ambig_docx)
     ambig_codes = [w["code"] for w in ambig_parsed["preview"]["warnings"]]
     assert "SIGNATURE_AMBIGUOUS_PI" in ambig_codes
     assert len(ambig_parsed["preview"]["signatures"]) == 9
+
+    # Edge case 3b: PI signature at distance -1 vs unrelated diagram at distance +2 -> closest wins without ambiguity
+    nearby_docx = build_proposal_docx_with_10_signatures(nearby_pi_diagram=True)
+    nearby_parsed = parse_proposal_docx("nearby.docx", nearby_docx)
+    nearby_codes = [w["code"] for w in nearby_parsed["preview"]["warnings"]]
+    assert "SIGNATURE_AMBIGUOUS_PI" not in nearby_codes
+    assert len(nearby_parsed["preview"]["signatures"]) == 10
+    assert nearby_parsed["preview"]["signatures"][0]["person_temp_id"] == "p1"
 
     # Edge case 4: corrupt / SVG image inside member signature cell -> warning, does not abort parse
     corrupt_docx = build_proposal_docx_with_10_signatures(corrupt_first_member_sig=True)
@@ -711,6 +722,58 @@ async def test_import_confirm_signatures_lifecycle(client: AsyncClient) -> None:
         assert wan_after is not None
         assert wan_after.signature_source == "upload"
         assert wan_after.signature_sha256 == manual_sha
+        guo_before_merge = next(
+            lp for lp in await session.scalars(select(LabPerson)) if lp.name == "郭建民"
+        )
+        guo_id = str(guo_before_merge.id)
+        guo_orig_sha = guo_before_merge.signature_sha256
+        # Clear 郭建民's signature before testing merge + revert restoration
+        guo_before_merge.signature_data = None
+        guo_before_merge.signature_mime = None
+        guo_before_merge.signature_sha256 = None
+        guo_before_merge.signature_updated_at = None
+        guo_before_merge.signature_source = None
+        await session.commit()
+
+    # 4) Merge a new job onto existing people -> 郭建民 gets docx_import signature; then revert -> 郭建民's signature is cleared back to None while 万振凯's manual upload stays intact
+    r_up4 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        headers=admin_headers,
+        files={
+            "file": (
+                "proposal_merge_revert.docx",
+                raw_docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    job4_id = r_up4.json()["job_id"]
+    r_merge4 = await client.post(
+        f"/api/v1/admin/imports/{job4_id}/merge",
+        headers=admin_headers,
+        json={"decisions": []},
+    )
+    assert r_merge4.status_code == 200, r_merge4.text
+    async with maker() as session:
+        guo_merged = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_merged is not None
+        assert guo_merged.signature_sha256 == guo_orig_sha
+        assert guo_merged.signature_source == "docx_import"
+
+    r_rev4 = await client.post(
+        f"/api/v1/admin/imports/{job4_id}/revert",
+        headers=admin_headers,
+    )
+    assert r_rev4.status_code == 200, r_rev4.text
+    async with maker() as session:
+        guo_reverted = await session.get(LabPerson, uuid.UUID(guo_id))
+        assert guo_reverted is not None
+        assert guo_reverted.signature_sha256 is None
+        assert guo_reverted.signature_source is None
+        wan_still_upload = await session.get(LabPerson, uuid.UUID(wan_id))
+        assert wan_still_upload is not None
+        assert wan_still_upload.signature_source == "upload"
+        assert wan_still_upload.signature_sha256 == manual_sha
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1207,80 @@ async def test_person_dossier_attribution_and_query_budget(
         f"/api/v1/lab/people/{uuid.uuid4()}/dossier", headers=admin_headers
     )
     assert r_404.status_code == 404
+
+    # Regression check: POST /lab/projects with pi_name="张三" and lab_role="participant" (omitting raw_text)
+    # classifies as "participant" in 张三's dossier
+    r_create_part_proj = await client.post(
+        "/api/v1/lab/projects",
+        headers=admin_headers,
+        json={
+            "title": "手动创建的参与课题（无自由文本）",
+            "funder": "天津市科技局",
+            "grant_no": "TJ-PART-2026",
+            "pi_name": "张三",
+            "lab_role": "participant",
+            "status": "ongoing",
+        },
+    )
+    assert r_create_part_proj.status_code == 200, r_create_part_proj.text
+    r_dos_after_part = await client.get(
+        f"/api/v1/lab/people/{zhang_id}/dossier", headers=zhang_headers
+    )
+    assert r_dos_after_part.status_code == 200
+    dos_after_part = r_dos_after_part.json()
+    assert dos_after_part["counts"]["projects_as_pi"] == 1
+    assert dos_after_part["counts"]["projects_as_participant"] == 2
+
+    # Regression check: Latin/English name with spaces ("John Smith") recalled by SQL ILIKE prefilter and matched
+    async with maker() as session:
+        p_john = LabPerson(
+            name="John Smith",
+            title="Visiting Professor",
+            affiliation="Tianjin Polytechnic University",
+            project_role="member",
+            entity_fingerprint="a4" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        proj_john = LabProject(
+            title="Cross-Modal Reasoning",
+            funder="NSFC",
+            grant_no="INT-2026",
+            pi_name="John Smith",
+            lab_role="host",
+            status="ongoing",
+            status_source="explicit",
+            raw_text="Cross-Modal Reasoning, PI: John Smith",
+            entity_fingerprint="b4" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        ach_john = LabAchievement(
+            kind="paper",
+            title="Spaced Name Attribution Paper",
+            first_author="John Smith",
+            authors_text="John Smith, 张三",
+            venue="IEEE TPAMI",
+            year=2026,
+            raw_text="John Smith: Spaced Name Attribution Paper, 2026.",
+            parse_quality="structured",
+            entity_fingerprint="c4" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        session.add_all([p_john, proj_john, ach_john])
+        await session.commit()
+        john_id = str(p_john.id)
+
+    r_john_dos = await client.get(
+        f"/api/v1/lab/people/{john_id}/dossier", headers=admin_headers
+    )
+    assert r_john_dos.status_code == 200
+    john_dos = r_john_dos.json()
+    assert john_dos["counts"]["projects_total"] == 1
+    assert john_dos["counts"]["projects_as_pi"] == 1
+    assert john_dos["counts"]["outputs_total"] == 1
+    assert john_dos["counts"]["outputs_first_author"] == 1
 
 
 # ---------------------------------------------------------------------------

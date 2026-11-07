@@ -145,7 +145,7 @@ def build_ilike_pattern(raw_name: str) -> str:
             return f"\\{ch}"
         return ch
 
-    if 2 <= len(source) <= 6 and all("一" <= c <= "鿿" or c == "·" for c in source):
+    if 2 <= len(source) <= 64:
         inner = "%".join(_esc(c) for c in source)
         return f"%{inner}%"
     escaped = "".join(_esc(c) for c in source)
@@ -205,14 +205,16 @@ def classify_project_for_person(
     pi_tokens = split_names(pi_raw) if isinstance(pi_raw, str) else []
     pi_primary = pi_tokens[0] if pi_tokens else normalize_person_name(pi_raw)
 
-    # Check if raw_text explicitly says "{target}参与" / "{target}参加" when lab_role == "participant"
+    explicitly_pi_in_raw = bool(
+        re.search(
+            rf"{re.escape(target_norm_name)}\s*(?:[（(]?(?:主持|负责人|申请人)|[，,、]?\s*主持)",
+            ZERO_WIDTH_AND_SPACE_RE.sub("", raw_text),
+        )
+    )
     explicitly_participant_only = bool(
         lab_role == "participant"
         and pi_primary == target_norm_name
-        and re.search(
-            rf"{re.escape(target_norm_name)}\s*[（(]?(?:参与|参加)",
-            ZERO_WIDTH_AND_SPACE_RE.sub("", raw_text),
-        )
+        and not explicitly_pi_in_raw
     )
 
     if pi_primary == target_norm_name and not explicitly_participant_only:

@@ -426,7 +426,7 @@ def bind_proposal_signatures(
             blk.block_index for blk in body_blocks if PI_ANCHOR_RE.search(blk.text)
         ]
         if anchor_blocks:
-            candidate_pi_imgs: list[EmbeddedImage] = []
+            unconsumed_non_member_imgs: list[tuple[int, EmbeddedImage]] = []
             for img_idx, img in enumerate(embedded_images):
                 if img_idx in consumed_img_indices:
                     continue
@@ -436,11 +436,45 @@ def bind_proposal_signatures(
                     and (img.table_index, img.row_index) in member_table_rows
                 ):
                     continue
-                if any(abs(img.block_index - anchor_b) <= 2 for anchor_b in anchor_blocks):
-                    candidate_pi_imgs.append(img)
-                    consumed_img_indices.add(img_idx)
+                unconsumed_non_member_imgs.append((img_idx, img))
 
-            if len(candidate_pi_imgs) >= 2:
+            selected_per_anchor: list[tuple[int, EmbeddedImage]] = []
+            ambiguous_img_indices: set[int] = set()
+            pi_ambiguous = False
+
+            for anchor_b in anchor_blocks:
+                in_window = [
+                    (idx, img)
+                    for idx, img in unconsumed_non_member_imgs
+                    if -3 <= (img.block_index - anchor_b) <= 2
+                ]
+                if not in_window:
+                    continue
+
+                def _pi_rank_key(
+                    im: EmbeddedImage, ab: int = anchor_b
+                ) -> tuple[int, int]:
+                    dist = im.block_index - ab
+                    return (abs(dist), 0 if dist < 0 else 1)
+
+                best_key = min(_pi_rank_key(im) for _, im in in_window)
+                best_candidates = [
+                    (idx, im) for idx, im in in_window if _pi_rank_key(im) == best_key
+                ]
+                if len(best_candidates) >= 2:
+                    pi_ambiguous = True
+                    for idx, _ in best_candidates:
+                        ambiguous_img_indices.add(idx)
+                elif len(best_candidates) == 1:
+                    selected_per_anchor.append(best_candidates[0])
+
+            distinct_shas = {
+                hashlib.sha256(im.data).hexdigest() for _, im in selected_per_anchor
+            }
+            if pi_ambiguous or len(distinct_shas) >= 2:
+                for idx, _ in selected_per_anchor:
+                    consumed_img_indices.add(idx)
+                consumed_img_indices.update(ambiguous_img_indices)
                 warnings.append(
                     {
                         "code": "SIGNATURE_AMBIGUOUS_PI",
@@ -449,8 +483,9 @@ def bind_proposal_signatures(
                         "block_index": anchor_blocks[0],
                     }
                 )
-            elif len(candidate_pi_imgs) == 1:
-                pi_img = candidate_pi_imgs[0]
+            elif len(selected_per_anchor) >= 1:
+                winner_idx, pi_img = selected_per_anchor[0]
+                consumed_img_indices.add(winner_idx)
                 check = validate_signature_image(pi_img.data)
                 if not check.ok or check.sha256 is None or check.mime is None:
                     warnings.append(

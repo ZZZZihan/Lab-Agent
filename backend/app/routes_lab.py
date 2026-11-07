@@ -2785,7 +2785,10 @@ async def get_person_dossier(
             -item[0].id.int,
         )
     )
-    projects_truncated = len(matched_proj_tuples) > 100
+    projects_total = len(matched_proj_tuples)
+    pi_count = sum(1 for _, rl in matched_proj_tuples if rl == "pi")
+    part_count = sum(1 for _, rl in matched_proj_tuples if rl == "participant")
+    projects_truncated = projects_total > 100
     matched_proj_tuples = matched_proj_tuples[:100]
     serialized_projects = [
         _serialize_dossier_project(proj, rel_role)
@@ -2816,17 +2819,15 @@ async def get_person_dossier(
             -item[0].id.int,
         )
     )
-    outputs_truncated = len(matched_ach_tuples) > 200
+    outputs_total = len(matched_ach_tuples)
+    first_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "first_author")
+    co_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "coauthor")
+    outputs_truncated = outputs_total > 200
     matched_ach_tuples = matched_ach_tuples[:200]
     serialized_outputs = [
         _serialize_dossier_achievement(ach, rel_role, pos)
         for ach, rel_role, pos in matched_ach_tuples
     ]
-
-    pi_count = sum(1 for _, rl in matched_proj_tuples if rl == "pi")
-    part_count = sum(1 for _, rl in matched_proj_tuples if rl == "participant")
-    first_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "first_author")
-    co_count = sum(1 for _, rl, _ in matched_ach_tuples if rl == "coauthor")
 
     person_payload = _serialize_person(person, provenance={})
     person_payload["can_edit"] = can_edit
@@ -2835,13 +2836,13 @@ async def get_person_dossier(
         "person": person_payload,
         "can_edit": can_edit,
         "counts": {
-            "projects_total": len(serialized_projects),
+            "projects_total": projects_total,
             "projects_as_pi": pi_count,
             "projects_as_participant": part_count,
-            "outputs_total": len(serialized_outputs),
+            "outputs_total": outputs_total,
             "outputs_first_author": first_count,
             "outputs_coauthor": co_count,
-            "achievements_total": len(serialized_outputs),
+            "achievements_total": outputs_total,
             "achievements_first_author": first_count,
             "achievements_coauthor": co_count,
         },
@@ -2952,6 +2953,7 @@ async def upload_person_signature(
     if uid is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
 
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     person = await session.scalar(
         select(LabPerson)
         .options(undefer(LabPerson.signature_data))
@@ -3059,6 +3061,7 @@ async def delete_person_signature(
     if uid is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
 
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     person = await session.scalar(
         select(LabPerson)
         .options(undefer(LabPerson.signature_data))
