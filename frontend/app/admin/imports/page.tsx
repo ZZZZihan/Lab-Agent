@@ -37,7 +37,25 @@ import { useI18n } from "@/lib/i18n";
 
 const DEFAULT_INITIAL_PASSWORD = "LabAgent@2026";
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{1,63}$/;
+const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/;
+const RESERVED_LOGIN_NAMES = new Set([
+  "admin",
+  "root",
+  "system",
+  "api",
+  "null",
+  "test",
+  "labagent",
+]);
+
+function isValidLoginName(login: string): boolean {
+  const normalized = login.trim().toLowerCase();
+  return (
+    normalized.length > 0 &&
+    !RESERVED_LOGIN_NAMES.has(normalized) &&
+    LOGIN_NAME_RE.test(normalized)
+  );
+}
 
 type PersonMode = "new" | "existing" | "exclude";
 
@@ -470,7 +488,7 @@ export default function AdminImportsPage() {
       const loginClean = ov.login_name.trim().toLowerCase();
       const stillConflict =
         p.match?.status === "conflict" && loginClean === (p.login_name || "");
-      if (!LOGIN_NAME_RE.test(loginClean) || stillConflict) {
+      if (!isValidLoginName(ov.login_name) || stillConflict) {
         unresolvedCount += 1;
       }
     }
@@ -971,8 +989,7 @@ export default function AdminImportsPage() {
                           link_user_id: p.match?.user_id || "",
                         };
                         const loginValid =
-                          ov.mode !== "new" ||
-                          LOGIN_NAME_RE.test(ov.login_name.trim().toLowerCase());
+                          ov.mode !== "new" || isValidLoginName(ov.login_name);
                         const isConflict =
                           ov.mode === "new" &&
                           p.match?.status === "conflict" &&
