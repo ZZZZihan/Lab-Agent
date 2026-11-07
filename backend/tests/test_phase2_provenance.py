@@ -971,7 +971,7 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     assert bf2_data["backfilled_entries"] == bf1_data["backfilled_entries"]
     assert bf2_data["discrepancies"] == []
 
-    # Merge 2026 proposal on top of 2023
+    # Merge 2026 proposal on top of 2023 (including an unlinked T1 person with user_id=None)
     docx_2026 = build_proposal_docx_variant(
         fill_date_str="2026 年 6 月 1 日",
         wan_title="教授",
@@ -984,6 +984,24 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     job_2026 = await _upload_proposal(
         client, headers, docx_2026, "proposal-2026.docx", "2026-06-01"
     )
+    people_2026 = list(job_2026["preview"]["people"])
+    people_2026.append(
+        {
+            "key": "p_unlinked_t1",
+            "name": "林雪莹",
+            "tier": "T1",
+            "cert": "2531109999",
+            "login_name": "2531109999",
+            "affiliation": "天津工业大学",
+            "research_specialty": "多模态感知",
+            "project_role": "member",
+        }
+    )
+    await client.patch(
+        f"/api/v1/admin/imports/{job_2026['job_id']}/preview",
+        headers=headers,
+        json={"people": people_2026},
+    )
     merge_resp = await client.post(
         f"/api/v1/admin/imports/{job_2026['job_id']}/merge",
         headers=headers,
@@ -991,14 +1009,53 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     )
     assert merge_resp.status_code == 200
 
-    # Verify 2026 state took effect before revert
+    # Regression check: merging updates onto a T1 person with user_id=None must preserve T1 fingerprint
+    ppl_mid_first = await client.get("/api/v1/lab/people", headers=headers)
+    unlinked_lin = next(
+        p
+        for p in ppl_mid_first.json()["people"]
+        if p["name"] == "林雪莹" and p["user_id"] is None
+    )
+    established_t1_fp = unlinked_lin["entity_fingerprint"]
+    merge_resp_2 = await client.post(
+        f"/api/v1/admin/imports/{job_2026['job_id']}/merge",
+        headers=headers,
+        json={"decisions": []},
+    )
+    assert merge_resp_2.status_code == 200
+
+    # Verify 2026 state took effect before revert and unlinked T1 person kept their T1 fingerprint
     ppl_mid = await client.get("/api/v1/lab/people", headers=headers)
     assert (
         next(p for p in ppl_mid.json()["people"] if p["name"] == "万振凯")["title"]
         == "教授"
     )
+    unlinked_lin_after = next(
+        p
+        for p in ppl_mid.json()["people"]
+        if p["id"] == unlinked_lin["id"]
+    )
+    assert unlinked_lin_after["research_specialty"] == "多模态感知"
+    assert unlinked_lin_after["entity_fingerprint"] == established_t1_fp
+
     proj_mid = await client.get("/api/v1/lab/projects", headers=headers)
     assert any(p["grant_no"] == "津科智2025-08" for p in proj_mid.json()["projects"])
+
+    # Regression check: manually created project (without source_import_id) records manual provenance and survives revert
+    manual_proj_resp = await client.post(
+        "/api/v1/lab/projects",
+        headers=headers,
+        json={
+            "title": "手动录入横向课题：智能阅卷私有化部署",
+            "grant_no": "MANUAL-2026-01",
+            "funder": "天津市教育招生考试院",
+            "status": "ongoing",
+        },
+    )
+    assert manual_proj_resp.status_code == 200, manual_proj_resp.text
+    manual_proj = manual_proj_resp.json()["project"]
+    assert manual_proj["provenance"]["title"]["source_kind"] == "manual"
+    assert manual_proj["provenance"]["title"]["source_job_id"] is None
 
     # Count User accounts before revert
     async with maker() as session:
@@ -1017,7 +1074,7 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     assert rev_data["reverted_fields"] >= 2
     assert rev_data["deleted_entities"] >= 2
 
-    # Verify fields rolled back to 2023 values and 2026-only project/achievement were deleted
+    # Verify fields rolled back to 2023 values and 2026-only project/achievement were deleted, while manual project survived
     ppl_after = await client.get("/api/v1/lab/people", headers=headers)
     wan_after = next(
         p for p in ppl_after.json()["people"] if p["name"] == "万振凯"
@@ -1030,6 +1087,11 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     age_after = next(p for p in projects_after if p["grant_no"] == "AGE240005")
     assert age_after["status"] == "ongoing"
     assert not any(p["grant_no"] == "津科智2025-08" for p in projects_after)
+    survived_manual = next(
+        p for p in projects_after if p["grant_no"] == "MANUAL-2026-01"
+    )
+    assert survived_manual["title"] == "手动录入横向课题：智能阅卷私有化部署"
+    assert survived_manual["funder"] == "天津市教育招生考试院"
 
     # Verify User accounts are 100% untouched
     async with maker() as session:

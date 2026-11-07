@@ -315,11 +315,12 @@ async def record_entity_import_provenance(
     *,
     entity_type: EntityType,
     entity: Any,
-    job_id: uuid.UUID,
+    job_id: uuid.UUID | None,
     as_of_time: date,
     recorded_by: uuid.UUID | None,
+    source_kind: Literal["import", "manual", "legacy"] = "import",
 ) -> int:
-    """Write initial `source_kind='import'` provenance rows for all non-blank managed fields."""
+    """Write initial provenance rows for all non-blank managed fields."""
     count = 0
     for field in MANAGED_FIELDS[entity_type]:
         val = get_entity_json_value(entity_type, entity, field)
@@ -331,8 +332,8 @@ async def record_entity_import_provenance(
                 entity_id=entity.id,
                 field=field,
                 value=val,
-                source_kind="import",
-                source_job_id=job_id,
+                source_kind=source_kind,
+                source_job_id=None if source_kind == "manual" else job_id,
                 as_of_time=as_of_time,
                 recorded_by=recorded_by,
                 superseded=False,
@@ -405,6 +406,9 @@ async def _refresh_and_validate_entity_fingerprint(
     session: AsyncSession,
     entity_type: EntityType,
     entity: Any,
+    *,
+    prior_affiliation: str | None = None,
+    prior_email: str | None = None,
 ) -> None:
     """Recompute and validate `entity_fingerprint` after provenance-driven field mutations."""
     new_fp: str
@@ -422,8 +426,46 @@ async def _refresh_and_validate_entity_fingerprint(
                 )
                 if cand_t1 == entity.entity_fingerprint:
                     t1_fp = cand_t1
+        candidate_affiliations: set[str | None] = {
+            None,
+            entity.affiliation,
+            prior_affiliation,
+        }
+        candidate_emails: set[str | None] = {
+            None,
+            entity.email,
+            prior_email,
+        }
+        hist_rows = list(
+            await session.scalars(
+                select(FieldProvenance).where(
+                    FieldProvenance.entity_type == "person",
+                    FieldProvenance.entity_id == entity.id,
+                    FieldProvenance.field.in_(("affiliation", "email")),
+                )
+            )
+        )
+        for r in hist_rows:
+            if isinstance(r.value, str) and r.value.strip():
+                if r.field == "affiliation":
+                    candidate_affiliations.add(r.value.strip())
+                elif r.field == "email":
+                    candidate_emails.add(r.value.strip())
+        non_t1_fps = {
+            person_fp(
+                tier="T3" if (em and em.strip()) else "T2",
+                login_name=None,
+                name=entity.name,
+                affiliation=aff,
+                email=em,
+            )
+            for aff in candidate_affiliations
+            for em in candidate_emails
+        }
         if t1_fp is not None:
             new_fp = t1_fp
+        elif entity.entity_fingerprint not in non_t1_fps:
+            new_fp = entity.entity_fingerprint
         else:
             new_fp = person_fp(
                 tier="T3" if entity.email else "T2",
@@ -484,6 +526,8 @@ async def restore_entity_imported_fields(
     fields: Sequence[str],
 ) -> list[str]:
     """Supersede active manual overrides on `fields` and restore effective imported values."""
+    prior_affiliation = getattr(entity, "affiliation", None)
+    prior_email = getattr(entity, "email", None)
     restored: list[str] = []
     for field in fields:
         if field not in MANAGED_FIELDS[entity_type]:
@@ -534,7 +578,13 @@ async def restore_entity_imported_fields(
         )
         restored.append(field)
 
-    await _refresh_and_validate_entity_fingerprint(session, entity_type, entity)
+    await _refresh_and_validate_entity_fingerprint(
+        session,
+        entity_type,
+        entity,
+        prior_affiliation=prior_affiliation,
+        prior_email=prior_email,
+    )
     await session.flush()
     all_live = list(
         await session.scalars(
@@ -1679,6 +1729,8 @@ async def execute_merge(
         incoming_fields: dict[str, object],
     ) -> None:
         nonlocal updated_fields_count, kept_fields_count, forced_fields_count
+        prior_affiliation = getattr(entity, "affiliation", None)
+        prior_email = getattr(entity, "email", None)
         for field in MANAGED_FIELDS[entity_type]:
             inc_val = incoming_fields.get(field)
             if _is_blank(inc_val):
@@ -1742,7 +1794,13 @@ async def execute_merge(
                 kept_fields_count += 1
 
         old_fp = entity.entity_fingerprint
-        await _refresh_and_validate_entity_fingerprint(session, entity_type, entity)
+        await _refresh_and_validate_entity_fingerprint(
+            session,
+            entity_type,
+            entity,
+            prior_affiliation=prior_affiliation,
+            prior_email=prior_email,
+        )
         if entity.entity_fingerprint != old_fp:
             fp_set_map = {
                 "person": used_person_fps,
@@ -2099,6 +2157,8 @@ async def revert_import_merge(
             )
         )
 
+        prior_affiliation = getattr(ent, "affiliation", None)
+        prior_email = getattr(ent, "email", None)
         if ent.source_import_id == job.id and not remaining_live:
             if etype == "person" and ent.user_id is not None:
                 # Spec §10.6: Never delete LabPerson linked to a User account!
@@ -2107,7 +2167,13 @@ async def revert_import_merge(
                     if not _is_blank(cur_val) and field != "project_role":
                         set_entity_field_from_json(etype, ent, field, None)
                         reverted_fields += 1
-                await _refresh_and_validate_entity_fingerprint(session, etype, ent)
+                await _refresh_and_validate_entity_fingerprint(
+                    session,
+                    etype,
+                    ent,
+                    prior_affiliation=prior_affiliation,
+                    prior_email=prior_email,
+                )
             else:
                 await session.delete(ent)
                 deleted_entities += 1
@@ -2125,7 +2191,13 @@ async def revert_import_merge(
                 set_entity_field_from_json(etype, ent, field, new_val)
                 reverted_fields += 1
 
-        await _refresh_and_validate_entity_fingerprint(session, etype, ent)
+        await _refresh_and_validate_entity_fingerprint(
+            session,
+            etype,
+            ent,
+            prior_affiliation=prior_affiliation,
+            prior_email=prior_email,
+        )
 
         rem_dates = [r.as_of_time for r in remaining_live if r.as_of_time is not None]
         if rem_dates:

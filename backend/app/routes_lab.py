@@ -1627,9 +1627,10 @@ async def create_lab_project(
         session,
         entity_type="project",
         entity=project,
-        job_id=source_import_id,
+        job_id=body.source_import_id,
         as_of_time=as_of_date,
         recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
     )
     await session.flush()
     prov_map = await build_provenance_map(session, "project", [project])
@@ -1870,9 +1871,10 @@ async def create_lab_achievement(
         session,
         entity_type="achievement",
         entity=achievement,
-        job_id=source_import_id,
+        job_id=body.source_import_id,
         as_of_time=as_of_date,
         recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
     )
     await session.flush()
     prov_map = await build_provenance_map(session, "achievement", [achievement])
@@ -2069,9 +2071,10 @@ async def create_lab_facility(
         session,
         entity_type="facility",
         entity=facility,
-        job_id=source_import_id,
+        job_id=body.source_import_id,
         as_of_time=as_of_date,
         recorded_by=user.id,
+        source_kind="import" if body.source_import_id is not None else "manual",
     )
     await session.flush()
     prov_map = await build_provenance_map(session, "facility", [facility])
