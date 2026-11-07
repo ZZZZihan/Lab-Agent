@@ -2211,6 +2211,14 @@ async def restore_lab_entity_imported(
             raise APIError(404, "not_found", "成员档案不存在")
         if actor.role != "admin" and entity.user_id != user.id:
             raise APIError(403, "forbidden", "仅管理员或本人可恢复成员字段")
+        if "project_role" in fields_to_restore and actor.role != "admin":
+            await _require_admin(
+                request,
+                actor,
+                operation="restore_lab_person_project_role",
+                resource_type="lab_person",
+                resource_id=str(entity_id),
+            )
     elif norm_type == "project":
         entity = await session.get(LabProject, entity_id)
         if entity is None:

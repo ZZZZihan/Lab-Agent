@@ -638,6 +638,30 @@ async def test_phase2_manual_edit_protection_and_restore_imported(
     assert restore_fac.json()["facility"]["spec"] == orig_fac_spec
     assert restore_fac.json()["facility"]["entity_fingerprint"] == orig_fac_fp
 
+    # 6. Regression check: non-admin member cannot restore project_role via restore-imported
+    admin_role_patch = await client.patch(
+        f"/api/v1/lab/people/{wan_id}",
+        headers=headers,
+        json={"project_role": "member"},
+    )
+    assert admin_role_patch.status_code == 200
+    member_headers = await _login_headers(client, identifier="wanzhenkai", password=INITIAL_PW)
+    new_member_pw = "WanZhenKai-NewPass-2026#9"
+    chg_resp = await client.post(
+        "/api/v1/auth/change-password",
+        headers=member_headers,
+        json={"old_password": INITIAL_PW, "new_password": new_member_pw},
+    )
+    assert chg_resp.status_code == 200, chg_resp.text
+    member_headers = await _login_headers(client, identifier="wanzhenkai", password=new_member_pw)
+    forbid_restore = await client.post(
+        f"/api/v1/lab/people/{wan_id}/restore-imported",
+        headers=member_headers,
+        json={"field": "project_role"},
+    )
+    assert forbid_restore.status_code == 403
+    assert forbid_restore.json()["error"]["code"] == "forbidden"
+
 
 async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None:
     """Scenario 5: Two proposals with identical as_of_time but different field values require explicit decision."""
@@ -648,6 +672,7 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
         fill_date_str="2026 年 6 月 1 日",
         project_title="同时间本子A",
         wan_title="副教授",
+        wan_duty="系主任",
     )
     job_a = await _upload_proposal(
         client, headers, docx_a, "proposal-2026-a.docx", "2026-06-01"
@@ -662,6 +687,7 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
         fill_date_str="2026 年 6 月 1 日",
         project_title="同时间本子B",
         wan_title="教授",
+        wan_duty="副院长",
     )
     job_b = await _upload_proposal(
         client, headers, docx_b, "proposal-2026-b.docx", "2026-06-01"
@@ -688,7 +714,7 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     assert bad_merge.status_code == 422
     assert bad_merge.json()["error"]["code"] == "merge_conflict_unresolved"
 
-    # Provide explicit decisions for all same_time_conflict items
+    # Provide explicit decisions for all same_time_conflict items (title -> adopt_incoming, admin_duty -> keep_current)
     decisions = [
         {
             "change_key": c["change_key"],
@@ -706,8 +732,17 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     ppl_resp = await client.get("/api/v1/lab/people", headers=headers)
     wan = next(p for p in ppl_resp.json()["people"] if p["name"] == "万振凯")
     assert wan["title"] == "教授"
+    assert wan["admin_duty"] == "系主任"
     assert wan["provenance"]["title"]["source_kind"] == "import"
     assert wan["provenance"]["title"]["has_manual_override"] is False
+
+    # Regression check: backfill-provenance must NOT resurrect the superseded keep_current row (admin_duty="副院长")
+    bf_after_keep = await client.post(
+        "/api/v1/admin/imports/backfill-provenance",
+        headers=headers,
+    )
+    assert bf_after_keep.status_code == 200, bf_after_keep.text
+    assert bf_after_keep.json()["discrepancies"] == []
 
     # A strictly newer 2027 proposal must classify title as 'updated' (NOT 'manual_protected')
     docx_c = build_proposal_docx_variant(
@@ -718,6 +753,16 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     job_c = await _upload_proposal(
         client, headers, docx_c, "proposal-2027-c.docx", "2027-06-01"
     )
+    # Regression check: patch job_c preview so a project has the same title/funder as AGE240005 but a distinct grant_no AGE999999
+    c_projects = list(job_c["preview"]["projects"])
+    c_projects[0] = {**c_projects[0], "grant_no": "AGE999999", "fingerprint": ""}
+    patch_prev = await client.patch(
+        f"/api/v1/admin/imports/{job_c['job_id']}/preview",
+        headers=headers,
+        json={"projects": c_projects},
+    )
+    assert patch_prev.status_code == 200, patch_prev.text
+
     mp_c_resp = await client.post(
         f"/api/v1/admin/imports/{job_c['job_id']}/merge-preview",
         headers=headers,
@@ -733,6 +778,15 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     )
     assert title_change_c["category"] == "updated"
     assert title_change_c["default_action"] == "adopt_incoming"
+    # Distinct grant_no with same title must be added as a new project, not matched to AGE240005
+    assert any(
+        e["entity_type"] == "project"
+        for e in mp_c["added_entities"]
+    )
+    assert not any(
+        c["entity_type"] == "project" and c["field"] == "grant_no"
+        for c in mp_c["changes"]
+    )
 
 
 async def test_phase2_revert_merge_and_backfill_provenance(

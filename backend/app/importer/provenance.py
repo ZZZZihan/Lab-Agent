@@ -849,9 +849,21 @@ def _match_existing_project(
     nfunder = norm(str(fields.get("funder") or ""))
     if ntitle:
         for p in existing_projects:
+            ex_grant = norm(p.grant_no or "")
+            if grant_no and ex_grant and grant_no != ex_grant:
+                continue
             if norm(p.title)[:120] == ntitle and norm(p.funder or "") == nfunder:
                 return p
-        same_title = [p for p in existing_projects if norm(p.title)[:120] == ntitle]
+        same_title = [
+            p
+            for p in existing_projects
+            if norm(p.title)[:120] == ntitle
+            and not (
+                grant_no
+                and norm(p.grant_no or "")
+                and grant_no != norm(p.grant_no or "")
+            )
+        ]
         if len(same_title) == 1:
             return same_title[0]
     return None
@@ -971,14 +983,13 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
     all_achievements = list(await session.scalars(select(LabAchievement)))
     all_facilities = list(await session.scalars(select(LabFacility)))
 
-    live_rows = list(
-        await session.scalars(
-            select(FieldProvenance).where(FieldProvenance.superseded.is_(False))
-        )
-    )
+    all_prov_rows = list(await session.scalars(select(FieldProvenance)))
+    all_rows_by_ef: dict[tuple[str, uuid.UUID, str], list[FieldProvenance]] = {}
     by_ef: dict[tuple[str, uuid.UUID, str], list[FieldProvenance]] = {}
-    for r in live_rows:
-        by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(r)
+    for r in all_prov_rows:
+        all_rows_by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(r)
+        if not r.superseded:
+            by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(r)
 
     created_count = 0
 
@@ -994,14 +1005,12 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
         nonlocal created_count
         if _is_blank(val):
             return
+        all_list = all_rows_by_ef.setdefault((entity_type, entity_id, field), [])
         cur_list = by_ef.setdefault((entity_type, entity_id, field), [])
-        for existing in cur_list:
-            if (
-                existing.source_kind == source_kind
-                and existing.source_job_id == source_job_id
-                and existing.value == val
-            ):
-                return
+        for existing in all_list:
+            if existing.source_kind == source_kind and existing.source_job_id == source_job_id:
+                if source_job_id is not None or existing.value == val:
+                    return
         new_row = FieldProvenance(
             entity_type=entity_type,
             entity_id=entity_id,
@@ -1014,6 +1023,7 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
             superseded=False,
         )
         session.add(new_row)
+        all_list.append(new_row)
         cur_list.append(new_row)
         created_count += 1
 
