@@ -214,7 +214,7 @@ async def provision_import_job(
             parsed_preview_date = date.fromisoformat(raw_as_of.strip())
         except ValueError:
             parsed_preview_date = None
-    as_of_date = body.as_of_time or parsed_preview_date or job.as_of_time
+    as_of_date = body.as_of_time or job.as_of_time or parsed_preview_date
     if as_of_date is None:
         raise ProvisionError(422, "as_of_time_required", "请提供本子基准时间 as_of_time")
 
@@ -655,6 +655,7 @@ async def provision_import_job(
         *new_roster_items,
         *existing_roster_items,
     ]
+    preview["as_of_time"] = as_of_date.isoformat()
     preview["people"] = raw_people
     preview["provisioned_roster_rows"] = roster_rows
     assert_no_pii(preview)

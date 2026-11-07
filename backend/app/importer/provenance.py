@@ -931,7 +931,7 @@ def _match_existing_person(
             and norm(p.affiliation or "") == norm_aff
             and _can_fallback_to_person(p)
         ]
-        if len(same_name_aff) == 1:
+        if len(same_name_aff) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
             return same_name_aff[0]
 
         same_name = [
@@ -1001,6 +1001,7 @@ def _match_existing_achievement(
     inc_kind = norm(inc_kind_raw)
     inc_reg = _ach_reg_id(inc_kind_raw, str(fields.get("raw_text") or ""))
     if ntitle:
+        candidates: list[LabAchievement] = []
         for a in existing_achievements:
             if norm(str(a.kind or "other")) != inc_kind:
                 continue
@@ -1008,7 +1009,9 @@ def _match_existing_achievement(
             if inc_reg and ex_reg and inc_reg != ex_reg:
                 continue
             if norm(a.title)[:120] == ntitle and a.year == year_val:
-                return a
+                candidates.append(a)
+        if len(candidates) == 1:
+            return candidates[0]
     return None
 
 
@@ -1024,12 +1027,15 @@ def _match_existing_facility(
     nname = norm(str(fields.get("name") or ""))[:120]
     nspec = norm(str(fields.get("spec") or ""))[:80]
     if nname:
+        candidates: list[LabFacility] = []
         for f in existing_facilities:
             ex_spec = norm(f.spec or "")[:80]
             if nspec and ex_spec and nspec != ex_spec:
                 continue
             if norm(f.category) == ncat and norm(f.name)[:120] == nname:
-                return f
+                candidates.append(f)
+        if len(candidates) == 1:
+            return candidates[0]
     return None
 
 
@@ -1349,7 +1355,7 @@ def _resolve_job_as_of(
 ) -> date:
     preview: dict[str, Any] = dict(job.preview or {})
     parsed_preview_date = _parse_iso_date(preview.get("as_of_time"))
-    as_of_date = as_of_time_override or parsed_preview_date or job.as_of_time
+    as_of_date = as_of_time_override or job.as_of_time or parsed_preview_date
     if as_of_date is None:
         raise ProvisionError(422, "as_of_time_required", "请提供本子基准时间 as_of_time")
     return as_of_date
@@ -2202,6 +2208,8 @@ async def execute_merge(
     cur_stats = dict(job.stats or {})
     if job.status in ("parsed", "provisioned"):
         cur_stats["pre_merge_status"] = job.status
+    preview["as_of_time"] = as_of_date.isoformat()
+    job.preview = preview
     job.as_of_time = as_of_date
     job.status = "merged"
     await session.flush()

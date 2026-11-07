@@ -1117,9 +1117,28 @@ async def test_phase2_revert_merge_and_backfill_provenance(
     assert manual_proj["provenance"]["title"]["source_job_id"] is None
 
     # Regression check: _match_existing_project title-only fallback does not merge projects with conflicting nonempty funders
-    from app.importer.fingerprint import project_fp
-    from app.importer.provenance import _match_existing_project
-    from app.models import LabProject
+    from datetime import date
+
+    from app.importer.fingerprint import (
+        achievement_fp,
+        facility_fp,
+        person_fp,
+        project_fp,
+    )
+    from app.importer.provenance import (
+        _match_existing_achievement,
+        _match_existing_facility,
+        _match_existing_person,
+        _match_existing_project,
+        _resolve_job_as_of,
+    )
+    from app.models import (
+        ImportJob,
+        LabAchievement,
+        LabFacility,
+        LabPerson,
+        LabProject,
+    )
 
     existing_no_grant = LabProject(
         title="同名横向咨询课题",
@@ -1141,6 +1160,126 @@ async def test_phase2_revert_merge_and_backfill_provenance(
             inc_diff_funder_fp,
             {"title": "同名横向咨询课题", "funder": "天津市科委", "grant_no": None},
             [existing_no_grant],
+        )
+        is None
+    )
+
+    # Regression check: _resolve_job_as_of prefers persisted job.as_of_time over stale preview["as_of_time"]
+    stub_job = ImportJob(
+        as_of_time=date(2023, 5, 1),
+        preview={"as_of_time": "2026-06-01"},
+    )
+    assert _resolve_job_as_of(stub_job) == date(2023, 5, 1)
+
+    # Regression check: _match_existing_facility and _match_existing_achievement require unique compatible candidate
+    fac_a = LabFacility(
+        category="equipment",
+        name="高性能计算集群",
+        spec="8xA100",
+        raw_text="高性能计算集群 8xA100",
+        entity_fingerprint=facility_fp(
+            category="equipment", name="高性能计算集群", spec="8xA100"
+        ),
+    )
+    fac_b = LabFacility(
+        category="equipment",
+        name="高性能计算集群",
+        spec="8xH100",
+        raw_text="高性能计算集群 8xH100",
+        entity_fingerprint=facility_fp(
+            category="equipment", name="高性能计算集群", spec="8xH100"
+        ),
+    )
+    inc_fac_no_spec_fp = facility_fp(
+        category="equipment", name="高性能计算集群", spec=None
+    )
+    assert (
+        _match_existing_facility(
+            inc_fac_no_spec_fp,
+            {"category": "equipment", "name": "高性能计算集群", "spec": None},
+            [fac_a, fac_b],
+        )
+        is None
+    )
+
+    ach_a = LabAchievement(
+        kind="patent",
+        title="同名发明专利",
+        year=2025,
+        raw_text="同名发明专利 ZL202510000001.1",
+        parse_quality="structured",
+        entity_fingerprint=achievement_fp(
+            kind="patent",
+            title="同名发明专利",
+            year=2025,
+            raw_text="同名发明专利 ZL202510000001.1",
+            parse_quality="structured",
+        ),
+    )
+    ach_b = LabAchievement(
+        kind="patent",
+        title="同名发明专利",
+        year=2025,
+        raw_text="同名发明专利 ZL202510000002.2",
+        parse_quality="structured",
+        entity_fingerprint=achievement_fp(
+            kind="patent",
+            title="同名发明专利",
+            year=2025,
+            raw_text="同名发明专利 ZL202510000002.2",
+            parse_quality="structured",
+        ),
+    )
+    inc_ach_no_reg_fp = achievement_fp(
+        kind="patent",
+        title="同名发明专利",
+        year=2025,
+        raw_text="同名发明专利",
+        parse_quality="structured",
+    )
+    assert (
+        _match_existing_achievement(
+            inc_ach_no_reg_fp,
+            {
+                "kind": "patent",
+                "title": "同名发明专利",
+                "year": 2025,
+                "raw_text": "同名发明专利",
+            },
+            [ach_a, ach_b],
+        )
+        is None
+    )
+
+    # Regression check: _match_existing_person same_name_aff fallback requires incoming_name_counts == 1
+    existing_t2 = LabPerson(
+        name="张伟",
+        affiliation="天津工业大学",
+        email=None,
+        project_role="member",
+        entity_fingerprint=person_fp(
+            tier="T2",
+            login_name=None,
+            name="张伟",
+            affiliation="天津工业大学",
+            email=None,
+        ),
+    )
+    inc_t1_fp = person_fp(
+        tier="T1",
+        login_name="2531100001",
+        name="张伟",
+        affiliation="天津工业大学",
+        email=None,
+    )
+    assert (
+        _match_existing_person(
+            {"name": "张伟", "tier": "T1", "login_name": "2531100001"},
+            "张伟",
+            inc_t1_fp,
+            {"affiliation": "天津工业大学", "email": None},
+            [existing_t2],
+            {"张伟": 2},
         )
         is None
     )
