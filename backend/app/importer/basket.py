@@ -179,19 +179,13 @@ async def fetch_and_format_batch_items(
     include_support_note: bool = True,
 ) -> dict[str, object]:
     """Fetch requested entities in <= 4 SQL queries (never loading signature_data) and format them (Spec v2.2 §6.1)."""
-    if len(raw_items) == 0 or len(raw_items) > MAX_BATCH_ITEMS:
-        raise BasketError(
-            400,
-            "BATCH_LIMIT_EXCEEDED",
-            f"单次批量格式化素材数量须在 1..{MAX_BATCH_ITEMS} 之间",
-        )
-
     uuids_by_kind: dict[str, set[uuid.UUID]] = {
         "person": set(),
         "project": set(),
         "output": set(),
         "facility": set(),
     }
+    seen_keys: set[tuple[str, str]] = set()
     parsed_entries: list[tuple[str, str | None, object, uuid.UUID | None]] = []
 
     for item in raw_items:
@@ -199,9 +193,24 @@ async def fetch_and_format_batch_items(
         canon = _canonical_entity_kind(orig_entity)
         orig_id = item.get("id")
         uid = _try_parse_uuid(orig_id)
+        dedup_key = (
+            (canon, str(uid))
+            if canon is not None and uid is not None
+            else (f"raw:{orig_entity.strip().lower()}", f"raw:{orig_id}")
+        )
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
         if canon is not None and uid is not None:
             uuids_by_kind[canon].add(uid)
         parsed_entries.append((orig_entity, canon, orig_id, uid))
+
+    if len(parsed_entries) == 0 or len(parsed_entries) > MAX_BATCH_ITEMS:
+        raise BasketError(
+            400,
+            "BATCH_LIMIT_EXCEEDED",
+            f"单次批量格式化素材数量须在 1..{MAX_BATCH_ITEMS} 之间",
+        )
 
     # Execute at most 1 batch query per non-empty entity kind (<= 4 queries total, signature_data stays deferred)
     people_map: dict[uuid.UUID, LabPerson] = {}

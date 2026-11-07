@@ -1851,11 +1851,39 @@ async def test_basket_format_zip_and_selected_docx_export(
     assert r_fmt_missing.json()["detail"]["code"] == "NOT_FOUND"
     assert r_fmt_missing.json()["detail"]["missing"] == [{"entity": "project", "id": 99}]
 
-    # Over 200 items -> 400 BATCH_LIMIT_EXCEEDED
+    # Duplicate entries (including entity aliases like person/people and output/achievement) are deduplicated in first-seen order
+    dup_basket_items = [
+        {"entity": "person", "id": p1_id},
+        {"entity": "people", "id": f"  {p1_id.upper()}  "},
+        {"entity": "project", "id": proj_id},
+        {"entity": "projects", "id": proj_id},
+        {"entity": "output", "id": ach_id},
+        {"entity": "achievement", "id": ach_id},
+    ]
+    r_fmt_dedup = await client.post(
+        "/api/v1/lab/format/batch",
+        headers=admin_headers,
+        json={
+            "items": dup_basket_items,
+            "options": {"numbering": "bracket", "group_by_entity": True},
+        },
+    )
+    assert r_fmt_dedup.status_code == 200
+    dedup_data = r_fmt_dedup.json()
+    assert [(it["entity"], it["id"]) for it in dedup_data["items"]] == [
+        ("person", p1_id),
+        ("project", proj_id),
+        ("output", ach_id),
+    ]
+    assert "[2]" not in dedup_data["combined_text"]
+
+    # Over 200 distinct items -> 400 BATCH_LIMIT_EXCEEDED
     r_fmt_over = await client.post(
         "/api/v1/lab/format/batch",
         headers=admin_headers,
-        json={"items": [{"entity": "person", "id": p1_id}] * 201},
+        json={
+            "items": [{"entity": "person", "id": str(uuid.uuid4())} for _ in range(201)]
+        },
     )
     assert r_fmt_over.status_code == 400
     assert r_fmt_over.json()["detail"]["code"] == "BATCH_LIMIT_EXCEEDED"
@@ -1923,7 +1951,11 @@ async def test_basket_format_zip_and_selected_docx_export(
         headers=admin_headers,
         json={
             "title": "课题申报素材汇编",
-            "items": basket_items,
+            "items": [
+                *basket_items,
+                {"entity": "people", "id": p1_id},
+                {"entity": "projects", "id": proj_id},
+            ],
             "options": {
                 "style": "nsfc_standard",
                 "numbering": "bracket",
@@ -1937,6 +1969,8 @@ async def test_basket_format_zip_and_selected_docx_export(
     doc_no = docx.Document(io.BytesIO(r_doc_no_annex.content))
     assert len(doc_no.tables) == 0
     doc_no_text = "\n".join(p.text for p in doc_no.paragraphs)
+    assert "共 4 条素材" in doc_no_text
+    assert "[2]" not in doc_no_text
     for item_obj in fmt_data["items"]:
         assert str(item_obj["text"]) in doc_no_text
 
