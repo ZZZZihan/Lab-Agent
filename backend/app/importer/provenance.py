@@ -955,18 +955,29 @@ def _match_existing_project(
             return p
     grant_no = norm(str(fields.get("grant_no") or ""))
     if grant_no:
-        for p in existing_projects:
-            if p.grant_no and norm(p.grant_no) == grant_no:
-                return p
+        same_grant = [
+            p
+            for p in existing_projects
+            if p.grant_no and norm(p.grant_no) == grant_no
+        ]
+        if len(same_grant) == 1:
+            return same_grant[0]
     ntitle = norm(str(fields.get("title") or ""))[:120]
     nfunder = norm(str(fields.get("funder") or ""))
     if ntitle:
-        for p in existing_projects:
-            ex_grant = norm(p.grant_no or "")
-            if grant_no and ex_grant and grant_no != ex_grant:
-                continue
-            if norm(p.title)[:120] == ntitle and norm(p.funder or "") == nfunder:
-                return p
+        same_title_funder = [
+            p
+            for p in existing_projects
+            if norm(p.title)[:120] == ntitle
+            and norm(p.funder or "") == nfunder
+            and not (
+                grant_no
+                and norm(p.grant_no or "")
+                and grant_no != norm(p.grant_no or "")
+            )
+        ]
+        if len(same_title_funder) == 1:
+            return same_title_funder[0]
         same_title = [
             p
             for p in existing_projects
