@@ -318,10 +318,10 @@ export default function LabAssetsPage() {
 
   function formatBatchLines(lines: string[]): string {
     if (lines.length === 0) return "";
-    if (autoNumber || lines.length > 1) {
+    if (autoNumber) {
       return lines.map((line, idx) => `[${idx + 1}] ${line}`).join("\n");
     }
-    return lines[0];
+    return lines.join("\n");
   }
 
   function collectTabLines(onlySelected: boolean): string[] {

@@ -64,10 +64,10 @@ function buildInitialOverrides(
     const mode: PersonMode =
       p.exclude || p.override_mode === "exclude"
         ? "exclude"
-        : p.override_mode === "existing" || p.override_mode === "new"
-          ? p.override_mode
-          : matchStatus === "existing"
-            ? "existing"
+        : matchStatus === "existing"
+          ? "existing"
+          : p.override_mode === "existing" || p.override_mode === "new"
+            ? p.override_mode
             : "new";
     init[p.key] = {
       mode,
@@ -1028,7 +1028,9 @@ export default function AdminImportsPage() {
                                   }
                                   className="h-7 rounded border border-input bg-background px-2 text-xs"
                                 >
-                                  <option value="new">新建账号 (member)</option>
+                                  {p.match?.status !== "existing" ? (
+                                    <option value="new">新建账号 (member)</option>
+                                  ) : null}
                                   <option value="existing">关联已有用户</option>
                                   <option value="exclude">排除</option>
                                 </select>
