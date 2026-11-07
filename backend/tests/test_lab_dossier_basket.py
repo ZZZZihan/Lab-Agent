@@ -1085,6 +1085,12 @@ async def test_person_dossier_attribution_and_query_budget(
         "郭建民",
         "徐国伟",
     ]
+    assert split_names("Alice Smith and Bob Jones & 张三") == [
+        "alicesmith",
+        "bobjones",
+        "张三",
+    ]
+    assert split_names("Roland, et al.") == ["roland"]
 
     _, admin_headers = await _seed_user_and_token(role="admin", login_name="dos_admin")
     zhang_user, zhang_headers = await _seed_user_and_token(
@@ -1260,6 +1266,8 @@ async def test_person_dossier_attribution_and_query_budget(
     dos = r_dos.json()
     assert dos["can_edit"] is True
     assert dos["person"]["can_edit"] is True
+    assert dos["name_ambiguous"] is False
+    assert dos["person"]["name_ambiguous"] is False
     assert dos["counts"]["projects_total"] == 2
     assert dos["counts"]["projects_as_pi"] == 1
     assert dos["counts"]["projects_as_participant"] == 1
@@ -1269,11 +1277,13 @@ async def test_person_dossier_attribution_and_query_budget(
 
     # Verify ordering: PI project first, then participant project; 张三丰 excluded
     assert [p["relation_role"] for p in dos["projects"]] == ["pi", "participant"]
+    assert all(p["match"] == "exact" for p in dos["projects"])
     assert all("张三丰" not in p["title"] for p in dos["projects"])
 
     # Verify outputs ordering: same year 2025 -> first_author before coauthor; 张三丰 excluded
     assert [o["relation_role"] for o in dos["outputs"]] == ["first_author", "coauthor"]
     assert [o["author_position"] for o in dos["outputs"]] == [1, 3]
+    assert all(o["match"] == "exact" for o in dos["outputs"])
     assert all("张三丰" not in o["title"] for o in dos["outputs"])
 
     # Check can_edit=False for other member, and wildcard injection safety for `王%_测试`
@@ -1369,6 +1379,30 @@ async def test_person_dossier_attribution_and_query_budget(
     assert john_dos["counts"]["outputs_total"] == 1
     assert john_dos["counts"]["outputs_first_author"] == 1
 
+    # Duplicate normalized name ("张 三") triggers name_ambiguous=True and match="ambiguous"
+    async with maker() as session:
+        p_zhang_dup = LabPerson(
+            name="张 三",
+            title="讲师",
+            affiliation="天津工业大学",
+            project_role="member",
+            entity_fingerprint="a5" * 32,
+            as_of_time=date(2026, 4, 26),
+            source_import_id=job.id,
+        )
+        session.add(p_zhang_dup)
+        await session.commit()
+
+    r_ambig_dos = await client.get(
+        f"/api/v1/lab/people/{zhang_id}/dossier", headers=zhang_headers
+    )
+    assert r_ambig_dos.status_code == 200
+    ambig_dos = r_ambig_dos.json()
+    assert ambig_dos["name_ambiguous"] is True
+    assert ambig_dos["person"]["name_ambiguous"] is True
+    assert all(p["match"] == "ambiguous" for p in ambig_dos["projects"])
+    assert all(o["match"] == "ambiguous" for o in ambig_dos["outputs"])
+
 
 # ---------------------------------------------------------------------------
 # 7. Proposal Reuse Basket: Batch Format, Signatures ZIP, Selected .docx (§6 & §8.2)
@@ -1382,7 +1416,8 @@ async def test_basket_format_zip_and_selected_docx_export(
     user, admin_headers = await _seed_user_and_token(role="admin", login_name="basket_admin")
     maker = get_sessionmaker()
 
-    png_bytes = make_png_bytes(80, 35, fill_byte=0x22)
+    # Wide PNG (600x50, 12:1 aspect ratio) to verify proportional width+height bounding (<=1.5in x <=0.45in)
+    png_bytes = make_png_bytes(600, 50, fill_byte=0x22)
     jpg_bytes = make_jpeg_bytes(100, 42, seed=5)
     webp_bytes = make_webp_vp8_bytes(80, 40)
 
@@ -1686,6 +1721,10 @@ async def test_basket_format_zip_and_selected_docx_export(
     assert sig_table.rows[3].cells[3].text == "（WebP 签名请通过签名包导出）"
     assert sig_table.rows[4].cells[3].text == "（未录入）"
     assert sig_table.rows[5].cells[3].text == "（签名数据异常，已跳过）"
-    # Verify p1 (JPEG) and p2 (PNG) embedded <a:blip> in XML
+    # Verify p1 (JPEG) and p2 (PNG) embedded <a:blip> in XML and bounded inline shape dimensions
     blip_elems = [el for el in sig_table._tbl.iter() if el.tag.endswith("}blip")]
     assert len(blip_elems) == 2
+    assert len(doc_annex.inline_shapes) == 2
+    for shape in doc_annex.inline_shapes:
+        assert shape.width <= docx.shared.Inches(1.51)
+        assert shape.height <= docx.shared.Inches(0.46)

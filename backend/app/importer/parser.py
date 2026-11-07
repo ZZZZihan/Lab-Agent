@@ -16,6 +16,7 @@ from app.importer.reader import (
     DocxValidationError,
     extract_body_blocks_and_images,
     extract_table_grid,
+    iter_document_tables,
     normalize_label,
     validate_and_load_docx,
 )
@@ -122,7 +123,7 @@ def parse_proposal_docx(
         max_uncompressed_mb=max_uncompressed_mb,
     )
     sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
-    grids = [extract_table_grid(tbl) for tbl in doc.tables]
+    grids = [extract_table_grid(tbl) for tbl in iter_document_tables(doc)]
 
     pii_dropped = 0
     warnings: list[dict[str, object]] = []

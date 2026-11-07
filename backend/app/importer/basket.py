@@ -626,7 +626,25 @@ async def build_selected_docx(
             try:
                 para = row_cells[3].paragraphs[0]
                 run = para.add_run()
-                run.add_picture(io.BytesIO(sig_bytes), height=Inches(0.45))
+                max_w_in = 1.5
+                max_h_in = 0.45
+                if (
+                    check.width
+                    and check.height
+                    and check.width > 0
+                    and check.height > 0
+                ):
+                    scale = min(
+                        max_w_in / float(check.width),
+                        max_h_in / float(check.height),
+                    )
+                    run.add_picture(
+                        io.BytesIO(sig_bytes),
+                        width=Inches(float(check.width) * scale),
+                        height=Inches(float(check.height) * scale),
+                    )
+                else:
+                    run.add_picture(io.BytesIO(sig_bytes), height=Inches(max_h_in))
                 embedded_total += check.size
             except Exception:
                 row_cells[3].text = "（签名数据异常，已跳过）"

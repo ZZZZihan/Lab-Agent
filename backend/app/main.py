@@ -148,7 +148,14 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origin_list,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Request-Id",
+            "If-Match",
+            "If-None-Match",
+        ],
+        expose_headers=["ETag", "Content-Disposition", "X-Export-Warnings-Count"],
     )
     app.add_middleware(RequestContextMiddleware)
     setup_telemetry(app, settings)

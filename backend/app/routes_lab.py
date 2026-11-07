@@ -2713,7 +2713,7 @@ def _parse_person_uuid(raw_id: str) -> uuid.UUID | None:
 
 
 def _serialize_dossier_project(
-    project: LabProject, relation_role: str
+    project: LabProject, relation_role: str, match_kind: str = "exact"
 ) -> dict[str, object]:
     base = _serialize_project(project, provenance={})
     copy_txt = str(base.get("application_text") or "")
@@ -2722,12 +2722,16 @@ def _serialize_dossier_project(
         "code": project.grant_no,
         "source": project.funder,
         "relation_role": relation_role,
+        "match": match_kind,
         "copy_text": copy_txt,
     }
 
 
 def _serialize_dossier_achievement(
-    ach: LabAchievement, relation_role: str, author_position: int
+    ach: LabAchievement,
+    relation_role: str,
+    author_position: int,
+    match_kind: str = "exact",
 ) -> dict[str, object]:
     base = _serialize_achievement(ach, provenance={})
     copy_txt = str(base.get("application_text") or "")
@@ -2737,6 +2741,7 @@ def _serialize_dossier_achievement(
         "authors": ach.authors_text or ach.first_author,
         "relation_role": relation_role,
         "author_position": author_position,
+        "match": match_kind,
         "copy_text": copy_txt,
     }
 
@@ -2761,6 +2766,21 @@ async def get_person_dossier(
     )
     target_norm = normalize_dossier_name(person.name)
     ilike_pat = build_ilike_pattern(person.name)
+
+    same_name_rows = list(
+        await session.execute(
+            select(LabPerson.id, LabPerson.name).where(
+                LabPerson.name.ilike(ilike_pat, escape="\\")
+            )
+        )
+    )
+    same_name_count = sum(
+        1
+        for _, cand_name in same_name_rows
+        if normalize_dossier_name(cand_name) == target_norm
+    )
+    name_ambiguous = same_name_count >= 2
+    match_kind = "ambiguous" if name_ambiguous else "exact"
 
     proj_stmt = select(LabProject).where(
         or_(
@@ -2791,7 +2811,7 @@ async def get_person_dossier(
     projects_truncated = projects_total > 100
     matched_proj_tuples = matched_proj_tuples[:100]
     serialized_projects = [
-        _serialize_dossier_project(proj, rel_role)
+        _serialize_dossier_project(proj, rel_role, match_kind)
         for proj, rel_role in matched_proj_tuples
     ]
 
@@ -2825,16 +2845,18 @@ async def get_person_dossier(
     outputs_truncated = outputs_total > 200
     matched_ach_tuples = matched_ach_tuples[:200]
     serialized_outputs = [
-        _serialize_dossier_achievement(ach, rel_role, pos)
+        _serialize_dossier_achievement(ach, rel_role, pos, match_kind)
         for ach, rel_role, pos in matched_ach_tuples
     ]
 
     person_payload = _serialize_person(person, provenance={})
     person_payload["can_edit"] = can_edit
+    person_payload["name_ambiguous"] = name_ambiguous
 
     return {
         "person": person_payload,
         "can_edit": can_edit,
+        "name_ambiguous": name_ambiguous,
         "counts": {
             "projects_total": projects_total,
             "projects_as_pi": pi_count,

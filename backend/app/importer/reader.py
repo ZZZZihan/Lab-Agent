@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import docx
+from docx.table import Table
 
 ZIP_MAGIC = b"PK\x03\x04"
 ZERO_WIDTH_RE = re.compile(r"[​-‏﻿]")
@@ -153,9 +154,9 @@ def extract_table_grid(table: Any) -> list[list[str]]:
     return rows
 
 
-def _iter_body_elements(container: ET.Element) -> list[ET.Element]:
+def _iter_body_elements(container: Any) -> list[Any]:
     """Yield top-level `<w:p>` and `<w:tbl>` elements inside `<w:body>`, unwrapping `<w:sdtContent>`."""
-    out: list[ET.Element] = []
+    out: list[Any] = []
     for child in container:
         if child.tag in (f"{{{W_NS}}}p", f"{{{W_NS}}}tbl"):
             out.append(child)
@@ -164,6 +165,15 @@ def _iter_body_elements(container: ET.Element) -> list[ET.Element]:
             if sdt_content is not None:
                 out.extend(_iter_body_elements(sdt_content))
     return out
+
+
+def iter_document_tables(doc: Any) -> list[Any]:
+    """Return `docx.table.Table` objects in the exact `<w:body>` traversal order (including `<w:sdt>`-wrapped tables)."""
+    return [
+        Table(elem, doc._body)
+        for elem in _iter_body_elements(doc.element.body)
+        if elem.tag == f"{{{W_NS}}}tbl"
+    ]
 
 
 def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:

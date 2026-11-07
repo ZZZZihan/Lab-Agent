@@ -15,7 +15,7 @@ TRAILING_MARK_RE = re.compile(r"[\s*#†‡¹²³⁴⁵⁶⁷⁸⁹⁰]+$")
 TRAILING_ROLE_WORD_RE = re.compile(
     r"(?:主持人|负责人|通讯作者|第一作者|共同第一作者|指导教师|导师|主持|参与人|主要参与人|参与|参加)$"
 )
-EXPLICIT_DELIM_RE = re.compile(r"[、，,;；/／\n\r\t]+")
+EXPLICIT_DELIM_RE = re.compile(r"(?:[、，,;；/／&\n\r\t]+|\s+[aA][nN][dD]\s+)")
 PARTICIPANT_CLAUSE_RE = re.compile(
     r"(?:主要参与人|参与人员|参与成员|课题组成员|项目组成员|参与人|参加人|成员)\s*[:：]\s*([^。；;\n]+)"
 )
@@ -27,8 +27,10 @@ NOISE_TOKENS: frozenset[str] = frozenset(
     {
         "等",
         "etal",
+        "etal.",
         "et",
         "al",
+        "al.",
         "课题组",
         "项目组",
         "研究组",
