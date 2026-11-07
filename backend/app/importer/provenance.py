@@ -511,6 +511,8 @@ async def _refresh_and_validate_entity_fingerprint(
             )
         )
         if dup_id is not None:
+            if entity_type == "person" and getattr(entity, "user_id", None) is not None:
+                return
             raise ProvisionError(
                 409,
                 "duplicate_entity",
@@ -870,6 +872,42 @@ def _ach_reg_id(kind: str, raw_text: str) -> str:
     return ""
 
 
+def _assign_people_preserving_explicit_links(
+    ppl_list: list[dict[str, Any]],
+    *,
+    existing_users: list[User],
+    existing_people: list[LabPerson],
+) -> None:
+    saved_matches: list[dict[str, Any] | None] = []
+    for p in ppl_list:
+        if p.get("tier") == "T1" and not p.get("cert"):
+            p["cert"] = p.get("login_name")
+        rm = p.get("match")
+        if (
+            isinstance(rm, dict)
+            and rm.get("status") == "existing"
+            and rm.get("user_id")
+        ):
+            saved_matches.append(dict(rm))
+        else:
+            saved_matches.append(None)
+    assign_people_identities(
+        ppl_list,
+        existing_users=existing_users,
+        existing_people=existing_people,
+    )
+    for p, sm in zip(ppl_list, saved_matches, strict=False):
+        if sm is not None:
+            p["match"] = sm
+            w_list = p.get("warnings")
+            if isinstance(w_list, list):
+                p["warnings"] = [
+                    w
+                    for w in w_list
+                    if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
+                ]
+
+
 def _match_existing_person(
     person_dict: dict[str, Any],
     pname: str,
@@ -880,10 +918,6 @@ def _match_existing_person(
 ) -> LabPerson | None:
     if _has_login_conflict(person_dict):
         return None
-    by_fp = {p.entity_fingerprint: p for p in existing_people}
-    if fp_val in by_fp:
-        return by_fp[fp_val]
-
     raw_match = person_dict.get("match")
     if isinstance(raw_match, dict) and raw_match.get("user_id"):
         try:
@@ -893,6 +927,10 @@ def _match_existing_person(
                     return p
         except ValueError:
             pass
+
+    by_fp = {p.entity_fingerprint: p for p in existing_people}
+    if fp_val in by_fp:
+        return by_fp[fp_val]
 
     p_email = fields.get("email")
     if isinstance(p_email, str) and p_email:
@@ -1209,10 +1247,7 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
             if isinstance(p, dict) and not _is_person_excluded(p)
         ]
         if ppl_list:
-            for p in ppl_list:
-                if p.get("tier") == "T1" and not p.get("cert"):
-                    p["cert"] = p.get("login_name")
-            assign_people_identities(
+            _assign_people_preserving_explicit_links(
                 ppl_list,
                 existing_users=existing_users,
                 existing_people=all_people,
@@ -1570,10 +1605,7 @@ async def build_merge_preview(
         if isinstance(p, dict) and not _is_person_excluded(p)
     ]
     if ppl_list:
-        for p in ppl_list:
-            if p.get("tier") == "T1" and not p.get("cert"):
-                p["cert"] = p.get("login_name")
-        assign_people_identities(
+        _assign_people_preserving_explicit_links(
             ppl_list,
             existing_users=existing_users,
             existing_people=existing_people,
@@ -1962,10 +1994,7 @@ async def execute_merge(
         if isinstance(p, dict) and not _is_person_excluded(p)
     ]
     if ppl_list:
-        for p in ppl_list:
-            if p.get("tier") == "T1" and not p.get("cert"):
-                p["cert"] = p.get("login_name")
-        assign_people_identities(
+        _assign_people_preserving_explicit_links(
             ppl_list,
             existing_users=existing_users,
             existing_people=existing_people,
@@ -2046,6 +2075,24 @@ async def execute_merge(
                         session.add(man_row)
                         f_rows.append(man_row)
                         forced_fields_count += 1
+                        if entity_type == "project" and field == "status":
+                            ss_man_row = FieldProvenance(
+                                entity_type="project",
+                                entity_id=entity.id,
+                                field="status_source",
+                                value="explicit",
+                                source_kind="manual",
+                                source_job_id=job.id,
+                                as_of_time=as_of_date,
+                                recorded_by=actor_id,
+                                superseded=False,
+                            )
+                            session.add(ss_man_row)
+                            by_ef.setdefault(
+                                ("project", entity.id, "status_source"), []
+                            ).append(ss_man_row)
+                            incoming_fields["status_source"] = "explicit"
+                            entity.status_source = "explicit"
                     elif cat == "same_time_conflict" and chosen_act == "keep_current":
                         imp_row.superseded = True
                 elif cat in ("updated", "fill_blank") and chosen_act == "keep_current":
@@ -2513,13 +2560,6 @@ async def revert_import_merge(
                     if not _is_blank(cur_val) and field != "project_role":
                         set_entity_field_from_json(etype, ent, field, None)
                         reverted_fields += 1
-                await _refresh_and_validate_entity_fingerprint(
-                    session,
-                    etype,
-                    ent,
-                    prior_affiliation=prior_affiliation,
-                    prior_email=prior_email,
-                )
             else:
                 await session.delete(ent)
                 deleted_entities += 1
