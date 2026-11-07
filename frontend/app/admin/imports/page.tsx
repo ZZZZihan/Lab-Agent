@@ -201,7 +201,7 @@ export default function AdminImportsPage() {
   }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
 
   function tryCloseWizard() {
-    if (provisioning) return;
+    if (savingPreview || reparsing || provisioning) return;
     if (
       wizardStep === 3 &&
       provisionResult &&
@@ -322,7 +322,7 @@ export default function AdminImportsPage() {
   }
 
   async function handleSavePreview() {
-    if (!importJob) return;
+    if (!importJob || savingPreview || reparsing || provisioning) return;
     setWizardError("");
     setWizardNotice("");
     setSavingPreview(true);
@@ -365,7 +365,7 @@ export default function AdminImportsPage() {
   }
 
   async function handleReparse() {
-    if (!importJob) return;
+    if (!importJob || savingPreview || reparsing || provisioning) return;
     setWizardError("");
     setWizardNotice("");
     setReparsing(true);
@@ -386,7 +386,7 @@ export default function AdminImportsPage() {
   }
 
   async function handleProvision() {
-    if (!importJob) return;
+    if (!importJob || savingPreview || reparsing || provisioning) return;
     if (!provisionAsOf.trim()) {
       setWizardError("请填写本子基准日期 (as_of_time)");
       return;
@@ -940,6 +940,7 @@ export default function AdminImportsPage() {
                     <select
                       aria-label="解析模式"
                       value={reparseMode}
+                      disabled={savingPreview || reparsing || provisioning}
                       onChange={(e) =>
                         setReparseMode(e.target.value as "fsm" | "llm")
                       }
@@ -952,7 +953,7 @@ export default function AdminImportsPage() {
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={reparsing}
+                      disabled={savingPreview || reparsing || provisioning}
                       onClick={handleReparse}
                     >
                       {reparsing ? "正在重新解析…" : "重新解析"}
@@ -961,7 +962,7 @@ export default function AdminImportsPage() {
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={savingPreview}
+                      disabled={savingPreview || reparsing || provisioning}
                       onClick={handleSavePreview}
                     >
                       {savingPreview ? "保存中…" : "保存校对草稿"}
@@ -1135,6 +1136,8 @@ export default function AdminImportsPage() {
                   <Button
                     type="button"
                     disabled={
+                      savingPreview ||
+                      reparsing ||
                       provisioning ||
                       !provisionAsOf.trim() ||
                       previewSummary.unresolvedCount > 0
