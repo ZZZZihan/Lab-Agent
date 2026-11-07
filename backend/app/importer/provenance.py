@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
@@ -786,6 +787,28 @@ def _extract_facility_incoming(
     return name, fp_val, fields
 
 
+def _has_login_conflict(person_dict: dict[str, Any]) -> bool:
+    raw_match = person_dict.get("match")
+    if isinstance(raw_match, dict) and raw_match.get("status") == "conflict":
+        return True
+    warnings = person_dict.get("warnings")
+    if isinstance(warnings, list) and "LOGIN_CONFLICT" in warnings:
+        return True
+    return False
+
+
+def _is_person_excluded(p: dict[str, Any]) -> bool:
+    return bool(p.get("exclude") is True or p.get("override_mode") == "exclude")
+
+
+def _ach_reg_id(kind: str, raw_text: str) -> str:
+    if kind == "patent" and (m := re.search(r"ZL\s?\d{8,13}(?:\.\d)?", raw_text, re.I)):
+        return norm(m.group(0))
+    if kind == "software" and (m := re.search(r"\d{4}SR\d{5,8}", raw_text, re.I)):
+        return norm(m.group(0))
+    return ""
+
+
 def _match_existing_person(
     person_dict: dict[str, Any],
     pname: str,
@@ -794,6 +817,8 @@ def _match_existing_person(
     existing_people: Sequence[LabPerson],
     incoming_name_counts: dict[str, int],
 ) -> LabPerson | None:
+    if _has_login_conflict(person_dict):
+        return None
     by_fp = {p.entity_fingerprint: p for p in existing_people}
     if fp_val in by_fp:
         return by_fp[fp_val]
@@ -879,8 +904,13 @@ def _match_existing_achievement(
             return a
     ntitle = norm(str(fields.get("title") or ""))[:120]
     year_val = fields.get("year")
+    inc_kind = str(fields.get("kind") or "other")
+    inc_reg = _ach_reg_id(inc_kind, str(fields.get("raw_text") or ""))
     if ntitle:
         for a in existing_achievements:
+            ex_reg = _ach_reg_id(str(a.kind or "other"), str(a.raw_text or ""))
+            if inc_reg and ex_reg and inc_reg != ex_reg:
+                continue
             if norm(a.title)[:120] == ntitle and a.year == year_val:
                 return a
     return None
@@ -963,6 +993,7 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
         delete(FieldProvenance).where(
             FieldProvenance.source_kind.in_(("import", "legacy")),
             FieldProvenance.recorded_by.is_(None),
+            FieldProvenance.superseded.is_(False),
         )
     )
     await session.flush()
@@ -1039,7 +1070,7 @@ async def backfill_field_provenance(session: AsyncSession) -> dict[str, object]:
         ppl_list: list[dict[str, Any]] = [
             dict(p)
             for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-            if isinstance(p, dict)
+            if isinstance(p, dict) and not _is_person_excluded(p)
         ]
         if ppl_list:
             for p in ppl_list:
@@ -1253,7 +1284,7 @@ async def build_merge_preview(
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict)
+        if isinstance(p, dict) and not _is_person_excluded(p)
     ]
     if ppl_list:
         for p in ppl_list:
@@ -1575,7 +1606,7 @@ async def execute_merge(
     ppl_list: list[dict[str, Any]] = [
         dict(p)
         for p in (raw_ppl if isinstance(raw_ppl, list) else [])
-        if isinstance(p, dict)
+        if isinstance(p, dict) and not _is_person_excluded(p)
     ]
     if ppl_list:
         for p in ppl_list:
@@ -1687,6 +1718,12 @@ async def execute_merge(
         pname, fp_val, p_fields = _extract_person_incoming(p)
         if not pname:
             continue
+        if _has_login_conflict(p):
+            raise ProvisionError(
+                409,
+                "login_conflict",
+                f"成员 {pname} 存在登录名冲突，请先在预览中解决冲突后再合并",
+            )
         matched_p = _match_existing_person(
             p, pname, fp_val, p_fields, existing_people, inc_name_counts
         )

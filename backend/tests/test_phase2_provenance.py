@@ -753,13 +753,52 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     job_c = await _upload_proposal(
         client, headers, docx_c, "proposal-2027-c.docx", "2027-06-01"
     )
-    # Regression check: patch job_c preview so a project has the same title/funder as AGE240005 but a distinct grant_no AGE999999
+    # Regression check: patch job_c preview so:
+    # 1) a project has the same title/funder as AGE240005 but a distinct grant_no AGE999999
+    # 2) an excluded person (exclude=True) is ignored in merge-preview / merge
+    # 3) two patents with same title/year but distinct patent numbers do not collapse
+    pat1_resp = await client.post(
+        "/api/v1/lab/achievements",
+        headers=headers,
+        json={
+            "kind": "patent",
+            "title": "智能评卷核心发明专利",
+            "year": 2025,
+            "raw_text": "智能评卷核心发明专利，专利号 ZL202510000001.1，2025年。",
+            "parse_quality": "structured",
+        },
+    )
+    assert pat1_resp.status_code == 200, pat1_resp.text
+
     c_projects = list(job_c["preview"]["projects"])
     c_projects[0] = {**c_projects[0], "grant_no": "AGE999999", "fingerprint": ""}
+    c_people = list(job_c["preview"]["people"])
+    c_people.append(
+        {
+            "key": "p99",
+            "name": "已排除测试人员",
+            "tier": "T2",
+            "login_name": "paichurenyuan",
+            "affiliation": "天津天狮学院",
+            "project_role": "member",
+            "exclude": True,
+        }
+    )
+    c_achs = list(job_c["preview"]["achievements"])
+    c_achs.append(
+        {
+            "key": "a99",
+            "kind": "patent",
+            "title": "智能评卷核心发明专利",
+            "year": 2025,
+            "raw_text": "智能评卷核心发明专利，专利号 ZL202510000002.2，2025年。",
+            "parse_quality": "structured",
+        }
+    )
     patch_prev = await client.patch(
         f"/api/v1/admin/imports/{job_c['job_id']}/preview",
         headers=headers,
-        json={"projects": c_projects},
+        json={"projects": c_projects, "people": c_people, "achievements": c_achs},
     )
     assert patch_prev.status_code == 200, patch_prev.text
 
@@ -778,6 +817,13 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
     )
     assert title_change_c["category"] == "updated"
     assert title_change_c["default_action"] == "adopt_incoming"
+    # Excluded person must not appear in added_entities
+    assert not any(e["name"] == "已排除测试人员" for e in mp_c["added_entities"])
+    # Distinct patent number with same title/year must be added, not matched
+    assert any(
+        e["entity_type"] == "achievement" and e["name"] == "智能评卷核心发明专利"
+        for e in mp_c["added_entities"]
+    )
     # Distinct grant_no with same title must be added as a new project, not matched to AGE240005
     assert any(
         e["entity_type"] == "project"
@@ -787,6 +833,32 @@ async def test_phase2_same_time_conflict_resolution(client: AsyncClient) -> None
         c["entity_type"] == "project" and c["field"] == "grant_no"
         for c in mp_c["changes"]
     )
+
+    # Regression check: unresolved LOGIN_CONFLICT person is rejected on execute_merge (409 login_conflict)
+    c_people_conflict = list(c_people)
+    c_people_conflict.append(
+        {
+            "key": "p98",
+            "name": "冲突姓名测试",
+            "tier": "T1",
+            "cert": "2431101262",
+            "login_name": "2431101262",
+            "affiliation": "天津工业大学",
+            "project_role": "member",
+        }
+    )
+    await client.patch(
+        f"/api/v1/admin/imports/{job_c['job_id']}/preview",
+        headers=headers,
+        json={"people": c_people_conflict},
+    )
+    conflict_merge = await client.post(
+        f"/api/v1/admin/imports/{job_c['job_id']}/merge",
+        headers=headers,
+        json={"decisions": []},
+    )
+    assert conflict_merge.status_code == 409
+    assert conflict_merge.json()["error"]["code"] == "login_conflict"
 
 
 async def test_phase2_revert_merge_and_backfill_provenance(
@@ -915,3 +987,27 @@ async def test_phase2_revert_merge_and_backfill_provenance(
             (u.id, u.login_name, u.role) for u in await session.scalars(select(User))
         }
         assert users_after == users_before
+
+    # Regression check: if a backfilled row (recorded_by=None) is superseded, running backfill-provenance must preserve its superseded=True state
+    async with maker() as session:
+        bf_row = await session.scalar(
+            select(FieldProvenance).where(
+                FieldProvenance.entity_type == "person",
+                FieldProvenance.field == "title",
+                FieldProvenance.recorded_by.is_(None),
+                FieldProvenance.superseded.is_(False),
+            )
+        )
+        assert bf_row is not None
+        bf_row_id = bf_row.id
+        bf_row.superseded = True
+        await session.commit()
+
+    bf3 = await client.post(
+        "/api/v1/admin/imports/backfill-provenance", headers=headers
+    )
+    assert bf3.status_code == 200, bf3.text
+    async with maker() as session:
+        preserved_sup = await session.get(FieldProvenance, bf_row_id)
+        assert preserved_sup is not None
+        assert preserved_sup.superseded is True
