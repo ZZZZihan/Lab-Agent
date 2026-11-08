@@ -1117,6 +1117,7 @@ def _parse_word2003_xml_doc(
                 raw_blocks.append(("paragraph", txt, None))
         elif ln == "tbl":
             grid: list[list[str]] = []
+            propagated_chars = 0
             for tr in _iter_wordml_trs(child):
                 row_cells: list[str] = []
                 for tc in tr:
@@ -1144,7 +1145,13 @@ def _parse_word2003_xml_doc(
                                     has_vmerge_cont = True
                                 break
                         if has_vmerge_cont:
-                            cell_text = grid[-1][len(row_cells)]
+                            prev_cell = grid[-1][len(row_cells)]
+                            if (
+                                len(prev_cell) <= 256
+                                and propagated_chars + len(prev_cell) <= 65_536
+                            ):
+                                cell_text = prev_cell
+                                propagated_chars += len(prev_cell)
                     grid_span = 1
                     for sub in tc.iter():
                         if _local(sub.tag).lower() == "gridspan":
@@ -1186,6 +1193,7 @@ class _HtmlDocParser(HTMLParser):
         self._current_para: list[str] = []
         self._skip_depth = 0
         self._pending_spans: dict[int, tuple[int, str]] = {}
+        self._propagated_chars = 0
         self._col_idx = 0
         self._cell_rowspan = 1
         self._cell_colspan = 1
@@ -1215,6 +1223,7 @@ class _HtmlDocParser(HTMLParser):
             if self._in_table == 1:
                 self._current_table = []
                 self._pending_spans.clear()
+                self._propagated_chars = 0
         elif t == "tr" and self._in_table == 1:
             self._current_row = []
             self._col_idx = 0
@@ -1255,9 +1264,19 @@ class _HtmlDocParser(HTMLParser):
                     col_val = cell_text if c_off == 0 else ""
                     self._current_row.append(col_val)
                     if self._cell_rowspan > 1:
+                        rem_rows = self._cell_rowspan - 1
+                        span_cost = len(col_val) * rem_rows
+                        if (
+                            len(col_val) <= 256
+                            and self._propagated_chars + span_cost <= 65_536
+                        ):
+                            span_val = col_val
+                            self._propagated_chars += span_cost
+                        else:
+                            span_val = ""
                         self._pending_spans[self._col_idx] = (
-                            self._cell_rowspan - 1,
-                            col_val,
+                            rem_rows,
+                            span_val,
                         )
                     self._col_idx += 1
                     self._consume_pending_spans()
@@ -1454,6 +1473,56 @@ def _strip_rtf_nonbody_groups(raw: str) -> str:
             if skip_depth > 0:
                 skip_depth += 1
                 i += 1
+                continue
+            m_upr = re.match(r"\{\s*\\upr(?![a-zA-Z]) ?", raw[i : i + 32], re.IGNORECASE)
+            if m_upr is not None:
+                out.append("{")
+                i += m_upr.end()
+                upr_depth = 0
+                while i < n:
+                    uch = raw[i]
+                    if uch == "\\":
+                        if i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
+                            i += 2
+                            continue
+                        m_ubin = re.match(
+                            r"\\bin(-?\d+) ?", raw[i : i + 32], re.IGNORECASE
+                        )
+                        if m_ubin is not None:
+                            i = min(n, i + m_ubin.end() + max(0, int(m_ubin.group(1))))
+                            continue
+                        i += 1
+                        continue
+                    if uch == "{":
+                        if upr_depth == 0:
+                            m_ud_in = re.match(
+                                r"\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?",
+                                raw[i : i + 32],
+                                re.IGNORECASE,
+                            )
+                            if m_ud_in is not None:
+                                out.append("{")
+                                i += m_ud_in.end()
+                                break
+                        upr_depth += 1
+                        i += 1
+                        continue
+                    if uch == "}":
+                        if upr_depth > 0:
+                            upr_depth -= 1
+                            i += 1
+                            continue
+                        out.append("}")
+                        i += 1
+                        break
+                    i += 1
+                continue
+            m_ud = re.match(
+                r"\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?", raw[i : i + 32], re.IGNORECASE
+            )
+            if m_ud is not None:
+                out.append("{")
+                i += m_ud.end()
                 continue
             m_star = re.match(r"\{\s*\\\*\s*\\[a-zA-Z]+", raw[i : i + 40])
             m_dest = re.match(r"\{\s*\\([a-zA-Z]+)(?![a-zA-Z])", raw[i : i + 40])
@@ -2107,6 +2176,8 @@ def extract_table_grid(table: Any) -> list[list[str]]:
     if isinstance(table, list):
         return [[normalize_cell_text(str(cell)) for cell in row] for row in table]
     rows: list[list[str]] = []
+    tc_text_cache: dict[int, str] = {}
+    propagated_chars = 0
     for row in table.rows:
         seen_tc: set[int] = set()
         cells: list[str] = []
@@ -2115,7 +2186,16 @@ def extract_table_grid(table: Any) -> list[list[str]]:
             if tc_id in seen_tc:
                 continue
             seen_tc.add(tc_id)
-            cells.append(normalize_cell_text(cell.text))
+            if tc_id not in tc_text_cache:
+                tc_text_cache[tc_id] = normalize_cell_text(cell.text)
+                cells.append(tc_text_cache[tc_id])
+            else:
+                cached = tc_text_cache[tc_id]
+                if len(cached) <= 256 and propagated_chars + len(cached) <= 65_536:
+                    cells.append(cached)
+                    propagated_chars += len(cached)
+                else:
+                    cells.append("")
         rows.append(cells)
     return rows
 
@@ -2475,8 +2555,8 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
     def _extract_docx_table_text(tbl_elem: Any) -> str:
         tbl_obj = Table(tbl_elem, doc._body)
         row_lines: list[str] = []
+        seen_tc: set[int] = set()
         for row in tbl_obj.rows:
-            seen_tc: set[int] = set()
             cells: list[str] = []
             for cell in row.cells:
                 tc_id = id(cell._tc)

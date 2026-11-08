@@ -273,6 +273,11 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("field_bin.doc", rtf_field_and_bin, max_chars=300_000).text.strip()
         == "Click here After image"
     )
+    rtf_upr_ud = b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par}"
+    assert (
+        extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
+        == "中文"
+    )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
@@ -324,6 +329,19 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         "<w:body><w:p><w:r><w:t>中文GB2312测试</w:t></w:r></w:p></w:body></w:wordDocument>"
     ).encode("gb18030")
     assert "中文GB2312测试" in extract_upload("gb2312.doc", xml_gb2312, max_chars=300_000).text
+    xml_vmerge_large = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
+        "<w:body><w:tbl>"
+        f"<w:tr><w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:t>{'A' * 4096}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>R1</w:t></w:r></w:p></w:tc></w:tr>"
+        + "".join(
+            f"<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>R{k}</w:t></w:r></w:p></w:tc></w:tr>"
+            for k in range(2, 50)
+        )
+        + "</w:tbl></w:body></w:wordDocument>"
+    ).encode()
+    vmerge_extracted = extract_upload("vmerge_large.doc", xml_vmerge_large, max_chars=300_000)
+    assert len(vmerge_extracted.text) < 10_000
 
     # 3d. Binary OLE2 .doc with supplementary character in main story followed by footnote story
     fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "Sub 🚀", "FOOTNOTE"]))
