@@ -308,7 +308,7 @@ export default function DocumentsPage() {
                 <Input
                   id="doc-file"
                   type="file"
-                  accept=".md,.markdown,.txt,.pdf"
+                  accept=".md,.markdown,.txt,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                   onChange={(event) => {
                     setDialogError("");
                     const file = event.target.files?.[0] || null;

@@ -515,6 +515,12 @@ def read_corpus_file(path: Path) -> tuple[dict[str, str], str]:
         raw_text = extract_pdf_text(path)
         meta, body = parse_front_matter(raw_text)
         source_format = "pdf"
+    elif suffix in {".doc", ".docx"}:
+        from app.importer.reader import extract_word_text
+
+        raw_text = extract_word_text(path.name, path.read_bytes())
+        meta, body = parse_front_matter(raw_text)
+        source_format = "markdown" if "## " in body else "text"
     else:
         raise ValueError(f"Unsupported corpus file extension: {path}")
     first_line = next(
@@ -535,7 +541,9 @@ def read_corpus_dir(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
     files = sorted(
         p
         for p in corpus_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+        if p.is_file()
+        and p.suffix.lower()
+        in {".md", ".markdown", ".txt", ".pdf", ".doc", ".docx"}
     )
     return [read_corpus_file(file) for file in files]
 

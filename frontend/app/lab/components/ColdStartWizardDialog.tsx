@@ -77,14 +77,14 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
             <DialogHeader>
               <DialogTitle>
                 {wizardStep === 1
-                  ? "步骤 1 / 3：上传申报书 (.docx) 解析课题组资产"
+                  ? "步骤 1 / 3：上传申报书 (.doc / .docx) 解析课题组资产"
                   : wizardStep === 2
                     ? "步骤 2 / 3：核对解析结果与全组冷启动账号"
                     : "步骤 3 / 3：开号完成 · 复制群发名单"}
               </DialogTitle>
               <DialogDescription>
                 {wizardStep === 1
-                  ? "上传既往项目申报书（仅支持 .docx）。系统会自动剥离全部身份证号与手机号，提取成员、电子签名、项目、成果与设备。"
+                  ? "上传既往项目申报书（支持 .doc / .docx）。系统会自动剥离全部身份证号与手机号，提取成员、电子签名、项目、成果与设备。"
                   : wizardStep === 2
                     ? "核对三级登录标识（T1 学工号 / T2 姓名全拼 / T3 姓名全拼+邮箱）与提取到的电子签名。所有新建账号角色固定为普通成员 (member)。"
                     : "全组账号与课题组资料库已落盘，并已同步写入 RAG 知识库。"}
@@ -104,12 +104,12 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                     htmlFor="proposal-docx"
                     className="text-[12px] font-medium text-muted-foreground"
                   >
-                    申报书文件 (.docx，上限 20 MB)
+                    申报书文件 (.doc / .docx，上限 20 MB)
                   </Label>
                   <Input
                     id="proposal-docx"
                     type="file"
-                    accept=".docx"
+                    accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     onChange={(e) =>
                       handleFileChange(e.target.files?.[0] || null)
                     }

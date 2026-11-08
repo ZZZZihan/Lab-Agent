@@ -1,4 +1,4 @@
-"""Extract plain text from uploaded Markdown, TXT, or PDF files."""
+"""Extract plain text from uploaded Markdown, TXT, PDF, DOC, or DOCX files."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pypdf import PdfReader
+
+from app.importer.reader import DocxValidationError, extract_word_text
 
 
 class UploadRejected(Exception):
@@ -74,8 +76,15 @@ def extract_upload(filename: str, payload: bytes, max_chars: int) -> Extracted:
     elif suffix == ".pdf":
         source_format = "pdf"
         text = _extract_pdf(payload)
+    elif suffix in {".doc", ".docx"}:
+        try:
+            text = extract_word_text(filename or f"upload{suffix}", payload)
+        except DocxValidationError as exc:
+            code = "unsupported_type" if exc.status == 415 else "doc_invalid"
+            raise UploadRejected(exc.status, code, exc.message) from exc
+        source_format = detect_pasted_format(text)
     else:
-        raise UploadRejected(415, "unsupported_type", "只支持 .md / .txt / .pdf")
+        raise UploadRejected(415, "unsupported_type", "只支持 .md / .txt / .pdf / .doc / .docx")
 
     if len(text) > max_chars:
         raise UploadRejected(413, "document_too_long", f"文档字符数超过上限（{max_chars}）。")

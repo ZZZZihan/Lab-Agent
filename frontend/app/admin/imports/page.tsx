@@ -397,8 +397,8 @@ export default function AdminImportsPage() {
       return;
     }
     const lower = file.name.toLowerCase();
-    if (!lower.endsWith(".docx") || lower.endsWith(".docm") || lower.endsWith(".doc")) {
-      setWizardError("仅支持上传 .docx 格式的申报书文件（不支持 .doc 或 .docm）");
+    if ((!lower.endsWith(".docx") && !lower.endsWith(".doc")) || lower.endsWith(".docm")) {
+      setWizardError("仅支持上传 .doc 或 .docx 格式的申报书文件（不支持含宏的 .docm）");
       setUploadFile(null);
       return;
     }
@@ -413,12 +413,12 @@ export default function AdminImportsPage() {
   async function handleParseUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!uploadFile) {
-      setWizardError("请先选择一个 .docx 申报书文件");
+      setWizardError("请先选择一个 .doc 或 .docx 申报书文件");
       return;
     }
     const lower = uploadFile.name.toLowerCase();
-    if (!lower.endsWith(".docx")) {
-      setWizardError("仅支持上传 .docx 格式的申报书文件");
+    if (!lower.endsWith(".docx") && !lower.endsWith(".doc")) {
+      setWizardError("仅支持上传 .doc 或 .docx 格式的申报书文件");
       return;
     }
     if (uploadFile.size > MAX_UPLOAD_BYTES) {
@@ -1645,14 +1645,14 @@ export default function AdminImportsPage() {
             <DialogHeader>
               <DialogTitle>
                 {wizardStep === 1
-                  ? "步骤 1 / 3：上传申报书 (.docx) 解析课题组资产"
+                  ? "步骤 1 / 3：上传申报书 (.doc / .docx) 解析课题组资产"
                   : wizardStep === 2
                     ? `步骤 2 / 3：预览与校对开号 — ${importJob?.original_filename || ""}`
                     : "步骤 3 / 3：开号完成 · 复制群发名单"}
               </DialogTitle>
               <DialogDescription>
                 {wizardStep === 1
-                  ? "上传项目申报书（仅支持 .docx，文件上限 20 MB）。身份证号与手机号将在内存中物理剥离，零入库。"
+                  ? "上传项目申报书（支持 .doc / .docx，文件上限 20 MB）。身份证号与手机号将在内存中物理剥离，零入库。"
                   : wizardStep === 2
                     ? "核对基准时间、人员登录名与处理方式，确认无误后一键开通全组账号并同步入库。"
                     : "全组账号与课题组资料库已落盘，并已同步写入 RAG 知识库。"}
@@ -1675,12 +1675,12 @@ export default function AdminImportsPage() {
               <form onSubmit={handleParseUpload} className="grid gap-4">
                 <div className="space-y-1.5">
                   <Label htmlFor="admin-proposal-docx">
-                    申报书文件 (.docx，上限 20 MB)
+                    申报书文件 (.doc / .docx，上限 20 MB)
                   </Label>
                   <Input
                     id="admin-proposal-docx"
                     type="file"
-                    accept=".docx"
+                    accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
                     required
                   />

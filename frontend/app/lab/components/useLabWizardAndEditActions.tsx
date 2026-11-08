@@ -135,12 +135,11 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     }
     const lower = file.name.toLowerCase();
     if (
-      !lower.endsWith(".docx") ||
-      lower.endsWith(".docm") ||
-      lower.endsWith(".doc")
+      (!lower.endsWith(".docx") && !lower.endsWith(".doc")) ||
+      lower.endsWith(".docm")
     ) {
       setWizardError(
-        "仅支持上传 .docx 格式的申报书文件（不支持 .doc 或 .docm）",
+        "仅支持上传 .doc 或 .docx 格式的申报书文件（不支持含宏的 .docm）",
       );
       setUploadFile(null);
       return;
@@ -156,11 +155,12 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
   async function handleParseUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!uploadFile) {
-      setWizardError("请先选择一个 .docx 申报书文件");
+      setWizardError("请先选择一个 .doc 或 .docx 申报书文件");
       return;
     }
-    if (!uploadFile.name.toLowerCase().endsWith(".docx")) {
-      setWizardError("仅支持上传 .docx 格式的申报书文件");
+    const lowerName = uploadFile.name.toLowerCase();
+    if (!lowerName.endsWith(".docx") && !lowerName.endsWith(".doc")) {
+      setWizardError("仅支持上传 .doc 或 .docx 格式的申报书文件");
       return;
     }
     if (uploadFile.size > MAX_UPLOAD_BYTES) {

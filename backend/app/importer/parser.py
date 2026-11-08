@@ -31,8 +31,8 @@ CN_NAME_RE = re.compile(r"^[一-龥·]{2,10}$")
 SKIP_ROW_KEYWORDS = ("合计", "签字", "盖章", "以下空白", "申请资助经费", "预计完成时间")
 
 ANCHOR_RE = re.compile(
-    r"(?:^|\n)\s*([1-4])\s*[．.、]\s*[\[［【]\s*"
-    r"(学术简历|前期成果|承担项目|与已承担项目(?:或博士论文)?的关系)\s*[\]］】]",
+    r"(?:^|\n)\s*(?:([1-4])\s*[．.、]\s*)?[\[［【]\s*"
+    r"(学术简历|前期成果|承担项目|与(?:已承担|本)项目(?:或博士论文)?的?关系)\s*[\]］】]",
 )
 
 ITEM_SPLIT_RE = re.compile(
@@ -759,35 +759,66 @@ def _extract_t4_foundation(
 ]:
     pii_total = 0
     warnings: list[dict[str, object]] = []
-    t4_text = ""
+    foundation_markers = (
+        "[学术简历]",
+        "[前期成果]",
+        "[承担项目]",
+        "[与本项目关系]",
+        "［学术简历］",
+        "［前期成果］",
+        "［承担项目］",
+        "［与本项目关系］",
+    )
+
+    def _parse_foundation_sections(cand: str) -> dict[str, str]:
+        sec_map: dict[str, str] = {}
+        matches = list(ANCHOR_RE.finditer(cand))
+        for idx, match in enumerate(matches):
+            sec_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(cand)
+            raw_title = match.group(2)
+            body = cand[match.end() : sec_end].strip()
+            if "学术简历" in raw_title:
+                sec_map["resume"] = body
+            elif "前期成果" in raw_title:
+                sec_map["achievements"] = body
+            elif "承担项目" == raw_title:
+                sec_map["projects"] = body
+            elif "关系" in raw_title:
+                sec_map["relationship"] = body
+        return sec_map
+
+    candidates: list[tuple[str, int]] = []
     for grid in grids:
+        grid_cells: list[str] = []
         for row in grid:
             for cell in row:
-                if any(k in cell for k in ("[学术简历]", "[前期成果]", "[承担项目]", "［学术简历］")):
-                    t4_text = cell
-                    break
-            if t4_text:
-                break
-        if t4_text:
-            break
+                if cell:
+                    has_marker = any(k in cell for k in foundation_markers)
+                    if has_marker or not any(
+                        kw in cell for kw in (*SKIP_ROW_KEYWORDS, "填写说明", "填表说明")
+                    ):
+                        grid_cells.append(cell)
+                    if has_marker:
+                        candidates.append((cell, 1))
+        if len(grid_cells) > 1 and any(
+            any(k in c for k in foundation_markers) for c in grid_cells
+        ):
+            candidates.append(("\n".join(grid_cells), 0))
 
-    if not t4_text:
+    if not candidates:
         return None, [], [], None, 0, [{"code": "SECTION_NOT_FOUND", "section": "foundation"}]
 
     sections: dict[str, str] = {}
-    matches = list(ANCHOR_RE.finditer(t4_text))
-    for idx, match in enumerate(matches):
-        sec_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(t4_text)
-        raw_title = match.group(2)
-        body = t4_text[match.end() : sec_end].strip()
-        if "学术简历" in raw_title:
-            sections["resume"] = body
-        elif "前期成果" in raw_title:
-            sections["achievements"] = body
-        elif "承担项目" == raw_title:
-            sections["projects"] = body
-        elif "关系" in raw_title:
-            sections["relationship"] = body
+    best_score: tuple[int, int, int, int] = (-1, -1, -1, -1)
+    for cand, is_single_cell in candidates:
+        sec_map = _parse_foundation_sections(cand)
+        non_empty_cnt = sum(1 for v in sec_map.values() if v.strip())
+        anchor_cnt = len(sec_map)
+        body_chars = sum(len(v.strip()) for v in sec_map.values())
+        score = (non_empty_cnt, anchor_cnt, is_single_cell, body_chars)
+        if score > best_score:
+            best_score = score
+            sections = sec_map
 
     bio: str | None = None
     if "resume" in sections and sections["resume"]:
