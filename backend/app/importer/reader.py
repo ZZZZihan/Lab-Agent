@@ -1752,9 +1752,11 @@ def _tokenize_rtf_body(
                 continue
             nxt = s[i + 1]
             if nxt in ("\\", "{", "}"):
-                _flush_bytes()
                 if not hidden:
-                    out.append(nxt)
+                    if byte_buf:
+                        byte_buf.append(ord(nxt))
+                    else:
+                        out.append(nxt)
                 i += 2
                 continue
             if nxt in ("\r", "\n"):
@@ -1925,11 +1927,23 @@ def _tokenize_rtf_body(
             i += 1
             continue
 
+        if byte_buf and _current_enc() in (
+            "gb18030",
+            "cp932",
+            "cp949",
+            "cp950",
+            "johab",
+        ):
+            if not hidden:
+                byte_buf.append(code_pt)
+            i += 1
+            continue
+
         if (
             byte_buf
             and len(byte_buf) % 2 == 1
             and 0x81 <= byte_buf[-1] <= 0xFE
-            and _current_enc() in (None, "gb18030")
+            and _current_enc() is None
             and 0x30 <= code_pt <= 0x39
         ):
             if (

@@ -320,6 +320,13 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
         == "中文\n\nImportant text\n\nA—B‐C\n\nVisible StillVisible EndVisible ResetVisible"
     )
+    rtf_cp932_escaped_trail = (
+        b"{\\rtf1\\ansi\\ansicpg932 \\pard \x95\\\\ and \\'95\\\\ and \\'95\\'5c\\par}"
+    )
+    assert (
+        extract_upload("cp932.doc", rtf_cp932_escaped_trail, max_chars=300_000).text.strip()
+        == "表 and 表 and 表"
+    )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
