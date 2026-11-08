@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import codecs
 import hashlib
 import io
@@ -828,18 +829,32 @@ def _parse_msdoc_ole2(
         )
 
     main_text = "".join(p[4] for p in pieces)
+    piece_starts = [p[0] for p in pieces]
+    supp_cursor = [-1, 0, 0]
 
     def _cp_to_fc_end(py_idx: int) -> int:
-        for py_s, py_e, fc_b, width, txt_slice, has_supp in pieces:
+        p_idx = bisect.bisect_right(piece_starts, py_idx) - 1
+        if 0 <= p_idx < len(pieces):
+            py_s, py_e, fc_b, width, txt_slice, has_supp = pieces[p_idx]
             if py_s <= py_idx < py_e:
                 rel = py_idx - py_s + 1
                 if width == 1:
                     return fc_b + rel
                 if not has_supp:
                     return fc_b + rel * 2
-                u16_len = len(
-                    txt_slice[:rel].encode("utf-16-le", errors="surrogatepass")
-                )
+                if supp_cursor[0] == p_idx and rel >= supp_cursor[1]:
+                    u16_len = supp_cursor[2] + len(
+                        txt_slice[supp_cursor[1] : rel].encode(
+                            "utf-16-le", errors="surrogatepass"
+                        )
+                    )
+                else:
+                    u16_len = len(
+                        txt_slice[:rel].encode("utf-16-le", errors="surrogatepass")
+                    )
+                supp_cursor[0] = p_idx
+                supp_cursor[1] = rel
+                supp_cursor[2] = u16_len
                 return fc_b + u16_len
         return -1
 
@@ -1081,7 +1096,25 @@ def _parse_word2003_xml_doc(
                         for p in tc.iter()
                         if _local(p.tag) == "p"
                     ]
-                    row_cells.append("\n".join(cp for cp in cell_ps if cp))
+                    cell_text = "\n".join(cp for cp in cell_ps if cp)
+                    if not cell_text and grid and len(row_cells) < len(grid[-1]):
+                        has_vmerge_cont = False
+                        for sub in tc.iter():
+                            if _local(sub.tag).lower() == "vmerge":
+                                val = next(
+                                    (
+                                        v
+                                        for k, v in sub.attrib.items()
+                                        if _local(k).lower() == "val"
+                                    ),
+                                    "continue",
+                                )
+                                if val.lower() != "restart":
+                                    has_vmerge_cont = True
+                                break
+                        if has_vmerge_cont:
+                            cell_text = grid[-1][len(row_cells)]
+                    row_cells.append(cell_text)
                 if row_cells:
                     grid.append(row_cells)
             if grid:
@@ -1103,9 +1136,20 @@ class _HtmlDocParser(HTMLParser):
         self._current_cell: list[str] | None = None
         self._current_para: list[str] = []
         self._skip_depth = 0
+        self._pending_spans: dict[int, tuple[int, str, int]] = {}
+        self._col_idx = 0
+        self._cell_rowspan = 1
+        self._cell_colspan = 1
+
+    def _consume_pending_spans(self) -> None:
+        while self._current_row is not None and self._col_idx in self._pending_spans:
+            rem, span_text, span_cs = self._pending_spans.pop(self._col_idx)
+            self._current_row.append(span_text)
+            if rem > 1:
+                self._pending_spans[self._col_idx] = (rem - 1, span_text, span_cs)
+            self._col_idx += span_cs
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
         t = tag.lower()
         if t in ("script", "style", "head"):
             self._skip_depth += 1
@@ -1121,10 +1165,23 @@ class _HtmlDocParser(HTMLParser):
             self._in_table += 1
             if self._in_table == 1:
                 self._current_table = []
+                self._pending_spans.clear()
         elif t == "tr" and self._in_table == 1:
             self._current_row = []
+            self._col_idx = 0
         elif t in ("td", "th") and self._in_table == 1:
             self._current_cell = []
+            attr_map = {k.lower(): (v or "").strip() for k, v in attrs if k}
+            try:
+                rs = int(attr_map.get("rowspan", "1") or "1")
+            except ValueError:
+                rs = 1
+            try:
+                cs = int(attr_map.get("colspan", "1") or "1")
+            except ValueError:
+                cs = 1
+            self._cell_rowspan = max(1, min(rs, 256))
+            self._cell_colspan = max(1, min(cs, 64))
         elif t == "br":
             if self._current_cell is not None:
                 self._current_cell.append("\n")
@@ -1143,18 +1200,36 @@ class _HtmlDocParser(HTMLParser):
             return
         if t in ("td", "th") and self._in_table == 1:
             if self._current_row is not None and self._current_cell is not None:
-                self._current_row.append(normalize_cell_text("".join(self._current_cell)))
+                self._consume_pending_spans()
+                cell_text = normalize_cell_text("".join(self._current_cell))
+                self._current_row.append(cell_text)
+                if self._cell_rowspan > 1:
+                    self._pending_spans[self._col_idx] = (
+                        self._cell_rowspan - 1,
+                        cell_text,
+                        self._cell_colspan,
+                    )
+                self._col_idx += self._cell_colspan
             self._current_cell = None
         elif t == "tr" and self._in_table == 1:
+            if self._current_row is not None:
+                self._consume_pending_spans()
+                for col_k in sorted(k for k in self._pending_spans if k >= self._col_idx):
+                    rem, span_text, span_cs = self._pending_spans.pop(col_k)
+                    self._current_row.append(span_text)
+                    if rem > 1:
+                        self._pending_spans[col_k] = (rem - 1, span_text, span_cs)
             if self._current_row:
                 self._current_table.append(self._current_row)
             self._current_row = None
         elif t == "table" and self._in_table > 0:
-            if self._in_table == 1 and self._current_table:
-                t_idx = len(self.tables)
-                self.tables.append(self._current_table)
-                self.raw_blocks.append(("table", "", t_idx))
-                self._current_table = []
+            if self._in_table == 1:
+                self._pending_spans.clear()
+                if self._current_table:
+                    t_idx = len(self.tables)
+                    self.tables.append(self._current_table)
+                    self.raw_blocks.append(("table", "", t_idx))
+                    self._current_table = []
             self._in_table -= 1
         elif t in ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6") and self._in_table == 0:
             txt = normalize_cell_text("".join(self._current_para))
@@ -1334,6 +1409,26 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
     return None
 
 
+_RTF_CHAR_CONTROL_WORDS: dict[str, str] = {
+    "emdash": "—",
+    "endash": "–",
+    "emspace": " ",
+    "enspace": " ",
+    "qmspace": " ",
+    "bullet": "•",
+    "lquote": "‘",
+    "rquote": "’",
+    "ldblquote": "“",
+    "rdblquote": "”",
+    "zwj": "‍",
+    "zwnj": "‌",
+    "ltrmark": "‎",
+    "rtlmark": "‏",
+    "zwbo": "​",
+    "zwnbo": "﻿",
+}
+
+
 def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
     """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, and codepage bytes."""
     out: list[str] = []
@@ -1486,6 +1581,8 @@ def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
                     out.append("\n")
                 elif word == "tab":
                     out.append("\t")
+                elif word in _RTF_CHAR_CONTROL_WORDS:
+                    out.append(_RTF_CHAR_CONTROL_WORDS[word])
                 continue
 
             _flush_bytes()

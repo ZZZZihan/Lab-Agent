@@ -156,7 +156,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     import struct
 
     import docx
-    from app.importer.parser import _extract_t4_foundation
+    from app.importer.parser import _extract_people, _extract_t4_foundation
     from app.importer.reader import (
         DocxValidationError,
         build_ole2_doc_bytes,
@@ -224,15 +224,23 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert "café café? A={x}; path=\\folder" in rtf_uploaded.text
     assert "Alice | alice@example.com" in rtf_uploaded.text
 
-    # 3a. RTF with literal non-ASCII Windows-1251 bytes under \ansicpg1251
+    # 3a. RTF with literal non-ASCII Windows-1251 bytes under \ansicpg1251 and special char control words
     rtf_cp1251 = (
         b"{\\rtf1\\ansi\\ansicpg1251 \\pard "
         + "Привет мир".encode("cp1251")
         + b"\\par}"
     )
     assert extract_upload("ru.doc", rtf_cp1251, max_chars=300_000).text.strip() == "Привет мир"
+    rtf_special_cw = (
+        b"{\\rtf1\\ansi\\ansicpg1252 \\pard "
+        b"\\bullet Item 1: 2020\\endash 2024\\emdash \\ldblquote Quoted\\rdblquote and \\lquote Single\\rquote\\par}"
+    )
+    assert (
+        extract_upload("cw.doc", rtf_special_cw, max_chars=300_000).text.strip()
+        == "•Item 1: 2020–2024—“Quoted”and ‘Single’"
+    )
 
-    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, and UTF-16 BOM, plus GB2312 Word 2003 XML
+    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
         '<html><head><meta charset="windows-1252"></head>'
         "<body><p>café résumé</p></body></html>"
@@ -242,6 +250,27 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     for bom_enc in ("utf-8-sig", "utf-16"):
         bom_html = "<html><body><p>Test text</p></body></html>".encode(bom_enc)
         assert "Test text" in extract_upload("bom.doc", bom_html, max_chars=300_000).text
+    html_rowspan_doc = (
+        "<html><body><table>"
+        "<tr><th>姓名</th><th>职称</th><th>工作单位</th><th>邮箱</th></tr>"
+        '<tr><td>张三</td><td>教授</td><td rowspan="2">天津工业大学</td><td>zhang@example.com</td></tr>'
+        "<tr><td>李四</td><td>讲师</td><td>li@example.com</td></tr>"
+        "</table></body></html>"
+    ).encode()
+    parsed_rowspan = validate_and_load_docx("roster.doc", html_rowspan_doc)
+    rowspan_grids = [extract_table_grid(t) for t in iter_document_tables(parsed_rowspan)]
+    assert rowspan_grids == [
+        [
+            ["姓名", "职称", "工作单位", "邮箱"],
+            ["张三", "教授", "天津工业大学", "zhang@example.com"],
+            ["李四", "讲师", "天津工业大学", "li@example.com"],
+        ]
+    ]
+    roster_people, _ = _extract_people(rowspan_grids)
+    assert [(p["name"], p["title"], p["affiliation"], p["email"]) for p in roster_people] == [
+        ("张三", "教授", "天津工业大学", "zhang@example.com"),
+        ("李四", "讲师", "天津工业大学", "li@example.com"),
+    ]
     xml_gb2312 = (
         '<?xml version="1.0" encoding="gb2312"?>'
         '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
@@ -250,13 +279,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert "中文GB2312测试" in extract_upload("gb2312.doc", xml_gb2312, max_chars=300_000).text
 
     # 3d. Binary OLE2 .doc with supplementary character in main story followed by footnote story
-    fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "FOOTNOTE"]))
-    # Declare ccpText = 8 UTF-16 code units ("Main 😀\r" = 5 + 2 + 1 = 8) in FIB rgLw[3] (offset 512 + 0x4C)
-    struct.pack_into("<I", fn_ole2, 512 + 0x4C, 8)
+    fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "Sub 🚀", "FOOTNOTE"]))
+    # Declare ccpText = 15 UTF-16 code units ("Main 😀\rSub 🚀\r" = 8 + 7 = 15) in FIB rgLw[3] (offset 512 + 0x4C)
+    struct.pack_into("<I", fn_ole2, 512 + 0x4C, 15)
     fn_extracted = extract_upload("footnote.doc", bytes(fn_ole2), max_chars=300_000)
-    assert fn_extracted.text.strip() == "Main 😀"
+    assert fn_extracted.text.strip() == "Main 😀\n\nSub 🚀"
     assert "FOOTNOTE" not in fn_extracted.text
-    assert "F" not in fn_extracted.text.replace("Main", "")
 
     # 3c. OLE2 .doc with an embedded ObjectPool child storage containing a nested WordDocument stream
     embedded_ole2 = bytearray(ole2_bytes)
