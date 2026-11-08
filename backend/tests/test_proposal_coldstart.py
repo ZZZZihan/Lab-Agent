@@ -346,6 +346,31 @@ async def test_malicious_or_invalid_docx_rejected(client: AsyncClient) -> None:
     assert r_xxe.status_code == 415
     assert r_xxe.json()["error"]["code"] == "import_unsupported_format"
 
+    # 5. Valid binary OLE2 .doc proposal upload succeeds
+    from app.importer.reader import (
+        build_ole2_doc_bytes,
+        extract_table_grid,
+        iter_document_tables,
+        validate_and_load_docx,
+    )
+
+    synth_docx_bytes = build_synthetic_proposal_docx()
+    docx_obj = validate_and_load_docx("proposal.docx", synth_docx_bytes)
+    docx_grids = [extract_table_grid(t) for t in iter_document_tables(docx_obj)]
+    ole2_proposal_bytes = build_ole2_doc_bytes(tables=docx_grids)
+    r_valid_doc = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={"file": ("proposal-legacy.doc", ole2_proposal_bytes, "application/msword")},
+        headers=headers,
+    )
+    assert r_valid_doc.status_code == 200, r_valid_doc.text
+    doc_payload = r_valid_doc.json()
+    assert doc_payload["stats"]["people_parsed"] == 10
+    assert doc_payload["stats"]["projects_parsed"] == 6
+    assert doc_payload["stats"]["achievements_parsed"] == 5
+    assert doc_payload["stats"]["facilities_parsed"] == 1
+    assert doc_payload["stats"]["pii_dropped"] >= 9
+
 
 async def test_provision_hardcodes_member_role_and_preserves_existing_admin(
     client: AsyncClient,

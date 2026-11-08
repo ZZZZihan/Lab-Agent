@@ -190,7 +190,9 @@ def chunk_pdf(text: str, max_chars: int = 800, overlap: int = 80) -> list[DraftC
 def chunk_document(text: str, source_format: str = "markdown") -> list[DraftChunk]:
     if source_format == "markdown":
         return chunk_markdown(text)
-    if source_format == "text":
+    if source_format in {"text", "doc", "docx"}:
+        if any(line.startswith("## ") for line in text.splitlines()):
+            return chunk_markdown(text)
         return chunk_plain(text)
     if source_format == "pdf":
         return chunk_pdf(text)

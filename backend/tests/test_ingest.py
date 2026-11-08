@@ -152,6 +152,39 @@ def test_gb18030_text_decoded_and_unsupported_rejected() -> None:
     assert exc_bad.value.code == "bad_encoding"
 
 
+def test_doc_and_docx_upload_extraction() -> None:
+    import docx
+    from app.importer.reader import build_ole2_doc_bytes
+
+    # 1. Binary OLE2 .doc extraction
+    ole2_bytes = build_ole2_doc_bytes(
+        paragraphs=["## 实验室管理制度", "第一条：所有实验人员进入超净间必须佩戴防静电手环。"],
+        tables=[[["设备名称", "负责人"], ["飞秒激光器", "沈昭"]]],
+    )
+    extracted_doc = extract_upload("handbook.doc", ole2_bytes, max_chars=300_000)
+    assert extracted_doc.source_format == "markdown"
+    assert "实验室管理制度" in extracted_doc.text
+    assert "飞秒激光器 | 沈昭" in extracted_doc.text
+    chunks = chunk_document(extracted_doc.text, extracted_doc.source_format)
+    assert any(c.heading == "实验室管理制度" for c in chunks)
+
+    # 2. .docx extraction
+    d = docx.Document()
+    d.add_heading("设备巡检规程", level=2)
+    d.add_paragraph("每日上午九点检查液氮罐液位。")
+    tbl = d.add_table(rows=2, cols=2)
+    tbl.rows[0].cells[0].text = "项目"
+    tbl.rows[0].cells[1].text = "阈值"
+    tbl.rows[1].cells[0].text = "液位"
+    tbl.rows[1].cells[1].text = "80%"
+    buf = io.BytesIO()
+    d.save(buf)
+    extracted_docx = extract_upload("sop.docx", buf.getvalue(), max_chars=300_000)
+    assert extracted_docx.source_format == "markdown"
+    assert "每日上午九点检查液氮罐液位" in extracted_docx.text
+    assert "液位 | 80%" in extracted_docx.text
+
+
 async def test_worker_processes_pending_and_retries_to_failed() -> None:
     user = await _make_user()
     settings = get_settings()
