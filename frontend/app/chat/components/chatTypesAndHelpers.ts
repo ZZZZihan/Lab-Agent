@@ -282,7 +282,9 @@ export function extractMatchedPeopleForTurn(
   if (
     turn.refused ||
     turn.pending ||
+    Boolean(turn.error) ||
     !turn.answer.trim() ||
+    turn.citations.length === 0 ||
     labPeople.length === 0
   ) {
     return [];
@@ -330,9 +332,22 @@ export function extractMatchedPeopleForTurn(
     copy_text: p.copy_text,
   }));
 
-  // 1. Check people explicitly named in the verified answer first
+  const isAffirmedInAnswer = (name: string): boolean => {
+    if (!name || !turn.answer.includes(name)) return false;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const negatedRe = new RegExp(
+      `(?:未提及|没有提及|未包含|不含|不包括|未找到|没有找到|并非|不是)\\s*${escaped}`,
+    );
+    const cleaned = turn.answer.replace(negatedRe, "");
+    return cleaned.includes(name);
+  };
+
+  // 1. Check people affirmed in the answer AND backed by the turn's citations
   const matchedInAnswer = sourcePool.filter(
-    (p) => p.name && turn.answer.includes(p.name),
+    (p) =>
+      p.name &&
+      citationCorpus.includes(p.name) &&
+      isAffirmedInAnswer(p.name),
   );
 
   if (matchedInAnswer.length > 0) {
@@ -363,10 +378,130 @@ export function extractMatchedPeopleForTurn(
   return [];
 }
 
+const NEGATED_OR_NON_STANDARD_CLAUSE_RE =
+  /不是|并非|而非|不等于|不触发|未触发|不会触发|不执行|无需|不需要|不必|仅报警|只报警|原为|曾为|旧规程|修订前|测试模式|调试模式|旁路/;
+
+function extractUnambiguousSopRows(text: string): SpecTableRow[] {
+  const sentences = text
+    .split(/[。；;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const magnetLimits = new Set<string>();
+  const magnetRatedFallbacks = new Set<string>();
+  const heliumInterlocks = new Map<string, string>();
+  const calibrationDays = new Set<string>();
+
+  for (const sentence of sentences) {
+    const clauses = sentence
+      .split(/[，,]+/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+
+    const hasMagnetSubject = /主磁体|超导磁体|额定(?:工作)?电流/.test(sentence);
+    const hasHeliumSubject = /液氦/.test(sentence);
+    const hasCalibrationSubject = /阻抗校准/.test(sentence);
+
+    for (let i = 0; i < clauses.length; i += 1) {
+      const clause = clauses[i];
+      if (NEGATED_OR_NON_STANDARD_CLAUSE_RE.test(clause)) continue;
+
+      if (hasMagnetSubject) {
+        for (const m of clause.matchAll(
+          /(?:额定(?:工作)?电流|工作电流|主磁体电流|电流)(?:的)?(?:上限(?:阈值)?(?:为|是)?|(?:不得|不)超过|最大(?:允许)?(?:值|电流)?(?:为|是)?|≤|<=)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*A\b/gi,
+        )) {
+          magnetLimits.add(`${m[1]} A`);
+        }
+        for (const m of clause.matchAll(
+          /(?:上限(?:阈值)?|最大(?:允许)?电流)\s*(?:为|是|≤|<=)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*A\b/gi,
+        )) {
+          magnetLimits.add(`${m[1]} A`);
+        }
+        if (!/正常|日常|平均|最小|下限|低于|小于/.test(clause)) {
+          for (const m of clause.matchAll(
+            /额定(?:工作)?电流\s*(?:为|是)\s*(\d+(?:\.\d+)?)\s*A\b/gi,
+          )) {
+            magnetRatedFallbacks.add(`${m[1]} A`);
+          }
+        }
+      }
+
+      if (hasHeliumSubject) {
+        const nextClause =
+          i + 1 < clauses.length &&
+          !NEGATED_OR_NON_STANDARD_CLAUSE_RE.test(clauses[i + 1]) &&
+          !/%|低于|小于|下限|不足|<=|≤|<|高于|大于/.test(clauses[i + 1])
+            ? `${clause}，${clauses[i + 1]}`
+            : clause;
+
+        for (const m of nextClause.matchAll(
+          /(低于|小于|下限(?:为|是)?|不足|<=|≤|<)\s*(\d+(?:\.\d+)?)\s*%\s*(?:时|后|则)?(?:，)?\s*(?:立即|自动|将)?(?:触发)?(?:联锁(?:保护)?停机|停机联锁)/g,
+        )) {
+          const cond =
+            /<=|≤|下限/.test(m[1]) ? "≤ 触发联锁停机" : "< 触发联锁停机";
+          heliumInterlocks.set(`${m[2]}%`, cond);
+        }
+        for (const m of clause.matchAll(
+          /(?:联锁(?:保护)?停机|停机联锁)(?:液位|阈值)\s*(低于|小于|下限(?:为|是)?|为|是|<=|≤|<)\s*(\d+(?:\.\d+)?)\s*%/g,
+        )) {
+          const cond =
+            /<=|≤|下限/.test(m[1]) ? "≤ 触发联锁停机" : "< 触发联锁停机";
+          heliumInterlocks.set(`${m[2]}%`, cond);
+        }
+      }
+
+      if (hasCalibrationSubject) {
+        for (const m of clause.matchAll(
+          /(?:阻抗校准(?:周期)?(?:为|是)?\s*每\s*(\d+)\s*天(?:\s*一次)?|每\s*(\d+)\s*天\s*(?:进行|完成|执行)?(?:一次)?阻抗校准)/g,
+        )) {
+          const day = m[1] || m[2];
+          if (day) calibrationDays.add(day);
+        }
+      }
+    }
+  }
+
+  const rows: SpecTableRow[] = [];
+  const chosenMagnetSet =
+    magnetLimits.size > 0 ? magnetLimits : magnetRatedFallbacks;
+  if (chosenMagnetSet.size === 1) {
+    const [indicator] = Array.from(chosenMagnetSet);
+    rows.push({
+      parameter: "主磁体额定电流",
+      indicator,
+      condition: "上限阈值",
+      conditionTone: "limit",
+    });
+  }
+
+  if (heliumInterlocks.size === 1) {
+    const [[indicator, condition]] = Array.from(heliumInterlocks.entries());
+    rows.push({
+      parameter: "冷却液氦液位",
+      indicator,
+      condition,
+      conditionTone: "interlock",
+    });
+  }
+
+  if (calibrationDays.size === 1) {
+    const [day] = Array.from(calibrationDays);
+    rows.push({
+      parameter: "阻抗校准周期",
+      indicator: `每 ${day} 天一次`,
+      condition: "维护周期",
+      conditionTone: "cycle",
+    });
+  }
+
+  return rows;
+}
+
 export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
   if (
     turn.refused ||
     turn.pending ||
+    Boolean(turn.error) ||
     !turn.answer.trim() ||
     turn.citations.length === 0
   ) {
@@ -386,103 +521,18 @@ export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
   const citationText = sourceCitations
     .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
     .join("\n");
-  // Strip negated numeric claims from prose answer so e.g. "不是 420 A，上限为 300 A" never matches 420 A
-  const affirmativeAnswer = turn.answer.replace(
-    /(?:不是|并非|而非|不等于)\s*\d+(?:\.\d+)?\s*[A-Za-z%℃°小时天秒分钟台张卡万元]+/gi,
-    "",
-  );
-  // Prioritize authoritative citation excerpts before affirmative answer text; never include turn.question
-  const verifiedText = [citationText, affirmativeAnswer]
-    .filter(Boolean)
-    .join("\n");
-  const sentences = verifiedText
-    .split(/[。；;\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+
+  // Extract unambiguous rows independently from source citations and from the assistant answer,
+  // and only emit rows where both the cited source and the answer agree on the exact value.
+  const citationRows = extractUnambiguousSopRows(citationText);
+  const answerRows = extractUnambiguousSopRows(turn.answer);
+  const answerByParam = new Map(answerRows.map((r) => [r.parameter, r]));
 
   const rows: SpecTableRow[] = [];
-  const seenParams = new Set<string>();
-
-  const pushRow = (
-    parameter: string,
-    indicator: string,
-    condition: string,
-    conditionTone: SpecTableRow["conditionTone"],
-  ) => {
-    const key = parameter.trim();
-    const val = indicator.trim();
-    if (!key || !val || seenParams.has(key)) return;
-    seenParams.add(key);
-    rows.push({
-      parameter: key,
-      indicator: val,
-      condition: condition.trim(),
-      conditionTone,
-    });
-  };
-
-  // 1. Main magnet rated current upper limit: require explicit upper-limit / rated-limit clause
-  for (const sentence of sentences) {
-    if (!/主磁体|超导磁体|额定(?:工作)?电流/.test(sentence)) continue;
-    const upperClauseMatch =
-      sentence.match(
-        /(?:额定(?:工作)?电流|工作电流|主磁体电流|电流)[^，,：:]{0,12}?(?:上限(?:阈值)?(?:为|是)?|不得超过|不超过|最大(?:允许)?(?:值|电流)?(?:为|是)?|≤|<=)\s*(\d+(?:\.\d+)?\s*A)\b/i,
-      ) ||
-      sentence.match(
-        /(?:上限(?:阈值)?|最大(?:允许)?电流)[^，,：:]{0,10}?(?:为|是|≤|<=)\s*(\d+(?:\.\d+)?\s*A)\b/i,
-      ) ||
-      (!/正常(?:工作)?(?:时|电流)|日常(?:工作)?电流/.test(sentence)
-        ? sentence.match(
-            /额定(?:工作)?电流(?:为|是)\s*(\d+(?:\.\d+)?\s*A)\b/i,
-          )
-        : null);
-    if (upperClauseMatch?.[1]) {
-      pushRow(
-        "主磁体额定电流",
-        upperClauseMatch[1].replace(/\s+/g, " "),
-        "上限阈值",
-        "limit",
-      );
-      break;
-    }
-  }
-
-  // 2. Liquid helium interlock threshold: require explicit low-level comparator + interlock/shutdown clause
-  for (const sentence of sentences) {
-    if (!/液氦/.test(sentence)) continue;
-    const interlockClauseMatch =
-      sentence.match(
-        /(?:低于|小于|下限(?:为|是)?|不足|<=|≤|<)\s*(\d+(?:\.\d+)?\s*%)\s*[^，,。；;\n]{0,20}?(?:触发)?(?:联锁|停机|切断|保护|报警)/,
-      ) ||
-      sentence.match(
-        /(?:联锁(?:停机)?|停机)(?:液位|阈值)?[^，,。；;\n]{0,12}?(?:低于|小于|下限(?:为|是)?|为|是|<=|≤|<)\s*(\d+(?:\.\d+)?\s*%)/,
-      );
-    if (interlockClauseMatch?.[1]) {
-      const isLessOrEqual = /<=|≤|下限/.test(interlockClauseMatch[0]);
-      pushRow(
-        "冷却液氦液位",
-        interlockClauseMatch[1].replace(/\s+/g, ""),
-        isLessOrEqual ? "≤ 触发联锁停机" : "< 触发联锁停机",
-        "interlock",
-      );
-      break;
-    }
-  }
-
-  // 3. Impedance calibration cycle: require explicit calibration cycle clause
-  for (const sentence of sentences) {
-    if (!/阻抗校准/.test(sentence)) continue;
-    const dayMatch =
-      sentence.match(/阻抗校准[^，,。；;\n]{0,20}?每\s*(\d+)\s*天/) ||
-      sentence.match(/每\s*(\d+)\s*天[^，,。；;\n]{0,16}?阻抗校准/);
-    if (dayMatch?.[1]) {
-      pushRow(
-        "阻抗校准周期",
-        `每 ${dayMatch[1]} 天一次`,
-        "维护周期",
-        "cycle",
-      );
-      break;
+  for (const citeRow of citationRows) {
+    const ansRow = answerByParam.get(citeRow.parameter);
+    if (ansRow && ansRow.indicator === citeRow.indicator) {
+      rows.push(citeRow);
     }
   }
 

@@ -734,23 +734,43 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified safety 
   assert.equal(table.rows[1].indicator, "65%");
   assert.equal(table.rows[1].condition, "< 触发联锁停机");
 
-  // 5. Citation with only normal liquid level (no interlock/shutdown clause) must not produce an interlock row
+  // 5. Citation with only normal liquid level or alarm-only / negated interlock must not produce a shutdown interlock row
   assert.equal(
     chatHelpers.extractSpecTableForTurn({
       id: "t-4",
       question: "液氦液位是多少？",
-      answer: "液氦液位正常工作时为 80% [1]。",
+      answer: "液氦液位正常工作时为 80%，低于 65% 时仅报警，不触发联锁停机 [1]。",
       pending: false,
       citations: [
         {
           index: 1,
           title: "低温超导磁体实验规程",
-          excerpt: "液氦液位正常工作时为 80%。",
+          excerpt: "液氦液位正常工作时为 80%，低于 65% 时仅报警，不触发联锁停机。",
         },
       ],
     }),
     null,
   );
+
+  // 6. Citation distinguishing warning (70%) from shutdown interlock (65%) must select 65%, never 70%
+  const alarmVsShutdownTurn = {
+    id: "t-5",
+    question: "液氦联锁停机阈值是多少？",
+    answer: "液氦液位低于 70% 时报警，低于 65% 时触发联锁停机 [1]。",
+    pending: false,
+    citations: [
+      {
+        index: 1,
+        title: "低温超导磁体实验规程",
+        heading: "§2.1",
+        excerpt: "液氦液位低于 70% 时报警，低于 65% 时触发联锁停机。",
+      },
+    ],
+  };
+  const alarmVsShutdownTable = chatHelpers.extractSpecTableForTurn(alarmVsShutdownTurn);
+  assert.ok(alarmVsShutdownTable);
+  assert.equal(alarmVsShutdownTable.rows.length, 1);
+  assert.equal(alarmVsShutdownTable.rows[0].indicator, "65%");
 });
 
 
