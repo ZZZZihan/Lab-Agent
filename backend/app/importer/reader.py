@@ -715,7 +715,8 @@ def _parse_msdoc_ole2(
                     "<II", word_doc, rg_fclcb_start + 33 * 8
                 )
 
-    pieces: list[tuple[int, int, int, int, str]] = []  # (cp_start, cp_end, fc_byte, char_width, text)
+    pieces: list[tuple[int, int, int, int, str, bool]] = []  # (py_start, py_end, fc_byte, char_width, text, has_supp)
+    py_cursor = 0
     if (
         table_stream is not None
         and lcb_clx > 5
@@ -739,6 +740,11 @@ def _parse_msdoc_ole2(
                 total_piece_bytes = 0
                 for i in range(n_pieces):
                     cp_s, cp_e = cps[i], cps[i + 1]
+                    if ccp_text > 0:
+                        if cp_s >= ccp_text:
+                            break
+                        if cp_e > ccp_text:
+                            cp_e = ccp_text
                     if cp_e <= cp_s:
                         continue
                     char_count = cp_e - cp_s
@@ -758,7 +764,17 @@ def _parse_msdoc_ole2(
                             )
                         raw_slice = word_doc[fc_byte : fc_byte + byte_len]
                         txt_slice = _decode_msdoc_compressed(raw_slice)
-                        pieces.append((cp_s, cp_s + len(txt_slice), fc_byte, 1, txt_slice))
+                        pieces.append(
+                            (
+                                py_cursor,
+                                py_cursor + len(txt_slice),
+                                fc_byte,
+                                1,
+                                txt_slice,
+                                False,
+                            )
+                        )
+                        py_cursor += len(txt_slice)
                     else:
                         fc_byte = fc_val & 0x3FFFFFFF
                         byte_len = char_count * 2
@@ -773,7 +789,18 @@ def _parse_msdoc_ole2(
                             )
                         raw_slice = word_doc[fc_byte : fc_byte + byte_len]
                         txt_slice = raw_slice.decode("utf-16-le", errors="replace")
-                        pieces.append((cp_s, cp_s + len(txt_slice), fc_byte, 2, txt_slice))
+                        has_supp = len(txt_slice) * 2 != len(raw_slice)
+                        pieces.append(
+                            (
+                                py_cursor,
+                                py_cursor + len(txt_slice),
+                                fc_byte,
+                                2,
+                                txt_slice,
+                                has_supp,
+                            )
+                        )
+                        py_cursor += len(txt_slice)
 
     if not pieces:
         fc_min, fc_mac = struct.unpack_from("<II", word_doc, 0x0018)
@@ -781,11 +808,17 @@ def _parse_msdoc_ole2(
             raw_body = word_doc[fc_min:fc_mac]
             is_16bit = bool(flags & 0x0400) or (b"\x00" in raw_body[:64])
             if is_16bit:
+                if ccp_text > 0:
+                    raw_body = raw_body[: ccp_text * 2]
                 txt = raw_body.decode("utf-16-le", errors="replace")
-                pieces.append((0, len(txt), fc_min, 2, txt))
+                pieces.append(
+                    (0, len(txt), fc_min, 2, txt, len(txt) * 2 != len(raw_body))
+                )
             else:
+                if ccp_text > 0:
+                    raw_body = raw_body[:ccp_text]
                 txt = _decode_msdoc_compressed(raw_body)
-                pieces.append((0, len(txt), fc_min, 1, txt))
+                pieces.append((0, len(txt), fc_min, 1, txt, False))
 
     if not pieces:
         raise DocxValidationError(
@@ -794,30 +827,20 @@ def _parse_msdoc_ole2(
             "无法解析 .doc 文档文本流",
         )
 
-    char_fc_ends: list[int] = []
-    for _, _, fc_b, width, txt_slice in pieces:
-        if width == 1:
-            for k in range(len(txt_slice)):
-                char_fc_ends.append(fc_b + k + 1)
-        else:
-            cur_fc = fc_b
-            for ch in txt_slice:
-                cur_fc += 4 if ord(ch) > 0xFFFF else 2
-                char_fc_ends.append(cur_fc)
+    main_text = "".join(p[4] for p in pieces)
 
-    full_text = "".join(p[4] for p in pieces)
-    if ccp_text > 0:
-        u16_bytes = full_text.encode("utf-16-le", errors="surrogatepass")
-        if len(u16_bytes) > ccp_text * 2:
-            main_text = u16_bytes[: ccp_text * 2].decode("utf-16-le", errors="replace")
-        else:
-            main_text = full_text
-    else:
-        main_text = full_text
-
-    def _cp_to_fc_end(cp_idx: int) -> int:
-        if 0 <= cp_idx < len(char_fc_ends):
-            return char_fc_ends[cp_idx]
+    def _cp_to_fc_end(py_idx: int) -> int:
+        for py_s, py_e, fc_b, width, txt_slice, has_supp in pieces:
+            if py_s <= py_idx < py_e:
+                rel = py_idx - py_s + 1
+                if width == 1:
+                    return fc_b + rel
+                if not has_supp:
+                    return fc_b + rel * 2
+                u16_len = len(
+                    txt_slice[:rel].encode("utf-16-le", errors="surrogatepass")
+                )
+                return fc_b + u16_len
         return -1
 
     in_table_fc_ends, ttp_fc_ends = (
@@ -975,7 +998,7 @@ def _parse_word2003_xml_doc(
         )
     try:
         root = ET.fromstring(raw_bytes)
-    except ET.ParseError:
+    except (ET.ParseError, ValueError, LookupError):
         cleaned_xml = re.sub(
             r"(<\?xml\b[^>]*?)\bencoding\s*=\s*[\"'][^\"']*[\"']",
             r"\1",
@@ -985,7 +1008,7 @@ def _parse_word2003_xml_doc(
         )
         try:
             root = ET.fromstring(cleaned_xml.encode("utf-8"))
-        except ET.ParseError as exc:
+        except (ET.ParseError, ValueError, LookupError) as exc:
             raise DocxValidationError(
                 422,
                 "import_parse_failed",
@@ -1311,79 +1334,187 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
     return None
 
 
-def _decode_rtf_unicode_with_uc(s: str) -> str:
-    """Decode RTF `\\uN` escapes while honoring group-scoped `\\ucN` fallback counts."""
+def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
+    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, and codepage bytes."""
     out: list[str] = []
+    byte_buf = bytearray()
     uc = 1
     uc_stack: list[int] = []
+    is_cjk_mb = declared_enc in (None, "gb18030", "cp932", "cp949", "cp950")
+
+    def _sanitize_literal(text: str) -> str:
+        return (
+            text.replace("\x07", " ")
+            .replace("\r", " ")
+            .replace("\x1d", " ")
+            .replace("\x1e", " ")
+        )
+
+    def _flush_bytes() -> None:
+        if not byte_buf:
+            return
+        b = bytes(byte_buf)
+        byte_buf.clear()
+        if declared_enc is not None:
+            decoded = b.decode(declared_enc, errors="replace")
+        else:
+            try:
+                decoded = b.decode("gb18030", errors="strict")
+            except UnicodeDecodeError:
+                decoded = b.decode("cp1252", errors="replace")
+        out.append(_sanitize_literal(decoded))
+
     i = 0
     n = len(s)
     while i < n:
         ch = s[i]
+        if ch in ("\r", "\n"):
+            i += 1
+            continue
         if ch == "{":
+            _flush_bytes()
             uc_stack.append(uc)
-            out.append(ch)
             i += 1
             continue
         if ch == "}":
+            _flush_bytes()
             if uc_stack:
                 uc = uc_stack.pop()
-            out.append(ch)
             i += 1
             continue
         if ch == "\\":
-            if i + 1 < n and s[i + 1] in ("\\", "{", "}"):
-                out.append(s[i : i + 2])
+            if i + 1 >= n:
+                i += 1
+                continue
+            nxt = s[i + 1]
+            if nxt in ("\\", "{", "}"):
+                _flush_bytes()
+                out.append(nxt)
                 i += 2
                 continue
-            m_uc = re.match(r"\\uc(-?\d+)(?![0-9]) ?", s[i : i + 32])
-            if m_uc is not None:
-                uc = max(0, int(m_uc.group(1)))
-                i += m_uc.end()
+            if nxt in ("\r", "\n"):
+                _flush_bytes()
+                out.append("\r")
+                i += 2
+                if nxt == "\r" and i < n and s[i] == "\n":
+                    i += 1
                 continue
-            m_u = re.match(r"\\u(-?\d+)(?![0-9]) ?", s[i : i + 32])
-            if m_u is not None:
-                code = int(m_u.group(1))
-                if code < 0:
-                    code += 65536
-                if 0 <= code <= 0x10FFFF:
-                    out.append(chr(code))
-                i += m_u.end()
-                skipped = 0
-                while skipped < uc and i < n:
-                    if s[i] in ("{", "}"):
-                        break
-                    if (
-                        s[i] == "\\"
-                        and i + 3 < n
-                        and s[i + 1] == "'"
-                        and all(
-                            c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4]
-                        )
-                    ):
-                        i += 4
-                        skipped += 1
-                    elif s[i] == "\\" and i + 1 < n and s[i + 1] in ("\\", "{", "}"):
-                        i += 2
-                        skipped += 1
-                    elif s[i] == "\\":
-                        m_cw = re.match(r"\\[a-zA-Z]+-?\d* ?", s[i : i + 32])
-                        if m_cw is not None:
+            if nxt == "~":
+                _flush_bytes()
+                out.append("\u00a0")
+                i += 2
+                continue
+            if nxt == "-":
+                _flush_bytes()
+                i += 2
+                continue
+            if nxt == "_":
+                _flush_bytes()
+                out.append("-")
+                i += 2
+                continue
+            if (
+                nxt == "'"
+                and i + 3 < n
+                and all(c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4])
+            ):
+                byte_buf.append(int(s[i + 2 : i + 4], 16))
+                i += 4
+                continue
+
+            m_cw = re.match(r"\\([a-zA-Z]+)(-?\d*) ?", s[i : i + 64])
+            if m_cw is not None:
+                _flush_bytes()
+                word = m_cw.group(1).lower()
+                arg_str = m_cw.group(2)
+                i += m_cw.end()
+                if word == "uc" and arg_str:
+                    uc = max(0, int(arg_str))
+                    continue
+                if word == "u" and arg_str:
+                    code = int(arg_str)
+                    if code < 0:
+                        code += 65536
+                    if 0 <= code <= 0x10FFFF:
+                        out.append(_sanitize_literal(chr(code)))
+                    skipped = 0
+                    while skipped < uc and i < n:
+                        if s[i] in ("\r", "\n"):
+                            i += 1
+                            continue
+                        if s[i] in ("{", "}"):
                             break
-                        i += 1
-                        skipped += 1
-                    else:
-                        i += 1
-                        skipped += 1
+                        if (
+                            s[i] == "\\"
+                            and i + 3 < n
+                            and s[i + 1] == "'"
+                            and all(
+                                c in "0123456789abcdefABCDEF"
+                                for c in s[i + 2 : i + 4]
+                            )
+                        ):
+                            i += 4
+                            skipped += 1
+                        elif (
+                            s[i] == "\\"
+                            and i + 1 < n
+                            and s[i + 1] in ("\\", "{", "}")
+                        ):
+                            i += 2
+                            skipped += 1
+                        elif s[i] == "\\":
+                            m_next_cw = re.match(
+                                r"\\[a-zA-Z]+-?\d* ?", s[i : i + 32]
+                            )
+                            if m_next_cw is not None:
+                                break
+                            i += 1
+                            skipped += 1
+                        else:
+                            i += 1
+                            skipped += 1
+                    continue
+                if word == "trowd":
+                    out.append("\x1d")
+                elif word in ("cell", "nestcell"):
+                    out.append("\x07")
+                elif word in ("row", "nestrow"):
+                    out.append("\x1e")
+                elif word == "par":
+                    out.append("\r")
+                elif word == "line":
+                    out.append("\n")
+                elif word == "tab":
+                    out.append("\t")
                 continue
-            m_other = re.match(r"\\[a-zA-Z]+-?\d* ?", s[i : i + 64])
-            if m_other is not None:
-                out.append(m_other.group(0))
-                i += m_other.end()
+
+            _flush_bytes()
+            i += 2
+            continue
+
+        code_pt = ord(ch)
+        if code_pt >= 0x80:
+            byte_buf.append(code_pt)
+            if (
+                is_cjk_mb
+                and 0x81 <= code_pt <= 0xFE
+                and i + 1 < n
+                and 0x40 <= ord(s[i + 1]) < 0x80
+                and s[i + 1] not in ("\\", "{", "}")
+            ):
+                byte_buf.append(ord(s[i + 1]))
+                i += 2
                 continue
-        out.append(ch)
+            i += 1
+            continue
+
+        _flush_bytes()
+        out.append(_sanitize_literal(ch))
         i += 1
-    return "".join(out)
+
+    _flush_bytes()
+    rendered = "".join(out)
+    return rendered.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
 
 def _parse_rtf_doc(
@@ -1402,48 +1533,7 @@ def _parse_rtf_doc(
     raw_str = raw_bytes.decode("latin-1", errors="ignore")
     declared_enc = _resolve_rtf_encoding(raw_str)
     s = _strip_rtf_nonbody_groups(raw_str)
-    s = _decode_rtf_unicode_with_uc(s)
-    # Combine UTF-16 surrogate pairs (e.g. \u-10179?\u-8704? -> U+1F600) and replace lone surrogates
-    s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
-
-    # Protect escaped literal backslash and braces before control-word parsing
-    s = (
-        s.replace("\\\\", "\x00BS\x00")
-        .replace("\\{", "\x00LB\x00")
-        .replace("\\}", "\x00RB\x00")
-        .replace("\\~", "\u00a0")
-        .replace("\\-", "")
-        .replace("\\_", "-")
-    )
-
-    # Decode hex escapes \'xx using the declared RTF code page (or auto-fallback gb18030 -> cp1252)
-    def _replace_hex_runs(m: re.Match[str]) -> str:
-        hex_pairs = re.findall(r"\\'([0-9a-fA-F]{2})", m.group(0))
-        b = bytes(int(h, 16) for h in hex_pairs)
-        if declared_enc is not None:
-            return b.decode(declared_enc, errors="replace")
-        try:
-            return b.decode("gb18030", errors="strict")
-        except UnicodeDecodeError:
-            return b.decode("cp1252", errors="replace")
-
-    s = re.sub(r"(?:\\'[0-9a-fA-F]{2})+", _replace_hex_runs, s)
-
-    # Enforce complete control-word boundaries (?![a-zA-Z]) so \pard and \cellx1000 are never partially matched
-    s = re.sub(r"\\trowd(?![a-zA-Z])-?\d* ?", "\x1d", s)
-    s = re.sub(r"\\(?:cell|nestcell)(?![a-zA-Z])-?\d* ?", "\x07", s)
-    s = re.sub(r"\\(?:row|nestrow)(?![a-zA-Z])-?\d* ?", "\x1e", s)
-    s = re.sub(r"\\par(?![a-zA-Z])-?\d* ?", "\r", s)
-    s = re.sub(r"\\line(?![a-zA-Z])-?\d* ?", "\n", s)
-    s = re.sub(r"\\tab(?![a-zA-Z])-?\d* ?", "\t", s)
-    s = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", s)
-    s = re.sub(r"\\[^a-zA-Z0-9\s]", "", s)
-    s = s.replace("{", "").replace("}", "")
-    s = (
-        s.replace("\x00BS\x00", "\\")
-        .replace("\x00LB\x00", "{")
-        .replace("\x00RB\x00", "}")
-    )
+    s = _tokenize_rtf_body(s, declared_enc)
     # Convert in-cell paragraph breaks (\r inside a table row before \x1e) into \n, then split rows cleanly on \r
     s = re.sub(
         r"[\x1d\x1e][^\x1e]*?\x1e",

@@ -197,12 +197,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert "Sample Temperature" in extracted_docx.text
     assert "液位 | 80%" in extracted_docx.text
 
-    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \ucN fallback counts, surrogate pairs, lone surrogates, and multi-row tables
+    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \ucN fallback counts, literal braces/backslashes, surrogate pairs, and multi-row tables
     rtf_bytes = (
-        b"{\\rtf1\\ansi\\ansicpg1252\\uc1"
+        b"{\\rtf1\\ansi\\ansicpg1252\\uc1 Important text\\par"
         b"{\\fonttbl{\\f0 Arial;}}"
         b"\\pard First paragraph \\u-10179?\\u-8704? and lone \\u-10179?\\par"
-        b"\\pard {\\uc1 caf\\u233e} {\\uc0 caf\\u233?}\\par"
+        b"\\pard {\\uc1 caf\\u233e} {\\uc0 caf\\u233?} A=\\u123?x\\u125?; path=\\u92?folder\\par"
         b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl caf\\'e9\\cell R\\u233?sum\\u233?\\cell\\row"
         b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl Alice\\cell alice@example.com\\cell\\row"
         b"\\pard Trailing paragraph\\par"
@@ -210,19 +210,29 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     )
     rtf_doc = validate_and_load_docx("intl.doc", rtf_bytes)
     assert [b.text for b in rtf_doc.body_blocks if b.kind == "paragraph"] == [
+        "Important text",
         "First paragraph 😀 and lone �",
-        "café café?",
+        "café café? A={x}; path=\\folder",
         "Trailing paragraph",
     ]
     rtf_grids = [extract_table_grid(t) for t in iter_document_tables(rtf_doc)]
     assert rtf_grids == [[["café", "Résumé"], ["Alice", "alice@example.com"]]]
     rtf_uploaded = extract_upload("intl.doc", rtf_bytes, max_chars=300_000)
     assert rtf_uploaded.text.encode("utf-8")
+    assert "Important text" in rtf_uploaded.text
     assert "😀" in rtf_uploaded.text
-    assert "café café?" in rtf_uploaded.text
+    assert "café café? A={x}; path=\\folder" in rtf_uploaded.text
     assert "Alice | alice@example.com" in rtf_uploaded.text
 
-    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, and UTF-16 BOM
+    # 3a. RTF with literal non-ASCII Windows-1251 bytes under \ansicpg1251
+    rtf_cp1251 = (
+        b"{\\rtf1\\ansi\\ansicpg1251 \\pard "
+        + "Привет мир".encode("cp1251")
+        + b"\\par}"
+    )
+    assert extract_upload("ru.doc", rtf_cp1251, max_chars=300_000).text.strip() == "Привет мир"
+
+    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, and UTF-16 BOM, plus GB2312 Word 2003 XML
     html_cp1252 = (
         '<html><head><meta charset="windows-1252"></head>'
         "<body><p>café résumé</p></body></html>"
@@ -232,6 +242,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     for bom_enc in ("utf-8-sig", "utf-16"):
         bom_html = "<html><body><p>Test text</p></body></html>".encode(bom_enc)
         assert "Test text" in extract_upload("bom.doc", bom_html, max_chars=300_000).text
+    xml_gb2312 = (
+        '<?xml version="1.0" encoding="gb2312"?>'
+        '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
+        "<w:body><w:p><w:r><w:t>中文GB2312测试</w:t></w:r></w:p></w:body></w:wordDocument>"
+    ).encode("gb18030")
+    assert "中文GB2312测试" in extract_upload("gb2312.doc", xml_gb2312, max_chars=300_000).text
 
     # 3d. Binary OLE2 .doc with supplementary character in main story followed by footnote story
     fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "FOOTNOTE"]))
