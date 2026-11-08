@@ -159,6 +159,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     from app.importer.parser import _extract_people, _extract_t4_foundation
     from app.importer.reader import (
         DocxValidationError,
+        _parse_papx_table_flags,
         build_ole2_doc_bytes,
         extract_table_grid,
         iter_document_tables,
@@ -255,8 +256,22 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("unterminated_rows.doc", rtf_unterminated_rows, max_chars=300_000).text.strip()
         == "Hello"
     )
+    rtf_ansi_default = "{\\rtf1\\ansi résumé naïve\\par}".encode("cp1252")
+    assert (
+        extract_upload("ansi_default.doc", rtf_ansi_default, max_chars=300_000).text.strip()
+        == "résumé naïve"
+    )
+    rtf_field_and_bin = (
+        b"{\\rtf1\\ansi "
+        b"{\\field{\\fldinst HYPERLINK \"https://example.com\"}{\\fldrslt Click here}} "
+        b"{\\pict\\pngblip\\bin8 a{b}c\\\\d}After image\\par}"
+    )
+    assert (
+        extract_upload("field_bin.doc", rtf_field_and_bin, max_chars=300_000).text.strip()
+        == "Click here After image"
+    )
 
-    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan tables, and GB2312 Word 2003 XML
+    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
         '<html><head><meta charset="windows-1252"></head>'
         "<body><p>café résumé</p></body></html>"
@@ -271,6 +286,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         "<tr><th>姓名</th><th>职称</th><th>工作单位</th><th>邮箱</th></tr>"
         '<tr><td>张三</td><td>教授</td><td rowspan="2">天津工业大学</td><td>zhang@example.com</td></tr>'
         "<tr><td>李四</td><td>讲师</td><td>li@example.com</td></tr>"
+        '<tr><td>王五</td><td colspan="2"></td><td>wang@example.com</td></tr>'
         "</table></body></html>"
     ).encode()
     parsed_rowspan = validate_and_load_docx("roster.doc", html_rowspan_doc)
@@ -280,13 +296,25 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
             ["姓名", "职称", "工作单位", "邮箱"],
             ["张三", "教授", "天津工业大学", "zhang@example.com"],
             ["李四", "讲师", "天津工业大学", "li@example.com"],
+            ["王五", "", "", "wang@example.com"],
         ]
     ]
     roster_people, _ = _extract_people(rowspan_grids)
     assert [(p["name"], p["title"], p["affiliation"], p["email"]) for p in roster_people] == [
         ("张三", "教授", "天津工业大学", "zhang@example.com"),
         ("李四", "讲师", "天津工业大学", "li@example.com"),
+        ("王五", None, None, "wang@example.com"),
     ]
+    # Verify PAPX FKP page deduplication on repeated page numbers
+    fake_fkp = bytearray(512)
+    fake_fkp[511] = 1
+    struct.pack_into("<II", fake_fkp, 0, 1024, 1030)
+    fake_fkp[8] = 10  # b_offset = 10 -> papx_pos = 20
+    fake_fkp[20] = 3  # cb = 3 -> 5 bytes (2-byte istd + 3-byte sprmPFInTable)
+    struct.pack_into("<HHB", fake_fkp, 21, 0, 0x2416, 1)
+    plc_rep = struct.pack("<4001I", *range(4001)) + struct.pack("<4000I", *([0] * 4000))
+    in_tbl_fcs, _ = _parse_papx_table_flags(bytes(fake_fkp), plc_rep, 0, len(plc_rep))
+    assert in_tbl_fcs == {1030}
     xml_gb2312 = (
         '<?xml version="1.0" encoding="gb2312"?>'
         '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'

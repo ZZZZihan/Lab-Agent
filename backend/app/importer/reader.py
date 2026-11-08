@@ -467,8 +467,12 @@ def _parse_papx_table_flags(
     pn_offset = 4 * (n + 1)
     pns = struct.unpack_from(f"<{n}I", plc, pn_offset)
 
+    seen_pns: set[int] = set()
     for pn_raw in pns:
         pn = pn_raw & 0x003FFFFF
+        if pn in seen_pns:
+            continue
+        seen_pns.add(pn)
         page_off = pn * 512
         if page_off < 0 or page_off + 512 > len(word_doc):
             continue
@@ -478,17 +482,28 @@ def _parse_papx_table_flags(
             continue
         rgfc = struct.unpack_from(f"<{cpara + 1}I", fkp, 0)
         bx_base = 4 * (cpara + 1)
+        b_offset_cache: dict[int, tuple[bool, bool]] = {}
         for k in range(cpara):
             fc_end = rgfc[k + 1]
             b_offset = fkp[bx_base + k * 13]
             if b_offset == 0:
                 continue
+            cached_flags = b_offset_cache.get(b_offset)
+            if cached_flags is not None:
+                is_in_tbl, is_ttp = cached_flags
+                if is_in_tbl:
+                    in_table_fc_ends.add(fc_end)
+                if is_ttp:
+                    ttp_fc_ends.add(fc_end)
+                continue
             papx_pos = b_offset * 2
             if papx_pos >= 511:
+                b_offset_cache[b_offset] = (False, False)
                 continue
             cb = fkp[papx_pos]
             if cb == 0:
                 if papx_pos + 2 > 511:
+                    b_offset_cache[b_offset] = (False, False)
                     continue
                 cb_bytes = fkp[papx_pos + 1] * 2
                 grp_start = papx_pos + 4  # skip 2-byte cb + 2-byte istd
@@ -498,6 +513,7 @@ def _parse_papx_table_flags(
                 grp_start = papx_pos + 3  # skip 1-byte cb + 2-byte istd
                 grp_end = min(511, papx_pos + 1 + cb_bytes)
             if grp_start >= grp_end:
+                b_offset_cache[b_offset] = (False, False)
                 continue
             grpprl = fkp[grp_start:grp_end]
             pos = 0
@@ -539,6 +555,7 @@ def _parse_papx_table_flags(
                     is_in_tbl = True
                     is_ttp = True
                 pos += op_len
+            b_offset_cache[b_offset] = (is_in_tbl, is_ttp)
             if is_in_tbl:
                 in_table_fc_ends.add(fc_end)
             if is_ttp:
@@ -1114,7 +1131,25 @@ def _parse_word2003_xml_doc(
                                 break
                         if has_vmerge_cont:
                             cell_text = grid[-1][len(row_cells)]
+                    grid_span = 1
+                    for sub in tc.iter():
+                        if _local(sub.tag).lower() == "gridspan":
+                            val = next(
+                                (
+                                    v
+                                    for k, v in sub.attrib.items()
+                                    if _local(k).lower() == "val"
+                                ),
+                                "1",
+                            )
+                            try:
+                                grid_span = max(1, min(int(val), 64))
+                            except ValueError:
+                                grid_span = 1
+                            break
                     row_cells.append(cell_text)
+                    for _ in range(grid_span - 1):
+                        row_cells.append("")
                 if row_cells:
                     grid.append(row_cells)
             if grid:
@@ -1136,18 +1171,18 @@ class _HtmlDocParser(HTMLParser):
         self._current_cell: list[str] | None = None
         self._current_para: list[str] = []
         self._skip_depth = 0
-        self._pending_spans: dict[int, tuple[int, str, int]] = {}
+        self._pending_spans: dict[int, tuple[int, str]] = {}
         self._col_idx = 0
         self._cell_rowspan = 1
         self._cell_colspan = 1
 
     def _consume_pending_spans(self) -> None:
         while self._current_row is not None and self._col_idx in self._pending_spans:
-            rem, span_text, span_cs = self._pending_spans.pop(self._col_idx)
+            rem, span_text = self._pending_spans.pop(self._col_idx)
             self._current_row.append(span_text)
             if rem > 1:
-                self._pending_spans[self._col_idx] = (rem - 1, span_text, span_cs)
-            self._col_idx += span_cs
+                self._pending_spans[self._col_idx] = (rem - 1, span_text)
+            self._col_idx += 1
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
@@ -1202,23 +1237,25 @@ class _HtmlDocParser(HTMLParser):
             if self._current_row is not None and self._current_cell is not None:
                 self._consume_pending_spans()
                 cell_text = normalize_cell_text("".join(self._current_cell))
-                self._current_row.append(cell_text)
-                if self._cell_rowspan > 1:
-                    self._pending_spans[self._col_idx] = (
-                        self._cell_rowspan - 1,
-                        cell_text,
-                        self._cell_colspan,
-                    )
-                self._col_idx += self._cell_colspan
+                for c_off in range(self._cell_colspan):
+                    col_val = cell_text if c_off == 0 else ""
+                    self._current_row.append(col_val)
+                    if self._cell_rowspan > 1:
+                        self._pending_spans[self._col_idx] = (
+                            self._cell_rowspan - 1,
+                            col_val,
+                        )
+                    self._col_idx += 1
+                    self._consume_pending_spans()
             self._current_cell = None
         elif t == "tr" and self._in_table == 1:
             if self._current_row is not None:
                 self._consume_pending_spans()
                 for col_k in sorted(k for k in self._pending_spans if k >= self._col_idx):
-                    rem, span_text, span_cs = self._pending_spans.pop(col_k)
-                    self._current_row.append(span_text)
-                    if rem > 1:
-                        self._pending_spans[col_k] = (rem - 1, span_text, span_cs)
+                    while self._col_idx < col_k:
+                        self._current_row.append("")
+                        self._col_idx += 1
+                    self._consume_pending_spans()
             if self._current_row:
                 self._current_table.append(self._current_row)
             self._current_row = None
@@ -1362,25 +1399,37 @@ _RTF_SKIP_DESTINATIONS: frozenset[str] = frozenset(
         "footer",
         "headerl",
         "headerr",
+        "headerf",
         "footerl",
         "footerr",
+        "footerf",
+        "fldinst",
+        "bkmkstart",
+        "bkmkend",
+        "datafield",
     }
 )
 
 
 def _strip_rtf_nonbody_groups(raw: str) -> str:
-    """Remove `{\\*...}` and header destination groups (`\\fonttbl`, `\\colortbl`, `\\stylesheet`, etc.) with nested braces."""
+    """Remove `{\\*...}` and header/instruction destination groups (`\\fonttbl`, `\\fldinst`, `\\pict`, etc.) with nested braces and `\\binN`."""
     out: list[str] = []
     i = 0
     n = len(raw)
     skip_depth = 0
     while i < n:
         ch = raw[i]
-        if ch == "\\" and i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
-            if skip_depth == 0:
-                out.append(raw[i : i + 2])
-            i += 2
-            continue
+        if ch == "\\":
+            if i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
+                if skip_depth == 0:
+                    out.append(raw[i : i + 2])
+                i += 2
+                continue
+            m_bin = re.match(r"\\bin(-?\d+) ?", raw[i : i + 32], re.IGNORECASE)
+            if m_bin is not None:
+                bin_len = max(0, int(m_bin.group(1)))
+                i = min(n, i + m_bin.end() + bin_len)
+                continue
         if ch == "{":
             if skip_depth > 0:
                 skip_depth += 1
@@ -1433,6 +1482,8 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
         return "cp850"
     if re.search(r"\\pc(?![a-zA-Z])", raw_str[:1024]):
         return "cp437"
+    if re.search(r"\\ansi(?![a-zA-Z])", raw_str[:1024]):
+        return "cp1252"
     return None
 
 
@@ -1635,6 +1686,9 @@ def _tokenize_rtf_body(
                 i += m_cw.end()
                 if word == "uc" and arg_str:
                     uc = max(0, int(arg_str))
+                    continue
+                if word == "bin" and arg_str:
+                    i = min(n, i + max(0, int(arg_str)))
                     continue
                 if word == "f" and arg_str:
                     active_font = int(arg_str)
