@@ -189,7 +189,18 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     p_tab._p.append(
         parse_xml(
             '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
-            "<m:r><m:t>E=mc^2</m:t></m:r></m:oMath>"
+            "<m:r><m:t>E=m</m:t></m:r>"
+            "<m:sSup><m:e><m:r><m:t>c</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>"
+            "<m:r><m:t>+</m:t></m:r>"
+            "<m:f><m:num><m:sSub><m:e><m:r><m:t>a</m:t></m:r></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub></m:sSub></m:num>"
+            "<m:den><m:rad><m:radPr><m:degHide m:val=\"1\"/></m:radPr><m:deg/><m:e><m:r><m:t>x+1</m:t></m:r></m:e></m:rad></m:den></m:f>"
+            "</m:oMath>"
+        )
+    )
+    p_tab._p.append(
+        parse_xml(
+            '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:rPr><w:vanish/></w:rPr><w:t>SECRET_VANISHED</w:t></w:r>"
         )
     )
     p_tab._p.append(
@@ -218,7 +229,8 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     extracted_docx = extract_upload("sop.docx", docx_bytes, max_chars=300_000)
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
-    assert "Sample Temperature E=mc^2 10-20 mg" in extracted_docx.text
+    assert "Sample Temperature E=mc^2+(a_i)/(sqrt(x+1)) 10-20 mg" in extracted_docx.text
+    assert "SECRET_VANISHED" not in extracted_docx.text
     assert "液位 | 80%+ΔT 温度 | -196C" in extracted_docx.text
     docx_grids = [
         extract_table_grid(t)
@@ -301,11 +313,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     rtf_upr_ud = (
         b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par"
         b"\\pard{\\*\\bkmkstart start}Important text{\\*\\bkmkend start}\\par"
-        b"\\pard \\u160\\~A\\u8212\\emdash B\\u8209\\-C\\par}"
+        b"\\pard \\u160\\~A\\u8212\\emdash B\\u8209\\-C\\par"
+        b"\\pard Visible {\\v HiddenGroup \\u20013? \\'e9} StillVisible \\v HiddenRun \\v0 EndVisible \\v HiddenPlain \\plain ResetVisible\\par}"
     )
     assert (
         extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
-        == "中文\n\nImportant text\n\nA—B‐C"
+        == "中文\n\nImportant text\n\nA—B‐C\n\nVisible StillVisible EndVisible ResetVisible"
     )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
@@ -354,10 +367,16 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert in_tbl_fcs == {1030}
     xml_gb2312 = (
         '<?xml version="1.0" encoding="gb2312"?>'
-        '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
-        "<w:body><w:p><w:r><w:t>中文GB2312测试</w:t></w:r></w:p></w:body></w:wordDocument>"
+        '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml" '
+        'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+        "<w:body><w:p><w:r><w:t>中文GB2312测试 </w:t></w:r>"
+        "<w:r><w:rPr><w:vanish/></w:rPr><w:t>HIDDEN_XML</w:t></w:r>"
+        "<m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>"
+        "</w:p></w:body></w:wordDocument>"
     ).encode("gb18030")
-    assert "中文GB2312测试" in extract_upload("gb2312.doc", xml_gb2312, max_chars=300_000).text
+    xml_gb2312_text = extract_upload("gb2312.doc", xml_gb2312, max_chars=300_000).text
+    assert "中文GB2312测试 1/2" in xml_gb2312_text
+    assert "HIDDEN_XML" not in xml_gb2312_text
     xml_vmerge_large = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'

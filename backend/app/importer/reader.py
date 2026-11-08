@@ -1072,7 +1072,10 @@ def _parse_word2003_xml_doc(
 
         def _walk(node: ET.Element) -> None:
             ln = _local(node.tag)
-            if ln in ("Fallback", "del", "moveFrom"):
+            if ln in ("Fallback", "del", "moveFrom") or _is_hidden_run(node):
+                return
+            if ln == "oMath":
+                parts.append(_render_omath_node(node))
                 return
             if ln == "t" and node.text:
                 parts.append(node.text)
@@ -1092,7 +1095,7 @@ def _parse_word2003_xml_doc(
         out: list[ET.Element] = []
         for ch in elem:
             ln = _local(ch.tag)
-            if ln in ("p", "tbl"):
+            if ln in ("p", "tbl", "oMathPara", "oMath"):
                 out.append(ch)
             elif ln in ("sect", "sub-section", "sdt", "sdtContent", "customXml", "body"):
                 out.extend(_iter_wordml_blocks(ch))
@@ -1116,7 +1119,7 @@ def _parse_word2003_xml_doc(
 
     for child in _iter_wordml_blocks(container):
         ln = _local(child.tag)
-        if ln == "p":
+        if ln in ("p", "oMathPara", "oMath"):
             txt = _p_text(child)
             if txt:
                 raw_blocks.append(("paragraph", txt, None))
@@ -1686,13 +1689,14 @@ def _tokenize_rtf_body(
     font_encodings: dict[int, str] | None = None,
     default_font: int | None = None,
 ) -> str:
-    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, and codepage bytes."""
+    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, hidden-text state (`\\v`), and codepage bytes."""
     out: list[str] = []
     byte_buf = bytearray()
     uc = 1
     font_enc_map = font_encodings or {}
     active_font: int | None = default_font
-    state_stack: list[tuple[int, int | None]] = []
+    hidden = False
+    state_stack: list[tuple[int, int | None, bool]] = []
 
     def _current_enc() -> str | None:
         if active_font is not None and active_font in font_enc_map:
@@ -1712,6 +1716,8 @@ def _tokenize_rtf_body(
             return
         b = bytes(byte_buf)
         byte_buf.clear()
+        if hidden:
+            return
         eff_enc = _current_enc()
         if eff_enc is not None:
             decoded = b.decode(eff_enc, errors="replace")
@@ -1731,13 +1737,13 @@ def _tokenize_rtf_body(
             continue
         if ch == "{":
             _flush_bytes()
-            state_stack.append((uc, active_font))
+            state_stack.append((uc, active_font, hidden))
             i += 1
             continue
         if ch == "}":
             _flush_bytes()
             if state_stack:
-                uc, active_font = state_stack.pop()
+                uc, active_font, hidden = state_stack.pop()
             i += 1
             continue
         if ch == "\\":
@@ -1747,7 +1753,8 @@ def _tokenize_rtf_body(
             nxt = s[i + 1]
             if nxt in ("\\", "{", "}"):
                 _flush_bytes()
-                out.append(nxt)
+                if not hidden:
+                    out.append(nxt)
                 i += 2
                 continue
             if nxt in ("\r", "\n"):
@@ -1759,7 +1766,8 @@ def _tokenize_rtf_body(
                 continue
             if nxt == "~":
                 _flush_bytes()
-                out.append("\u00a0")
+                if not hidden:
+                    out.append("\u00a0")
                 i += 2
                 continue
             if nxt == "-":
@@ -1768,7 +1776,8 @@ def _tokenize_rtf_body(
                 continue
             if nxt == "_":
                 _flush_bytes()
-                out.append("-")
+                if not hidden:
+                    out.append("-")
                 i += 2
                 continue
             if (
@@ -1776,7 +1785,8 @@ def _tokenize_rtf_body(
                 and i + 3 < n
                 and all(c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4])
             ):
-                byte_buf.append(int(s[i + 2 : i + 4], 16))
+                if not hidden:
+                    byte_buf.append(int(s[i + 2 : i + 4], 16))
                 i += 4
                 continue
 
@@ -1800,14 +1810,18 @@ def _tokenize_rtf_body(
                     if af_idx in font_enc_map and active_font is None:
                         active_font = af_idx
                     continue
+                if word == "v":
+                    hidden = arg_str != "0"
+                    continue
                 if word == "plain":
                     active_font = default_font
+                    hidden = False
                     continue
                 if word == "u" and arg_str:
                     code = int(arg_str)
                     if code < 0:
                         code += 65536
-                    if 0 <= code <= 0x10FFFF:
+                    if not hidden and 0 <= code <= 0x10FFFF:
                         out.append(_sanitize_literal(chr(code)))
                     skipped = 0
                     while skipped < uc and i < n:
@@ -1864,11 +1878,14 @@ def _tokenize_rtf_body(
                 elif word == "par":
                     out.append("\r")
                 elif word == "line":
-                    out.append("\n")
+                    if not hidden:
+                        out.append("\n")
                 elif word == "tab":
-                    out.append("\t")
+                    if not hidden:
+                        out.append("\t")
                 elif word in _RTF_CHAR_CONTROL_WORDS:
-                    out.append(_RTF_CHAR_CONTROL_WORDS[word])
+                    if not hidden:
+                        out.append(_RTF_CHAR_CONTROL_WORDS[word])
                 continue
 
             _flush_bytes()
@@ -1877,7 +1894,8 @@ def _tokenize_rtf_body(
 
         code_pt = ord(ch)
         if code_pt >= 0x80:
-            byte_buf.append(code_pt)
+            if not hidden:
+                byte_buf.append(code_pt)
             cur_enc = _current_enc()
             if (
                 cur_enc in (None, "gb18030")
@@ -1887,9 +1905,10 @@ def _tokenize_rtf_body(
                 and 0x81 <= ord(s[i + 2]) <= 0xFE
                 and 0x30 <= ord(s[i + 3]) <= 0x39
             ):
-                byte_buf.append(ord(s[i + 1]))
-                byte_buf.append(ord(s[i + 2]))
-                byte_buf.append(ord(s[i + 3]))
+                if not hidden:
+                    byte_buf.append(ord(s[i + 1]))
+                    byte_buf.append(ord(s[i + 2]))
+                    byte_buf.append(ord(s[i + 3]))
                 i += 4
                 continue
             if (
@@ -1899,7 +1918,8 @@ def _tokenize_rtf_body(
                 and 0x40 <= ord(s[i + 1]) < 0x80
                 and s[i + 1] not in ("\\", "{", "}")
             ):
-                byte_buf.append(ord(s[i + 1]))
+                if not hidden:
+                    byte_buf.append(ord(s[i + 1]))
                 i += 2
                 continue
             i += 1
@@ -1923,12 +1943,14 @@ def _tokenize_rtf_body(
                     or s[i + 1 : i + 3] == "\\'"
                 )
             ):
-                byte_buf.append(code_pt)
+                if not hidden:
+                    byte_buf.append(code_pt)
                 i += 1
                 continue
 
         _flush_bytes()
-        out.append(_sanitize_literal(ch))
+        if not hidden:
+            out.append(_sanitize_literal(ch))
         i += 1
 
     _flush_bytes()
@@ -2289,8 +2311,256 @@ def iter_document_tables(doc: Any) -> list[Any]:
     ]
 
 
+_OMATH_PROP_TAGS: frozenset[str] = frozenset(
+    {
+        "rPr",
+        "ctrlPr",
+        "fPr",
+        "sSubPr",
+        "sSupPr",
+        "sSubSupPr",
+        "sPrePr",
+        "radPr",
+        "dPr",
+        "naryPr",
+        "eqArrPr",
+        "mPr",
+        "mrPr",
+        "barPr",
+        "accPr",
+        "boxPr",
+        "borderBoxPr",
+        "funcPr",
+        "groupChrPr",
+        "limLowPr",
+        "limUppPr",
+        "phantPr",
+        "oMathParaPr",
+    }
+)
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _xml_child_attr_val(
+    parent_pr: Any | None, child_local: str, default: str = ""
+) -> str:
+    if parent_pr is None:
+        return default
+    for ch in parent_pr:
+        if _xml_local_name(ch.tag) == child_local:
+            for k, v in ch.attrib.items():
+                if _xml_local_name(k).lower() == "val":
+                    return v
+            return default
+    return default
+
+
+def _wrap_math_atom(text: str) -> str:
+    s = text.strip()
+    if not s:
+        return ""
+    if len(s) <= 1 or s.isalnum():
+        return s
+    if s.startswith("(") and s.endswith(")"):
+        depth = 0
+        balanced = True
+        for idx, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and idx < len(s) - 1:
+                    balanced = False
+                    break
+        if balanced and depth == 0:
+            return s
+    return f"({s})"
+
+
+def _is_hidden_run(node: Any) -> bool:
+    if _xml_local_name(node.tag) != "r":
+        return False
+    for ch in node:
+        if _xml_local_name(ch.tag) == "rPr":
+            for prop in ch:
+                if _xml_local_name(prop.tag) == "vanish":
+                    val = next(
+                        (
+                            v.strip().lower()
+                            for k, v in prop.attrib.items()
+                            if _xml_local_name(k).lower() == "val"
+                        ),
+                        "true",
+                    )
+                    if val not in ("0", "false", "off"):
+                        return True
+    return False
+
+
+def _render_omath_node(node: Any) -> str:
+    ln = _xml_local_name(node.tag)
+    if ln in ("Fallback", "del", "moveFrom") or ln in _OMATH_PROP_TAGS:
+        return ""
+    if _is_hidden_run(node):
+        return ""
+    if ln == "t":
+        return node.text or ""
+    if ln in ("br", "cr"):
+        return "\n"
+    if ln in ("tab", "ptab"):
+        return "\t"
+    if ln == "noBreakHyphen":
+        return "-"
+
+    def _child_by_local(name: str) -> Any | None:
+        return next((ch for ch in node if _xml_local_name(ch.tag) == name), None)
+
+    def _render_child(name: str) -> str:
+        ch = _child_by_local(name)
+        return _render_omath_node(ch).strip() if ch is not None else ""
+
+    if ln == "f":
+        f_pr = _child_by_local("fPr")
+        f_type = _xml_child_attr_val(f_pr, "type", "bar").strip().lower()
+        num_s = _render_child("num")
+        den_s = _render_child("den")
+        if f_type == "nobar":
+            return f"({num_s}, {den_s})" if num_s or den_s else ""
+        if num_s and den_s:
+            return f"{_wrap_math_atom(num_s)}/{_wrap_math_atom(den_s)}"
+        return num_s or (f"/{_wrap_math_atom(den_s)}" if den_s else "")
+
+    if ln == "sSup":
+        base_s = _render_child("e")
+        sup_s = _render_child("sup")
+        if base_s and sup_s:
+            return f"{_wrap_math_atom(base_s)}^{_wrap_math_atom(sup_s)}"
+        return base_s or (f"^{_wrap_math_atom(sup_s)}" if sup_s else "")
+
+    if ln == "sSub":
+        base_s = _render_child("e")
+        sub_s = _render_child("sub")
+        if base_s and sub_s:
+            return f"{_wrap_math_atom(base_s)}_{_wrap_math_atom(sub_s)}"
+        return base_s or (f"_{_wrap_math_atom(sub_s)}" if sub_s else "")
+
+    if ln == "sSubSup":
+        base_s = _render_child("e")
+        sub_s = _render_child("sub")
+        sup_s = _render_child("sup")
+        res = _wrap_math_atom(base_s) if (sub_s or sup_s) else base_s
+        if sub_s:
+            res += f"_{_wrap_math_atom(sub_s)}"
+        if sup_s:
+            res += f"^{_wrap_math_atom(sup_s)}"
+        return res
+
+    if ln == "sPre":
+        sub_s = _render_child("sub")
+        sup_s = _render_child("sup")
+        base_s = _render_child("e")
+        res = ""
+        if sub_s:
+            res += f"_{_wrap_math_atom(sub_s)}"
+        if sup_s:
+            res += f"^{_wrap_math_atom(sup_s)}"
+        res += _wrap_math_atom(base_s) if (sub_s or sup_s) else base_s
+        return res
+
+    if ln == "rad":
+        rad_pr = _child_by_local("radPr")
+        deg_hide = _xml_child_attr_val(rad_pr, "degHide", "").strip().lower()
+        deg_s = "" if deg_hide in ("1", "true", "on") else _render_child("deg")
+        expr_s = _render_child("e")
+        if deg_s:
+            return f"root({deg_s}, {expr_s})"
+        return f"sqrt({expr_s})"
+
+    if ln == "d":
+        d_pr = _child_by_local("dPr")
+        beg = _xml_child_attr_val(d_pr, "begChr", "(")
+        sep = _xml_child_attr_val(d_pr, "sepChr", "|")
+        end = _xml_child_attr_val(d_pr, "endChr", ")")
+        items = [
+            _render_omath_node(ch).strip()
+            for ch in node
+            if _xml_local_name(ch.tag) == "e"
+        ]
+        return f"{beg}{sep.join(items)}{end}"
+
+    if ln == "nary":
+        nary_pr = _child_by_local("naryPr")
+        op_chr = _xml_child_attr_val(nary_pr, "chr", "∑")
+        sub_hide = _xml_child_attr_val(nary_pr, "subHide", "").strip().lower()
+        sup_hide = _xml_child_attr_val(nary_pr, "supHide", "").strip().lower()
+        sub_s = "" if sub_hide in ("1", "true", "on") else _render_child("sub")
+        sup_s = "" if sup_hide in ("1", "true", "on") else _render_child("sup")
+        expr_s = _render_child("e")
+        res = op_chr
+        if sub_s:
+            res += f"_{_wrap_math_atom(sub_s)}"
+        if sup_s:
+            res += f"^{_wrap_math_atom(sup_s)}"
+        if expr_s:
+            res += f"({expr_s})" if (sub_s or sup_s) else expr_s
+        return res
+
+    if ln == "func":
+        fname_s = _render_child("fName")
+        expr_s = _render_child("e")
+        if fname_s and expr_s:
+            return f"{fname_s}({expr_s})"
+        return fname_s or expr_s
+
+    if ln == "limLow":
+        base_s = _render_child("e")
+        lim_s = _render_child("lim")
+        return f"{base_s}_({lim_s})" if lim_s else base_s
+
+    if ln == "limUpp":
+        base_s = _render_child("e")
+        lim_s = _render_child("lim")
+        return f"{base_s}^({lim_s})" if lim_s else base_s
+
+    if ln == "eqArr":
+        items = [
+            _render_omath_node(ch).strip()
+            for ch in node
+            if _xml_local_name(ch.tag) == "e"
+        ]
+        return "; ".join(it for it in items if it)
+
+    if ln == "m":
+        rows_s: list[str] = []
+        for mr in node:
+            if _xml_local_name(mr.tag) != "mr":
+                continue
+            cols = [
+                _render_omath_node(ch).strip()
+                for ch in mr
+                if _xml_local_name(ch.tag) == "e"
+            ]
+            rows_s.append(", ".join(cols))
+        return f"[{'; '.join(rows_s)}]"
+
+    if ln == "acc":
+        acc_pr = _child_by_local("accPr")
+        acc_chr = _xml_child_attr_val(acc_pr, "chr", "̂")
+        expr_s = _render_child("e")
+        return f"{expr_s}{acc_chr}" if expr_s else ""
+
+    if ln == "bar":
+        expr_s = _render_child("e")
+        return f"bar({expr_s})" if expr_s else ""
+
+    return "".join(_render_omath_node(ch) for ch in node)
+
+
 def _extract_element_lines_text(elem: Any) -> str:
-    """Extract normalized text from `<w:p>`, `<m:oMathPara>`, or `<w:tbl>`, preserving cell, paragraph, equation (`<m:t>`), and `<w:br/>` boundaries."""
+    """Extract normalized text from `<w:p>`, `<m:oMathPara>`, or `<w:tbl>`, preserving cell, paragraph, equation (`<m:oMath>`), and `<w:br/>` boundaries."""
     paragraphs = (
         [elem]
         if elem.tag in (f"{{{W_NS}}}p", f"{{{M_NS}}}oMathPara", f"{{{M_NS}}}oMath")
@@ -2298,7 +2568,10 @@ def _extract_element_lines_text(elem: Any) -> str:
     )
     def _walk_p(node: Any, out: list[str]) -> None:
         local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
-        if local_name in ("Fallback", "del", "moveFrom"):
+        if local_name in ("Fallback", "del", "moveFrom") or _is_hidden_run(node):
+            return
+        if local_name == "oMath":
+            out.append(_render_omath_node(node))
             return
         if node.tag in (f"{{{W_NS}}}t", f"{{{M_NS}}}t"):
             out.append(node.text or "")
