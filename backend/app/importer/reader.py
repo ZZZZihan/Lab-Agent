@@ -1071,9 +1071,9 @@ def _parse_word2003_xml_doc(
         parts: list[str] = []
 
         def _walk(node: ET.Element) -> None:
-            ln = _local(node.tag)
-            if ln in ("Fallback", "del", "moveFrom") or _is_hidden_run(node):
+            if _is_wordml_deletion(node):
                 return
+            ln = _local(node.tag)
             if ln == "oMath":
                 parts.append(_render_omath_node(node))
                 return
@@ -1094,21 +1094,46 @@ def _parse_word2003_xml_doc(
     def _iter_wordml_blocks(elem: ET.Element) -> list[ET.Element]:
         out: list[ET.Element] = []
         for ch in elem:
+            if _is_wordml_deletion(ch):
+                continue
             ln = _local(ch.tag)
             if ln in ("p", "tbl", "oMathPara", "oMath"):
                 out.append(ch)
-            elif ln in ("sect", "sub-section", "sdt", "sdtContent", "customXml", "body"):
+            elif ln in (
+                "sect",
+                "sub-section",
+                "sdt",
+                "sdtContent",
+                "customXml",
+                "body",
+                "annotation",
+                "ins",
+            ):
                 out.extend(_iter_wordml_blocks(ch))
         return out
 
     def _iter_wordml_trs(elem: ET.Element) -> list[ET.Element]:
         out: list[ET.Element] = []
         for ch in elem:
+            if _is_wordml_deletion(ch):
+                continue
             ln = _local(ch.tag)
             if ln == "tr":
                 out.append(ch)
-            elif ln in ("sdt", "sdtContent", "customXml"):
+            elif ln in ("sdt", "sdtContent", "customXml", "annotation", "ins"):
                 out.extend(_iter_wordml_trs(ch))
+        return out
+
+    def _iter_wordml_cell_ps(elem: ET.Element) -> list[ET.Element]:
+        out: list[ET.Element] = []
+        for ch in elem:
+            if _is_wordml_deletion(ch):
+                continue
+            ln = _local(ch.tag)
+            if ln == "p":
+                out.append(ch)
+            else:
+                out.extend(_iter_wordml_cell_ps(ch))
         return out
 
     tables: list[list[list[str]]] = []
@@ -1133,8 +1158,7 @@ def _parse_word2003_xml_doc(
                         continue
                     cell_ps = [
                         _p_text(p)
-                        for p in tc.iter()
-                        if _local(p.tag) == "p"
+                        for p in _iter_wordml_cell_ps(tc)
                     ]
                     cell_text = "\n".join(cp for cp in cell_ps if cp)
                     tc_pr = next(
@@ -1222,7 +1246,7 @@ class _HtmlDocParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
-        if t in ("script", "style", "head"):
+        if t in ("script", "style", "head", "del"):
             self._skip_depth += 1
             return
         if self._skip_depth > 0:
@@ -1265,7 +1289,7 @@ class _HtmlDocParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         t = tag.lower()
-        if t in ("script", "style", "head") and self._skip_depth > 0:
+        if t in ("script", "style", "head", "del") and self._skip_depth > 0:
             self._skip_depth -= 1
             return
         if self._skip_depth > 0:
@@ -1689,14 +1713,15 @@ def _tokenize_rtf_body(
     font_encodings: dict[int, str] | None = None,
     default_font: int | None = None,
 ) -> str:
-    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, hidden-text state (`\\v`), and codepage bytes."""
+    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, hidden/deleted state (`\\v`, `\\deleted`), and codepage bytes."""
     out: list[str] = []
     byte_buf = bytearray()
     uc = 1
     font_enc_map = font_encodings or {}
     active_font: int | None = default_font
     hidden = False
-    state_stack: list[tuple[int, int | None, bool]] = []
+    deleted = False
+    state_stack: list[tuple[int, int | None, bool, bool]] = []
 
     def _current_enc() -> str | None:
         if active_font is not None and active_font in font_enc_map:
@@ -1716,7 +1741,7 @@ def _tokenize_rtf_body(
             return
         b = bytes(byte_buf)
         byte_buf.clear()
-        if hidden:
+        if hidden or deleted:
             return
         eff_enc = _current_enc()
         if eff_enc is not None:
@@ -1737,13 +1762,13 @@ def _tokenize_rtf_body(
             continue
         if ch == "{":
             _flush_bytes()
-            state_stack.append((uc, active_font, hidden))
+            state_stack.append((uc, active_font, hidden, deleted))
             i += 1
             continue
         if ch == "}":
             _flush_bytes()
             if state_stack:
-                uc, active_font, hidden = state_stack.pop()
+                uc, active_font, hidden, deleted = state_stack.pop()
             i += 1
             continue
         if ch == "\\":
@@ -1752,7 +1777,7 @@ def _tokenize_rtf_body(
                 continue
             nxt = s[i + 1]
             if nxt in ("\\", "{", "}"):
-                if not hidden:
+                if not (hidden or deleted):
                     if byte_buf:
                         byte_buf.append(ord(nxt))
                     else:
@@ -1768,7 +1793,7 @@ def _tokenize_rtf_body(
                 continue
             if nxt == "~":
                 _flush_bytes()
-                if not hidden:
+                if not (hidden or deleted):
                     out.append("\u00a0")
                 i += 2
                 continue
@@ -1778,7 +1803,7 @@ def _tokenize_rtf_body(
                 continue
             if nxt == "_":
                 _flush_bytes()
-                if not hidden:
+                if not (hidden or deleted):
                     out.append("-")
                 i += 2
                 continue
@@ -1787,7 +1812,7 @@ def _tokenize_rtf_body(
                 and i + 3 < n
                 and all(c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4])
             ):
-                if not hidden:
+                if not (hidden or deleted):
                     byte_buf.append(int(s[i + 2 : i + 4], 16))
                 i += 4
                 continue
@@ -1815,15 +1840,19 @@ def _tokenize_rtf_body(
                 if word == "v":
                     hidden = arg_str != "0"
                     continue
+                if word == "deleted":
+                    deleted = arg_str != "0"
+                    continue
                 if word == "plain":
                     active_font = default_font
                     hidden = False
+                    deleted = False
                     continue
                 if word == "u" and arg_str:
                     code = int(arg_str)
                     if code < 0:
                         code += 65536
-                    if not hidden and 0 <= code <= 0x10FFFF:
+                    if not (hidden or deleted) and 0 <= code <= 0x10FFFF:
                         out.append(_sanitize_literal(chr(code)))
                     skipped = 0
                     while skipped < uc and i < n:
@@ -1880,13 +1909,13 @@ def _tokenize_rtf_body(
                 elif word == "par":
                     out.append("\r")
                 elif word == "line":
-                    if not hidden:
+                    if not (hidden or deleted):
                         out.append("\n")
                 elif word == "tab":
-                    if not hidden:
+                    if not (hidden or deleted):
                         out.append("\t")
                 elif word in _RTF_CHAR_CONTROL_WORDS:
-                    if not hidden:
+                    if not (hidden or deleted):
                         out.append(_RTF_CHAR_CONTROL_WORDS[word])
                 continue
 
@@ -1896,7 +1925,7 @@ def _tokenize_rtf_body(
 
         code_pt = ord(ch)
         if code_pt >= 0x80:
-            if not hidden:
+            if not (hidden or deleted):
                 byte_buf.append(code_pt)
             cur_enc = _current_enc()
             if (
@@ -1907,7 +1936,7 @@ def _tokenize_rtf_body(
                 and 0x81 <= ord(s[i + 2]) <= 0xFE
                 and 0x30 <= ord(s[i + 3]) <= 0x39
             ):
-                if not hidden:
+                if not (hidden or deleted):
                     byte_buf.append(ord(s[i + 1]))
                     byte_buf.append(ord(s[i + 2]))
                     byte_buf.append(ord(s[i + 3]))
@@ -1920,7 +1949,7 @@ def _tokenize_rtf_body(
                 and 0x40 <= ord(s[i + 1]) < 0x80
                 and s[i + 1] not in ("\\", "{", "}")
             ):
-                if not hidden:
+                if not (hidden or deleted):
                     byte_buf.append(ord(s[i + 1]))
                 i += 2
                 continue
@@ -1934,7 +1963,7 @@ def _tokenize_rtf_body(
             "cp950",
             "johab",
         ):
-            if not hidden:
+            if not (hidden or deleted):
                 byte_buf.append(code_pt)
             i += 1
             continue
@@ -1957,13 +1986,13 @@ def _tokenize_rtf_body(
                     or s[i + 1 : i + 3] == "\\'"
                 )
             ):
-                if not hidden:
+                if not (hidden or deleted):
                     byte_buf.append(code_pt)
                 i += 1
                 continue
 
         _flush_bytes()
-        if not hidden:
+        if not (hidden or deleted):
             out.append(_sanitize_literal(ch))
         i += 1
 
@@ -2400,7 +2429,7 @@ def _is_hidden_run(node: Any) -> bool:
     for ch in node:
         if _xml_local_name(ch.tag) == "rPr":
             for prop in ch:
-                if _xml_local_name(prop.tag) == "vanish":
+                if _xml_local_name(prop.tag) in ("vanish", "del"):
                     val = next(
                         (
                             v.strip().lower()
@@ -2414,11 +2443,22 @@ def _is_hidden_run(node: Any) -> bool:
     return False
 
 
+def _is_wordml_deletion(node: Any) -> bool:
+    ln = _xml_local_name(node.tag)
+    if ln in ("Fallback", "del", "moveFrom") or _is_hidden_run(node):
+        return True
+    if ln == "annotation":
+        for k, v in node.attrib.items():
+            if _xml_local_name(k).lower() == "type" and v.strip().lower().endswith(
+                "deletion"
+            ):
+                return True
+    return False
+
+
 def _render_omath_node(node: Any) -> str:
     ln = _xml_local_name(node.tag)
-    if ln in ("Fallback", "del", "moveFrom") or ln in _OMATH_PROP_TAGS:
-        return ""
-    if _is_hidden_run(node):
+    if _is_wordml_deletion(node) or ln in _OMATH_PROP_TAGS:
         return ""
     if ln == "t":
         return node.text or ""
@@ -2573,17 +2613,29 @@ def _render_omath_node(node: Any) -> str:
     return "".join(_render_omath_node(ch) for ch in node)
 
 
+def _iter_visible_docx_paragraphs(node: Any) -> list[Any]:
+    out: list[Any] = []
+    for ch in node:
+        if _is_wordml_deletion(ch):
+            continue
+        if ch.tag == f"{{{W_NS}}}p":
+            out.append(ch)
+        else:
+            out.extend(_iter_visible_docx_paragraphs(ch))
+    return out
+
+
 def _extract_element_lines_text(elem: Any) -> str:
     """Extract normalized text from `<w:p>`, `<m:oMathPara>`, or `<w:tbl>`, preserving cell, paragraph, equation (`<m:oMath>`), and `<w:br/>` boundaries."""
     paragraphs = (
         [elem]
         if elem.tag in (f"{{{W_NS}}}p", f"{{{M_NS}}}oMathPara", f"{{{M_NS}}}oMath")
-        else list(elem.iter(f"{{{W_NS}}}p"))
+        else _iter_visible_docx_paragraphs(elem)
     )
     def _walk_p(node: Any, out: list[str]) -> None:
-        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
-        if local_name in ("Fallback", "del", "moveFrom") or _is_hidden_run(node):
+        if _is_wordml_deletion(node):
             return
+        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
         if local_name == "oMath":
             out.append(_render_omath_node(node))
             return

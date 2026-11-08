@@ -314,11 +314,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par"
         b"\\pard{\\*\\bkmkstart start}Important text{\\*\\bkmkend start}\\par"
         b"\\pard \\u160\\~A\\u8212\\emdash B\\u8209\\-C\\par"
-        b"\\pard Visible {\\v HiddenGroup \\u20013? \\'e9} StillVisible \\v HiddenRun \\v0 EndVisible \\v HiddenPlain \\plain ResetVisible\\par}"
+        b"\\pard Visible {\\v HiddenGroup \\u20013? \\'e9} StillVisible \\v HiddenRun \\v0 EndVisible \\v HiddenPlain \\plain ResetVisible\\par"
+        b"\\pard Dose: {\\deleted 100 mg }\\deleted 50 mg \\deleted0 10 mg \\deleted 20 mg \\plain 5 mg\\par}"
     )
     assert (
         extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
-        == "中文\n\nImportant text\n\nA—B‐C\n\nVisible StillVisible EndVisible ResetVisible"
+        == "中文\n\nImportant text\n\nA—B‐C\n\nVisible StillVisible EndVisible ResetVisible\n\nDose: 10 mg 5 mg"
     )
     rtf_cp932_escaped_trail = (
         b"{\\rtf1\\ansi\\ansicpg932 \\pard \x95\\\\ and \\'95\\\\ and \\'95\\'5c\\par}"
