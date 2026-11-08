@@ -129,17 +129,17 @@ def _strip_msdoc_fields(raw: str) -> str:
     if "\x13" not in raw and "\x14" not in raw and "\x15" not in raw:
         return raw
     out: list[str] = []
-    in_instr = 0
+    field_stack: list[bool] = []
     for ch in raw:
         if ch == "\x13":
-            in_instr += 1
+            field_stack.append(True)
         elif ch == "\x14":
-            if in_instr > 0:
-                in_instr -= 1
+            if field_stack:
+                field_stack[-1] = False
         elif ch == "\x15":
-            if in_instr > 0:
-                in_instr -= 1
-        elif in_instr == 0:
+            if field_stack:
+                field_stack.pop()
+        elif not any(field_stack):
             out.append(ch)
     return "".join(out)
 
@@ -1248,6 +1248,9 @@ class _HtmlDocParser(HTMLParser):
                     self._col_idx += 1
                     self._consume_pending_spans()
             self._current_cell = None
+        elif t in ("td", "th") and self._in_table > 1:
+            if self._current_cell is not None:
+                self._current_cell.append(" ")
         elif t == "tr" and self._in_table == 1:
             if self._current_row is not None:
                 self._consume_pending_spans()
@@ -1259,6 +1262,9 @@ class _HtmlDocParser(HTMLParser):
             if self._current_row:
                 self._current_table.append(self._current_row)
             self._current_row = None
+        elif t == "tr" and self._in_table > 1:
+            if self._current_cell is not None:
+                self._current_cell.append("\n")
         elif t == "table" and self._in_table > 0:
             if self._in_table == 1:
                 self._pending_spans.clear()
@@ -2439,6 +2445,37 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
         return "\n\n".join(blocks_out)
 
     # python-docx Document
+    def _extract_tc_text(tc_elem: Any) -> str:
+        parts: list[str] = []
+        for child in _iter_body_elements(tc_elem):
+            if child.tag == f"{{{W_NS}}}p":
+                p_txt = _extract_element_lines_text(child).strip()
+                if p_txt:
+                    parts.append(p_txt)
+            elif child.tag == f"{{{W_NS}}}tbl":
+                sub_tbl = _extract_docx_table_text(child)
+                if sub_tbl:
+                    parts.append(sub_tbl)
+        return "\n".join(parts)
+
+    def _extract_docx_table_text(tbl_elem: Any) -> str:
+        tbl_obj = Table(tbl_elem, doc._body)
+        row_lines: list[str] = []
+        for row in tbl_obj.rows:
+            seen_tc: set[int] = set()
+            cells: list[str] = []
+            for cell in row.cells:
+                tc_id = id(cell._tc)
+                if tc_id in seen_tc:
+                    continue
+                seen_tc.add(tc_id)
+                c_txt = _extract_tc_text(cell._tc).strip()
+                if c_txt:
+                    cells.append(c_txt.replace("\n", " "))
+            if cells:
+                row_lines.append(" | ".join(cells))
+        return "\n".join(ln for ln in row_lines if ln.strip())
+
     out_chunks: list[str] = []
     for elem in _iter_body_elements(doc.element.body):
         if elem.tag == f"{{{W_NS}}}p":
@@ -2460,13 +2497,7 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
                 txt = f"## {txt}"
             out_chunks.append(txt)
         elif elem.tag == f"{{{W_NS}}}tbl":
-            tbl_obj = Table(elem, doc._body)
-            grid = extract_table_grid(tbl_obj)
-            row_lines = [
-                " | ".join(c.replace("\n", " ") for c in row if c.strip())
-                for row in grid
-            ]
-            tbl_str = "\n".join(ln for ln in row_lines if ln.strip())
+            tbl_str = _extract_docx_table_text(elem)
             if tbl_str:
                 out_chunks.append(tbl_str)
     return "\n\n".join(out_chunks)

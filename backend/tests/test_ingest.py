@@ -189,6 +189,9 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     tbl.rows[0].cells[1].text = "阈值"
     tbl.rows[1].cells[0].text = "液位"
     tbl.rows[1].cells[1].text = "80%"
+    inner_tbl = tbl.rows[1].cells[1].add_table(rows=1, cols=2)
+    inner_tbl.rows[0].cells[0].text = "温度"
+    inner_tbl.rows[0].cells[1].text = "-196C"
     buf = io.BytesIO()
     d.save(buf)
     docx_bytes = buf.getvalue()
@@ -196,7 +199,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
     assert "Sample Temperature" in extracted_docx.text
-    assert "液位 | 80%" in extracted_docx.text
+    assert "液位 | 80% 温度 | -196C" in extracted_docx.text
 
     # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \ucN fallback counts, literal braces/backslashes, surrogate pairs, and multi-row tables
     rtf_bytes = (
@@ -329,6 +332,13 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     fn_extracted = extract_upload("footnote.doc", bytes(fn_ole2), max_chars=300_000)
     assert fn_extracted.text.strip() == "Main 😀\n\nSub 🚀"
     assert "FOOTNOTE" not in fn_extracted.text
+    nested_field_ole2 = build_ole2_doc_bytes(
+        paragraphs=['\x13 IF \x13 REF x \x14 1 \x15 = 1 "Yes" "No" \x14Yes\x15']
+    )
+    assert (
+        extract_upload("nested_field.doc", nested_field_ole2, max_chars=300_000).text.strip()
+        == "Yes"
+    )
 
     # 3c. OLE2 .doc with an embedded ObjectPool child storage containing a nested WordDocument stream
     embedded_ole2 = bytearray(ole2_bytes)
