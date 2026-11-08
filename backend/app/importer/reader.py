@@ -1856,8 +1856,22 @@ def _tokenize_rtf_body(
         code_pt = ord(ch)
         if code_pt >= 0x80:
             byte_buf.append(code_pt)
+            cur_enc = _current_enc()
             if (
-                _current_enc() in (None, "gb18030", "cp932", "cp949", "cp950", "johab")
+                cur_enc in (None, "gb18030")
+                and 0x81 <= code_pt <= 0xFE
+                and i + 3 < n
+                and 0x30 <= ord(s[i + 1]) <= 0x39
+                and 0x81 <= ord(s[i + 2]) <= 0xFE
+                and 0x30 <= ord(s[i + 3]) <= 0x39
+            ):
+                byte_buf.append(ord(s[i + 1]))
+                byte_buf.append(ord(s[i + 2]))
+                byte_buf.append(ord(s[i + 3]))
+                i += 4
+                continue
+            if (
+                cur_enc in (None, "gb18030", "cp932", "cp949", "cp950", "johab")
                 and 0x81 <= code_pt <= 0xFE
                 and i + 1 < n
                 and 0x40 <= ord(s[i + 1]) < 0x80
@@ -1868,6 +1882,28 @@ def _tokenize_rtf_body(
                 continue
             i += 1
             continue
+
+        if (
+            byte_buf
+            and len(byte_buf) % 2 == 1
+            and 0x81 <= byte_buf[-1] <= 0xFE
+            and _current_enc() in (None, "gb18030")
+            and 0x30 <= code_pt <= 0x39
+        ):
+            if (
+                len(byte_buf) >= 3
+                and 0x81 <= byte_buf[-3] <= 0xFE
+                and 0x30 <= byte_buf[-2] <= 0x39
+            ) or (
+                i + 1 < n
+                and (
+                    0x81 <= ord(s[i + 1]) <= 0xFE
+                    or s[i + 1 : i + 3] == "\\'"
+                )
+            ):
+                byte_buf.append(code_pt)
+                i += 1
+                continue
 
         _flush_bytes()
         out.append(_sanitize_literal(ch))
@@ -2176,21 +2212,23 @@ def extract_table_grid(table: Any) -> list[list[str]]:
     if isinstance(table, list):
         return [[normalize_cell_text(str(cell)) for cell in row] for row in table]
     rows: list[list[str]] = []
-    tc_text_cache: dict[int, str] = {}
+    tc_text_cache: dict[int, tuple[Any, str]] = {}
     propagated_chars = 0
     for row in table.rows:
-        seen_tc: set[int] = set()
+        seen_tc: dict[int, Any] = {}
         cells: list[str] = []
         for cell in row.cells:
-            tc_id = id(cell._tc)
+            tc_obj = cell._tc
+            tc_id = id(tc_obj)
             if tc_id in seen_tc:
                 continue
-            seen_tc.add(tc_id)
+            seen_tc[tc_id] = tc_obj
             if tc_id not in tc_text_cache:
-                tc_text_cache[tc_id] = normalize_cell_text(cell.text)
-                cells.append(tc_text_cache[tc_id])
+                norm_val = normalize_cell_text(cell.text)
+                tc_text_cache[tc_id] = (tc_obj, norm_val)
+                cells.append(norm_val)
             else:
-                cached = tc_text_cache[tc_id]
+                cached = tc_text_cache[tc_id][1]
                 if len(cached) <= 256 and propagated_chars + len(cached) <= 65_536:
                     cells.append(cached)
                     propagated_chars += len(cached)
@@ -2555,15 +2593,16 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
     def _extract_docx_table_text(tbl_elem: Any) -> str:
         tbl_obj = Table(tbl_elem, doc._body)
         row_lines: list[str] = []
-        seen_tc: set[int] = set()
+        seen_tc: dict[int, Any] = {}
         for row in tbl_obj.rows:
             cells: list[str] = []
             for cell in row.cells:
-                tc_id = id(cell._tc)
+                tc_obj = cell._tc
+                tc_id = id(tc_obj)
                 if tc_id in seen_tc:
                     continue
-                seen_tc.add(tc_id)
-                c_txt = _extract_tc_text(cell._tc).strip()
+                seen_tc[tc_id] = tc_obj
+                c_txt = _extract_tc_text(tc_obj).strip()
                 if c_txt:
                     cells.append(c_txt.replace("\n", " "))
             if cells:
