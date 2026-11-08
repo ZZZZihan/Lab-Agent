@@ -1328,6 +1328,28 @@ _RTF_CODEPAGE_MAP: dict[int, str] = {
     65001: "utf-8",
 }
 
+_RTF_CHARSET_MAP: dict[int, str] = {
+    0: "cp1252",
+    2: "cp1252",
+    77: "mac_roman",
+    128: "cp932",
+    129: "cp949",
+    130: "johab",
+    134: "gb18030",
+    136: "cp950",
+    161: "cp1253",
+    162: "cp1254",
+    163: "cp1258",
+    177: "cp1255",
+    178: "cp1256",
+    186: "cp1257",
+    204: "cp1251",
+    222: "cp874",
+    238: "cp1250",
+    254: "cp437",
+    255: "cp850",
+}
+
 _RTF_SKIP_DESTINATIONS: frozenset[str] = frozenset(
     {
         "fonttbl",
@@ -1388,18 +1410,23 @@ def _strip_rtf_nonbody_groups(raw: str) -> str:
     return "".join(out)
 
 
+def _resolve_rtf_codepage_num(cpg: int) -> str | None:
+    if cpg in _RTF_CODEPAGE_MAP:
+        return _RTF_CODEPAGE_MAP[cpg]
+    cand = f"cp{cpg}"
+    try:
+        codecs.lookup(cand)
+        return cand
+    except LookupError:
+        return None
+
+
 def _resolve_rtf_encoding(raw_str: str) -> str | None:
     cpg_match = re.search(r"\\ansicpg(\d+)(?![a-zA-Z0-9])", raw_str[:4096])
     if cpg_match is not None:
-        cpg = int(cpg_match.group(1))
-        if cpg in _RTF_CODEPAGE_MAP:
-            return _RTF_CODEPAGE_MAP[cpg]
-        cand = f"cp{cpg}"
-        try:
-            "".encode(cand)
-            return cand
-        except LookupError:
-            pass
+        resolved = _resolve_rtf_codepage_num(int(cpg_match.group(1)))
+        if resolved is not None:
+            return resolved
     if re.search(r"\\mac(?![a-zA-Z])", raw_str[:1024]):
         return "mac_roman"
     if re.search(r"\\pca(?![a-zA-Z])", raw_str[:1024]):
@@ -1407,6 +1434,77 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
     if re.search(r"\\pc(?![a-zA-Z])", raw_str[:1024]):
         return "cp437"
     return None
+
+
+def _extract_rtf_font_encodings(raw_str: str) -> tuple[dict[int, str], int | None]:
+    """Parse `\\deffN` and `{\\fonttbl ...}` to map font index `N` -> Python codec name."""
+    deff_match = re.search(r"\\deff(-?\d+)(?![a-zA-Z0-9])", raw_str[:4096])
+    default_font = int(deff_match.group(1)) if deff_match is not None else None
+    font_map: dict[int, str] = {}
+    m_ft = re.search(r"\{\s*\\fonttbl(?![a-zA-Z])", raw_str)
+    if m_ft is None:
+        return font_map, default_font
+
+    i = m_ft.start()
+    n = len(raw_str)
+    depth = 0
+    cur_f: int | None = None
+    pending_enc: str | None = None
+    while i < n:
+        ch = raw_str[i]
+        if ch == "\\" and i + 1 < n and raw_str[i + 1] in ("\\", "{", "}"):
+            i += 2
+            continue
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            if depth <= 2:
+                if cur_f is not None and pending_enc is not None and cur_f not in font_map:
+                    font_map[cur_f] = pending_enc
+                cur_f = None
+                pending_enc = None
+            depth -= 1
+            i += 1
+            if depth <= 0:
+                break
+            continue
+        if ch == ";":
+            if cur_f is not None and pending_enc is not None and cur_f not in font_map:
+                font_map[cur_f] = pending_enc
+            cur_f = None
+            pending_enc = None
+            i += 1
+            continue
+        if ch == "\\":
+            m_cw = re.match(r"\\([a-zA-Z]+)(-?\d*) ?", raw_str[i : i + 64])
+            if m_cw is not None:
+                word = m_cw.group(1).lower()
+                arg_str = m_cw.group(2)
+                i += m_cw.end()
+                if word == "f" and arg_str:
+                    cur_f = int(arg_str)
+                    if pending_enc is not None:
+                        font_map[cur_f] = pending_enc
+                        pending_enc = None
+                elif word == "fcharset" and arg_str:
+                    cs_enc = _RTF_CHARSET_MAP.get(int(arg_str))
+                    if cs_enc is not None:
+                        if cur_f is not None:
+                            font_map[cur_f] = cs_enc
+                        else:
+                            pending_enc = cs_enc
+                elif word == "cpg" and arg_str:
+                    cpg_enc = _resolve_rtf_codepage_num(int(arg_str))
+                    if cpg_enc is not None:
+                        if cur_f is not None:
+                            font_map[cur_f] = cpg_enc
+                        else:
+                            pending_enc = cpg_enc
+                continue
+        i += 1
+    return font_map, default_font
 
 
 _RTF_CHAR_CONTROL_WORDS: dict[str, str] = {
@@ -1429,13 +1527,24 @@ _RTF_CHAR_CONTROL_WORDS: dict[str, str] = {
 }
 
 
-def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
-    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, and codepage bytes."""
+def _tokenize_rtf_body(
+    s: str,
+    declared_enc: str | None,
+    font_encodings: dict[int, str] | None = None,
+    default_font: int | None = None,
+) -> str:
+    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, and codepage bytes."""
     out: list[str] = []
     byte_buf = bytearray()
     uc = 1
-    uc_stack: list[int] = []
-    is_cjk_mb = declared_enc in (None, "gb18030", "cp932", "cp949", "cp950")
+    font_enc_map = font_encodings or {}
+    active_font: int | None = default_font
+    state_stack: list[tuple[int, int | None]] = []
+
+    def _current_enc() -> str | None:
+        if active_font is not None and active_font in font_enc_map:
+            return font_enc_map[active_font]
+        return declared_enc
 
     def _sanitize_literal(text: str) -> str:
         return (
@@ -1450,8 +1559,9 @@ def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
             return
         b = bytes(byte_buf)
         byte_buf.clear()
-        if declared_enc is not None:
-            decoded = b.decode(declared_enc, errors="replace")
+        eff_enc = _current_enc()
+        if eff_enc is not None:
+            decoded = b.decode(eff_enc, errors="replace")
         else:
             try:
                 decoded = b.decode("gb18030", errors="strict")
@@ -1468,13 +1578,13 @@ def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
             continue
         if ch == "{":
             _flush_bytes()
-            uc_stack.append(uc)
+            state_stack.append((uc, active_font))
             i += 1
             continue
         if ch == "}":
             _flush_bytes()
-            if uc_stack:
-                uc = uc_stack.pop()
+            if state_stack:
+                uc, active_font = state_stack.pop()
             i += 1
             continue
         if ch == "\\":
@@ -1525,6 +1635,17 @@ def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
                 i += m_cw.end()
                 if word == "uc" and arg_str:
                     uc = max(0, int(arg_str))
+                    continue
+                if word == "f" and arg_str:
+                    active_font = int(arg_str)
+                    continue
+                if word == "af" and arg_str:
+                    af_idx = int(arg_str)
+                    if af_idx in font_enc_map and active_font is None:
+                        active_font = af_idx
+                    continue
+                if word == "plain":
+                    active_font = default_font
                     continue
                 if word == "u" and arg_str:
                     code = int(arg_str)
@@ -1593,7 +1714,7 @@ def _tokenize_rtf_body(s: str, declared_enc: str | None) -> str:
         if code_pt >= 0x80:
             byte_buf.append(code_pt)
             if (
-                is_cjk_mb
+                _current_enc() in (None, "gb18030", "cp932", "cp949", "cp950", "johab")
                 and 0x81 <= code_pt <= 0xFE
                 and i + 1 < n
                 and 0x40 <= ord(s[i + 1]) < 0x80
@@ -1629,15 +1750,24 @@ def _parse_rtf_doc(
         raw_bytes = raw_bytes[3:]
     raw_str = raw_bytes.decode("latin-1", errors="ignore")
     declared_enc = _resolve_rtf_encoding(raw_str)
+    font_encodings, default_font = _extract_rtf_font_encodings(raw_str)
     s = _strip_rtf_nonbody_groups(raw_str)
-    s = _tokenize_rtf_body(s, declared_enc)
-    # Convert in-cell paragraph breaks (\r inside a table row before \x1e) into \n, then split rows cleanly on \r
-    s = re.sub(
-        r"[\x1d\x1e][^\x1e]*?\x1e",
-        lambda m: m.group(0).replace("\r", "\n"),
-        s,
-    )
-    s = s.replace("\x1d", "").replace("\x1e", "\r")
+    s = _tokenize_rtf_body(s, declared_enc, font_encodings, default_font)
+    # Convert in-cell paragraph breaks (\r inside a table row before \x1e) into \n in O(N) time
+    row_chunks = s.split("\x1e")
+    processed_chunks: list[str] = []
+    for chunk in row_chunks[:-1]:
+        if "\x1d" in chunk:
+            before_row, in_row = chunk.split("\x1d", 1)
+            processed_chunks.append(
+                before_row + in_row.replace("\x1d", "").replace("\r", "\n")
+            )
+        elif "\x07" in chunk:
+            processed_chunks.append(chunk.replace("\r", "\n"))
+        else:
+            processed_chunks.append(chunk)
+    processed_chunks.append(row_chunks[-1].replace("\x1d", ""))
+    s = "\r".join(processed_chunks)
 
     tables: list[list[list[str]]] = []
     raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []

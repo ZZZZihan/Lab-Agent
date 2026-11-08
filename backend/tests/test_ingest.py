@@ -239,6 +239,22 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("cw.doc", rtf_special_cw, max_chars=300_000).text.strip()
         == "•Item 1: 2020–2024—“Quoted”and ‘Single’"
     )
+    rtf_font_charset = (
+        b"{\\rtf1\\ansi\\ansicpg1252"
+        b"{\\fonttbl{\\f0\\fcharset134 SimSun;}{\\f1\\fcharset0 Arial;}}"
+        b"\\pard \\f1 caf\\'e9 {\\f0 \\'d6\\'d0\\'ce\\'c4} \\f1 r\\'e9sum\\'e9\\par}"
+    )
+    assert (
+        extract_upload("fcharset.doc", rtf_font_charset, max_chars=300_000).text.strip()
+        == "café 中文 résumé"
+    )
+    rtf_unterminated_rows = (
+        b"{\\rtf1\\ansi\\ansicpg1252 " + (b"\\trowd " * 20000) + b"\\pard Hello\\par}"
+    )
+    assert (
+        extract_upload("unterminated_rows.doc", rtf_unterminated_rows, max_chars=300_000).text.strip()
+        == "Hello"
+    )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
