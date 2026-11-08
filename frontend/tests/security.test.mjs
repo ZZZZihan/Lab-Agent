@@ -708,26 +708,49 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified safety 
     null,
   );
 
-  // 4. Question mentioning 420 A when source & answer say 300 A must extract 300 A, never 420 A
+  // 4. Question mentioning 420 A when source & answer say 300 A (and citation also mentions normal operating level 80% before 65% interlock)
   const correctedSpecTurn = {
     id: "t-3",
-    question: "主磁体额定工作电流上限是420 A吗？",
-    answer: "不是 420 A，根据规程，主磁体额定工作电流上限为 300 A [1]。",
+    question: "主磁体额定工作电流上限是420 A吗？液氦联锁阈值是多少？",
+    answer:
+      "不是 420 A，根据规程，主磁体正常工作电流为 280 A，额定工作电流上限为 300 A；冷却液氦液位低于 65% 时触发联锁停机 [1]。",
     pending: false,
     citations: [
       {
         index: 1,
         title: "低温超导磁体实验规程",
         heading: "§2.1",
-        excerpt: "主磁体额定工作电流上限为 300 A，严禁超流运行。",
+        excerpt:
+          "主磁体正常工作电流为 280 A，额定工作电流上限为 300 A。液氦液位正常工作时为 80%，低于 65% 时触发联锁停机。",
       },
     ],
   };
   const table = chatHelpers.extractSpecTableForTurn(correctedSpecTurn);
   assert.ok(table);
-  assert.equal(table.rows.length, 1);
+  assert.equal(table.rows.length, 2);
   assert.equal(table.rows[0].parameter, "主磁体额定电流");
   assert.equal(table.rows[0].indicator, "300 A");
+  assert.equal(table.rows[1].parameter, "冷却液氦液位");
+  assert.equal(table.rows[1].indicator, "65%");
+  assert.equal(table.rows[1].condition, "< 触发联锁停机");
+
+  // 5. Citation with only normal liquid level (no interlock/shutdown clause) must not produce an interlock row
+  assert.equal(
+    chatHelpers.extractSpecTableForTurn({
+      id: "t-4",
+      question: "液氦液位是多少？",
+      answer: "液氦液位正常工作时为 80% [1]。",
+      pending: false,
+      citations: [
+        {
+          index: 1,
+          title: "低温超导磁体实验规程",
+          excerpt: "液氦液位正常工作时为 80%。",
+        },
+      ],
+    }),
+    null,
+  );
 });
 
 

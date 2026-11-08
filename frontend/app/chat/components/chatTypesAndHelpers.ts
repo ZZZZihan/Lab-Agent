@@ -288,16 +288,25 @@ export function extractMatchedPeopleForTurn(
     return [];
   }
 
-  const citationCorpus = turn.citations
+  const usedSet =
+    turn.citationCheck && turn.citationCheck.used.length > 0
+      ? new Set(turn.citationCheck.used)
+      : null;
+  const activeCitations = usedSet
+    ? turn.citations.filter((c, i) => usedSet.has(c.index ?? i + 1))
+    : turn.citations;
+  const sourceCitations =
+    activeCitations.length > 0 ? activeCitations : turn.citations;
+
+  const citationCorpus = sourceCitations
     .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
     .join(" ");
-  const verifiedCorpus = `${turn.answer} ${citationCorpus}`;
 
   const isMemberRelatedQuery =
     /专长|成员|团队|人员|职称|导师|申请人|负责人|谁|简介|简历|研究方向|课题组/.test(
       turn.question,
     ) ||
-    turn.citations.some(
+    sourceCitations.some(
       (c) =>
         (c.doc_key && c.doc_key.startsWith("lab-profile-")) ||
         (c.heading && /团队成员|成员|申请人|课题组概况/.test(c.heading)) ||
@@ -338,16 +347,15 @@ export function extractMatchedPeopleForTurn(
 
   // 2. If the query is about team/member profiles and citations hit lab-profile member chunks
   if (isMemberRelatedQuery) {
-    const matchedInCitations = sourcePool.filter(
-      (p) => p.name && verifiedCorpus.includes(p.name),
+    const namedInQuestion = sourcePool.filter(
+      (p) => p.name && turn.question.includes(p.name),
+    );
+    const candidatePool =
+      namedInQuestion.length > 0 ? namedInQuestion : sourcePool;
+    const matchedInCitations = candidatePool.filter(
+      (p) => p.name && citationCorpus.includes(p.name),
     );
     if (matchedInCitations.length > 0) {
-      matchedInCitations.sort((a, b) => {
-        const aInQ = turn.question.includes(a.name) ? 0 : 1;
-        const bInQ = turn.question.includes(b.name) ? 0 : 1;
-        if (aInQ !== bInQ) return aInQ - bInQ;
-        return 0;
-      });
       return matchedInCitations.slice(0, 4).map(buildPersonCardData);
     }
   }
@@ -387,6 +395,10 @@ export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
   const verifiedText = [citationText, affirmativeAnswer]
     .filter(Boolean)
     .join("\n");
+  const sentences = verifiedText
+    .split(/[。；;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   const rows: SpecTableRow[] = [];
   const seenParams = new Set<string>();
@@ -409,83 +421,68 @@ export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
     });
   };
 
-  // Detect superconducting magnet SOP parameters strictly from verified source values
-  const currentMatch = verifiedText.match(
-    /(?:主磁体[^。；;\n]{0,28}?(?:额定(?:工作)?电流|工作电流|电流(?:上限)?)|额定(?:工作)?电流(?:上限)?)[^0-9\n]{0,18}?(\d+(?:\.\d+)?\s*A)\b/i,
-  );
-  if (currentMatch?.[1]) {
-    pushRow(
-      "主磁体额定电流",
-      currentMatch[1].replace(/\s+/g, " "),
-      "上限阈值",
-      "limit",
-    );
-  }
-
-  const levelMatch = verifiedText.match(
-    /(?:液氦液位|冷却液氦)[^0-9\n]{0,24}?(\d+(?:\.\d+)?\s*%)/,
-  );
-  if (levelMatch?.[1]) {
-    pushRow(
-      "冷却液氦液位",
-      levelMatch[1].replace(/\s+/g, ""),
-      "< 触发停机",
-      "interlock",
-    );
-  }
-
-  const dayMatch = verifiedText.match(
-    /(?:阻抗校准|失超保护)[^0-9\n]{0,24}?每\s*(\d+)\s*天/,
-  );
-  if (dayMatch?.[1]) {
-    pushRow(
-      "阻抗校准周期",
-      `每 ${dayMatch[1]} 天一次`,
-      "维护周期",
-      "cycle",
-    );
-  }
-
-  // Detect GPU cluster / node spec values strictly from verified source text
-  if (
-    rows.length === 0 &&
-    /A100|GPU\s*集群|算力节点/i.test(verifiedText)
-  ) {
-    const nodeMatch = verifiedText.match(/(\d+\s*台(?:节点)?)/);
-    if (nodeMatch?.[1]) {
-      pushRow("清衡-A100 集群规模", nodeMatch[1], "在线算力节点", "neutral");
-    }
-    const gpuMatch = verifiedText.match(
-      /(\d+\s*(?:张|卡)\s*[^，。；\n]{0,18})/,
-    );
-    if (gpuMatch?.[1]) {
-      pushRow("加速卡配置", gpuMatch[1], "单机/集群规格", "limit");
-    }
-  }
-
-  // Generic numeric threshold extraction from affirmative verified clauses
-  if (
-    rows.length === 0 &&
-    /规程|参数|阈值|上限|下限|联锁|指标/.test(verifiedText)
-  ) {
-    const clauses = affirmativeAnswer
-      .split(/[。；;\n]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const clause of clauses) {
-      const m = clause.match(
-        /^([^，,：:]{2,14}?)(?:上限|下限|阈值|为|是|达到|低于|高于)\s*([0-9]+(?:\.[0-9]+)?\s*[A-Za-z%℃°小时天秒分钟台张万元]+)/,
+  // 1. Main magnet rated current upper limit: require explicit upper-limit / rated-limit clause
+  for (const sentence of sentences) {
+    if (!/主磁体|超导磁体|额定(?:工作)?电流/.test(sentence)) continue;
+    const upperClauseMatch =
+      sentence.match(
+        /(?:额定(?:工作)?电流|工作电流|主磁体电流|电流)[^，,：:]{0,12}?(?:上限(?:阈值)?(?:为|是)?|不得超过|不超过|最大(?:允许)?(?:值|电流)?(?:为|是)?|≤|<=)\s*(\d+(?:\.\d+)?\s*A)\b/i,
+      ) ||
+      sentence.match(
+        /(?:上限(?:阈值)?|最大(?:允许)?电流)[^，,：:]{0,10}?(?:为|是|≤|<=)\s*(\d+(?:\.\d+)?\s*A)\b/i,
+      ) ||
+      (!/正常(?:工作)?(?:时|电流)|日常(?:工作)?电流/.test(sentence)
+        ? sentence.match(
+            /额定(?:工作)?电流(?:为|是)\s*(\d+(?:\.\d+)?\s*A)\b/i,
+          )
+        : null);
+    if (upperClauseMatch?.[1]) {
+      pushRow(
+        "主磁体额定电流",
+        upperClauseMatch[1].replace(/\s+/g, " "),
+        "上限阈值",
+        "limit",
       );
-      if (m) {
-        const isInterlock = /停机|联锁|报警|切断/.test(clause);
-        const isLimit = /上限|最大|不超过|阈值/.test(clause);
-        pushRow(
-          m[1].trim(),
-          m[2].trim(),
-          isInterlock ? "联锁保护条件" : isLimit ? "上限阈值" : "标准工作指标",
-          isInterlock ? "interlock" : isLimit ? "limit" : "neutral",
-        );
-      }
+      break;
+    }
+  }
+
+  // 2. Liquid helium interlock threshold: require explicit low-level comparator + interlock/shutdown clause
+  for (const sentence of sentences) {
+    if (!/液氦/.test(sentence)) continue;
+    const interlockClauseMatch =
+      sentence.match(
+        /(?:低于|小于|下限(?:为|是)?|不足|<=|≤|<)\s*(\d+(?:\.\d+)?\s*%)\s*[^，,。；;\n]{0,20}?(?:触发)?(?:联锁|停机|切断|保护|报警)/,
+      ) ||
+      sentence.match(
+        /(?:联锁(?:停机)?|停机)(?:液位|阈值)?[^，,。；;\n]{0,12}?(?:低于|小于|下限(?:为|是)?|为|是|<=|≤|<)\s*(\d+(?:\.\d+)?\s*%)/,
+      );
+    if (interlockClauseMatch?.[1]) {
+      const isLessOrEqual = /<=|≤|下限/.test(interlockClauseMatch[0]);
+      pushRow(
+        "冷却液氦液位",
+        interlockClauseMatch[1].replace(/\s+/g, ""),
+        isLessOrEqual ? "≤ 触发联锁停机" : "< 触发联锁停机",
+        "interlock",
+      );
+      break;
+    }
+  }
+
+  // 3. Impedance calibration cycle: require explicit calibration cycle clause
+  for (const sentence of sentences) {
+    if (!/阻抗校准/.test(sentence)) continue;
+    const dayMatch =
+      sentence.match(/阻抗校准[^，,。；;\n]{0,20}?每\s*(\d+)\s*天/) ||
+      sentence.match(/每\s*(\d+)\s*天[^，,。；;\n]{0,16}?阻抗校准/);
+    if (dayMatch?.[1]) {
+      pushRow(
+        "阻抗校准周期",
+        `每 ${dayMatch[1]} 天一次`,
+        "维护周期",
+        "cycle",
+      );
+      break;
     }
   }
 

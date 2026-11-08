@@ -365,7 +365,6 @@ function AcademicBoundaryMemo({
                   return (
                     <div
                       key={`${nb.chunk_id || idx}`}
-                      id={`citation-${turn.id}-${citeIdx}`}
                       onClick={() => onSelectCitation(turn.id, citeIdx, nb)}
                       className="cursor-pointer rounded-lg border border-stone-200/80 bg-white/80 px-3 py-2 text-xs transition-colors hover:border-stone-300 dark:border-stone-800 dark:bg-stone-900/50"
                     >

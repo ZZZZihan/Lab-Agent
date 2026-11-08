@@ -346,7 +346,7 @@ export function CopilotInspectorRail({
                     >
                       <div className="flex min-w-0 items-center gap-2">
                         <span className="inline-flex h-5 min-w-[22px] shrink-0 items-center justify-center rounded bg-stone-200/80 px-1 font-mono text-[11px] font-semibold tabular-nums text-stone-700 dark:bg-stone-800 dark:text-stone-300">
-                          {idx + 1}.
+                          {citeIndex}.
                         </span>
                         <span className="truncate font-medium">
                           {pillTitle}
