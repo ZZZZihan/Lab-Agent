@@ -787,31 +787,35 @@ def _extract_t4_foundation(
                 sec_map["relationship"] = body
         return sec_map
 
-    candidates: list[str] = []
+    candidates: list[tuple[str, int]] = []
     for grid in grids:
         grid_cells: list[str] = []
         for row in grid:
             for cell in row:
                 if cell:
-                    grid_cells.append(cell)
-                if any(k in cell for k in foundation_markers):
-                    candidates.append(cell)
+                    has_marker = any(k in cell for k in foundation_markers)
+                    if has_marker or not any(
+                        kw in cell for kw in (*SKIP_ROW_KEYWORDS, "填写说明", "填表说明")
+                    ):
+                        grid_cells.append(cell)
+                    if has_marker:
+                        candidates.append((cell, 1))
         if len(grid_cells) > 1 and any(
             any(k in c for k in foundation_markers) for c in grid_cells
         ):
-            candidates.append("\n".join(grid_cells))
+            candidates.append(("\n".join(grid_cells), 0))
 
     if not candidates:
         return None, [], [], None, 0, [{"code": "SECTION_NOT_FOUND", "section": "foundation"}]
 
     sections: dict[str, str] = {}
-    best_score: tuple[int, int, int] = (-1, -1, -1)
-    for cand in candidates:
+    best_score: tuple[int, int, int, int] = (-1, -1, -1, -1)
+    for cand, is_single_cell in candidates:
         sec_map = _parse_foundation_sections(cand)
         non_empty_cnt = sum(1 for v in sec_map.values() if v.strip())
         anchor_cnt = len(sec_map)
         body_chars = sum(len(v.strip()) for v in sec_map.values())
-        score = (non_empty_cnt, anchor_cnt, body_chars)
+        score = (non_empty_cnt, anchor_cnt, is_single_cell, body_chars)
         if score > best_score:
             best_score = score
             sections = sec_map

@@ -1129,21 +1129,26 @@ def _parse_word2003_xml_doc(
                         if _local(p.tag) == "p"
                     ]
                     cell_text = "\n".join(cp for cp in cell_ps if cp)
+                    tc_pr = next(
+                        (ch for ch in tc if _local(ch.tag).lower() == "tcpr"),
+                        None,
+                    )
                     if not cell_text and grid and len(row_cells) < len(grid[-1]):
                         has_vmerge_cont = False
-                        for sub in tc.iter():
-                            if _local(sub.tag).lower() == "vmerge":
-                                val = next(
-                                    (
-                                        v
-                                        for k, v in sub.attrib.items()
-                                        if _local(k).lower() == "val"
-                                    ),
-                                    "continue",
-                                )
-                                if val.lower() != "restart":
-                                    has_vmerge_cont = True
-                                break
+                        if tc_pr is not None:
+                            for sub in tc_pr:
+                                if _local(sub.tag).lower() == "vmerge":
+                                    val = next(
+                                        (
+                                            v
+                                            for k, v in sub.attrib.items()
+                                            if _local(k).lower() == "val"
+                                        ),
+                                        "continue",
+                                    )
+                                    if val.lower() != "restart":
+                                        has_vmerge_cont = True
+                                    break
                         if has_vmerge_cont:
                             prev_cell = grid[-1][len(row_cells)]
                             if (
@@ -1153,21 +1158,22 @@ def _parse_word2003_xml_doc(
                                 cell_text = prev_cell
                                 propagated_chars += len(prev_cell)
                     grid_span = 1
-                    for sub in tc.iter():
-                        if _local(sub.tag).lower() == "gridspan":
-                            val = next(
-                                (
-                                    v
-                                    for k, v in sub.attrib.items()
-                                    if _local(k).lower() == "val"
-                                ),
-                                "1",
-                            )
-                            try:
-                                grid_span = max(1, min(int(val), 64))
-                            except ValueError:
-                                grid_span = 1
-                            break
+                    if tc_pr is not None:
+                        for sub in tc_pr:
+                            if _local(sub.tag).lower() == "gridspan":
+                                val = next(
+                                    (
+                                        v
+                                        for k, v in sub.attrib.items()
+                                        if _local(k).lower() == "val"
+                                    ),
+                                    "1",
+                                )
+                                try:
+                                    grid_span = max(1, min(int(val), 64))
+                                except ValueError:
+                                    grid_span = 1
+                                break
                     row_cells.append(cell_text)
                     for _ in range(grid_span - 1):
                         row_cells.append("")
@@ -1538,6 +1544,8 @@ def _strip_rtf_nonbody_groups(raw: str) -> str:
         if ch == "}":
             if skip_depth > 0:
                 skip_depth -= 1
+                if skip_depth == 0:
+                    out.append("{}")
             else:
                 out.append(ch)
             i += 1

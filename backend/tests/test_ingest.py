@@ -273,10 +273,13 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("field_bin.doc", rtf_field_and_bin, max_chars=300_000).text.strip()
         == "Click here After image"
     )
-    rtf_upr_ud = b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par}"
+    rtf_upr_ud = (
+        b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par"
+        b"\\pard{\\*\\bkmkstart start}Important text{\\*\\bkmkend start}\\par}"
+    )
     assert (
         extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
-        == "中文"
+        == "中文\n\nImportant text"
     )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
@@ -342,6 +345,26 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     ).encode()
     vmerge_extracted = extract_upload("vmerge_large.doc", xml_vmerge_large, max_chars=300_000)
     assert len(vmerge_extracted.text) < 10_000
+    xml_nested_span = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
+        "<w:body><w:tbl>"
+        "<w:tr><w:tc><w:p><w:r><w:t>姓名</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>职称</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>工作单位</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>邮箱</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:tc><w:p><w:r><w:t>张三</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>教授</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p><w:r><w:t>研究所</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc>"
+        "<w:tc><w:p><w:r><w:t>zhang@example.com</w:t></w:r></w:p></w:tc></w:tr>"
+        "</w:tbl></w:body></w:wordDocument>"
+    ).encode()
+    parsed_xml_nested = validate_and_load_docx("nested_span.doc", xml_nested_span)
+    xml_nested_grids = [extract_table_grid(t) for t in iter_document_tables(parsed_xml_nested)]
+    xml_nested_people, _ = _extract_people(xml_nested_grids)
+    assert [(p["name"], p["affiliation"], p["email"]) for p in xml_nested_people] == [
+        ("张三", "研究所", "zhang@example.com")
+    ]
 
     # 3d. Binary OLE2 .doc with supplementary character in main story followed by footnote story
     fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "Sub 🚀", "FOOTNOTE"]))
@@ -422,6 +445,17 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert bio is not None and "智能评测研究" in bio
     assert len(achs) == 1
     assert len(projs) == 1
+    complete_cell = (
+        "[学术简历]\n张三，教授。\n"
+        "[前期成果]\n（1）张三. 论文[J]. 学报, 2025.\n"
+        "[承担项目]\n1. 基金项目，2025-01至2028-12，50万元，在研，主持。\n"
+        "[与本项目关系]\n紧密相关。"
+    )
+    _, _, _, rel_note, _, _ = _extract_t4_foundation(
+        [[[complete_cell], ["填写说明：请勿填写此栏。"]]],
+        as_of_date=None,
+    )
+    assert rel_note == "紧密相关。"
 
     # 6. read_corpus_dir discovers .doc and .docx alongside .md
     (tmp_path / "note.md").write_text("# Note\n\nMarkdown body.", encoding="utf-8")
