@@ -101,17 +101,20 @@ export function CopilotInspectorRail({
         title: h.title,
         heading: h.heading,
       });
-      const scoreStr = typeof h.score === "number" ? h.score.toFixed(2) : "0.90";
-      hitSummaryItems.push(`${shortName} (${scoreStr})`);
+      hitSummaryItems.push(
+        typeof h.score === "number"
+          ? `${shortName} (${h.score.toFixed(2)})`
+          : shortName,
+      );
     }
   } else if (evidenceEntries.length > 0) {
     for (const entry of evidenceEntries.slice(0, 2)) {
       const shortName = formatSourcePillTitle(entry.citation);
-      const scoreStr =
+      hitSummaryItems.push(
         typeof entry.citation.score === "number"
-          ? entry.citation.score.toFixed(2)
-          : "0.92";
-      hitSummaryItems.push(`${shortName} (${scoreStr})`);
+          ? `${shortName} (${entry.citation.score.toFixed(2)})`
+          : shortName,
+      );
     }
   }
 
@@ -285,7 +288,7 @@ export function CopilotInspectorRail({
               <span className="text-right font-mono text-[11px] tabular-nums text-stone-700 dark:text-stone-300">
                 {hitSummaryItems.length > 0
                   ? hitSummaryItems.join(", ")
-                  : "2026申报书 · 实验规程就绪"}
+                  : "等待提问检索"}
               </span>
             </li>
           </ul>
@@ -440,6 +443,12 @@ export function CopilotInspectorRail({
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
             onKeyDown={(event) => {
+              if (
+                event.nativeEvent.isComposing ||
+                event.keyCode === 229
+              ) {
+                return;
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 if (!uiLocked && draft.trim()) {

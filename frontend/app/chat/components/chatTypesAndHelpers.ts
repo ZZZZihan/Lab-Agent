@@ -1,14 +1,14 @@
 "use client";
 
-import {
-  type BasketItem,
-  type BasketOptions,
-  type ChatEvent,
-  type Citation,
-  type LabPersonItem,
-  type RetrievalHit,
+import type {
+  BasketItem,
+  BasketOptions,
+  ChatEvent,
+  Citation,
+  LabPersonItem,
+  RetrievalHit,
 } from "@/lib/api";
-import { type Copy } from "@/lib/i18n";
+import type { Copy } from "@/lib/i18n";
 import {
   BASKET_MAX_ITEMS,
   DEFAULT_BASKET_OPTIONS,
@@ -127,147 +127,6 @@ export const COMPACT_RAIL_SUGGESTIONS: Array<{
   },
 ];
 
-const KNOWN_SIGNATURE_DIMENSIONS: Record<string, string> = {
-  郭建民: "165×82",
-  万振凯: "88×29",
-  武越: "142×64",
-  刘岩: "128×56",
-  杨光: "136×60",
-  徐国伟: "150×68",
-  贡丽英: "132×58",
-  王崇帆: "140×62",
-  王秋慧: "146×64",
-  焦良晨: "134×58",
-};
-
-const FALLBACK_LAB_PEOPLE: Array<{
-  id: string;
-  name: string;
-  title: string;
-  degree?: string;
-  admin_duty?: string;
-  affiliation: string;
-  research_specialty: string;
-  project_role: "applicant" | "member";
-  has_signature: boolean;
-  application_text: string;
-}> = [
-  {
-    id: "2c8022da-1e4c-4eb9-98c8-7cf0389fd352",
-    name: "郭建民",
-    title: "副教授",
-    degree: "博士",
-    admin_duty: "工研院副院长",
-    affiliation: "天津工业大学",
-    research_specialty: "计算机应用/人工智能/大数据技术",
-    project_role: "applicant",
-    has_signature: true,
-    application_text:
-      "郭建民，博士，天津工业大学，副教授；研究专长：计算机应用/人工智能/大数据技术；行政职务：副院长；博硕导岗位：硕导；在项目中承担角色：申请人。",
-  },
-  {
-    id: "54ae5508-c0be-429a-9009-a4377c955bd0",
-    name: "万振凯",
-    title: "教授",
-    affiliation: "天津工业大学",
-    research_specialty: "教育理论/创新教学模式/高等教育",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "万振凯，天津工业大学，教授；研究专长：教育理论/创新教学模式/高等教育；博硕导岗位：博导；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "c2b2cbb5-e68a-4817-884b-1bf806ade910",
-    name: "徐国伟",
-    title: "教授",
-    affiliation: "天津工业大学",
-    research_specialty: "系统架构/平台集成/学科交叉",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "徐国伟，天津工业大学，教授；研究专长：系统架构/平台集成/学科交叉；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "e630a6c0-8297-4c56-a935-c9ff83193ff8",
-    name: "王秋慧",
-    title: "教授",
-    affiliation: "天津工业大学",
-    research_specialty: "高等教育规划/教育政策/教育治理",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "王秋慧，天津工业大学，教授；研究专长：高等教育规划/教育政策/教育治理；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "b4d7dff4-cd29-4e34-b42d-9e16f790de69",
-    name: "杨光",
-    title: "讲师",
-    degree: "硕士",
-    affiliation: "天津工业大学",
-    research_specialty: "人工智能/智能问答/软件开发",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "杨光，硕士，天津工业大学，讲师；研究专长：人工智能/智能问答/软件开发；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "3d8a8007-34b5-4423-bf9d-bca8f3a0a410",
-    name: "刘岩",
-    title: "讲师",
-    affiliation: "天津工业大学",
-    research_specialty: "教育研究/学术传播/成果转化",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "刘岩，天津工业大学，讲师；研究专长：教育研究/学术传播/成果转化；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "d21a5859-2e38-4635-99ae-120708ac4e43",
-    name: "贡丽英",
-    title: "实验师",
-    degree: "硕士",
-    affiliation: "天津工业大学",
-    research_specialty: "大数据技术/数据挖掘/行为分析",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "贡丽英，硕士，天津工业大学，实验师；研究专长：大数据技术/数据挖掘/行为分析；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "2e15ab19-a3f5-4e1b-86b1-245333e7da3b",
-    name: "武越",
-    title: "成员",
-    affiliation: "天津工业大学",
-    research_specialty: "软件测试/质量管理/应用评估",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "武越，天津工业大学；研究专长：软件测试/质量管理/应用评估；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "dd723bf5-c22d-4c8f-a092-dcabcda52bb8",
-    name: "王崇帆",
-    title: "成员",
-    affiliation: "天津工业大学",
-    research_specialty: "人工智能/自然语言处理/智能评测",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "王崇帆，天津工业大学；研究专长：人工智能/自然语言处理/智能评测；在项目中承担角色：项目组成员。",
-  },
-  {
-    id: "ecadd633-8c31-484f-8549-de4ae5d24874",
-    name: "焦良晨",
-    title: "成员",
-    affiliation: "天津工业大学",
-    research_specialty: "数据安全/隐私保护/系统安全",
-    project_role: "member",
-    has_signature: true,
-    application_text:
-      "焦良晨，天津工业大学；研究专长：数据安全/隐私保护/系统安全；在项目中承担角色：项目组成员。",
-  },
-];
-
 export function mapErrorCode(code: string | undefined, t: Copy): string {
   if (code === "llm_unavailable") return t.llmUnavailable;
   if (code === "embedding_unavailable") return t.embeddingUnavailable;
@@ -348,7 +207,7 @@ export function messagesToTurns(messages: StoredMessage[]): Turn[] {
   return result;
 }
 
-function buildPersonCardData(
+export function buildPersonCardData(
   person: {
     id: string;
     name: string;
@@ -360,6 +219,7 @@ function buildPersonCardData(
     research_specialty?: string | null;
     project_role?: string;
     has_signature?: boolean;
+    signature_sha256?: string | null;
     signature_url?: string | null;
     application_text?: string;
     copy_text?: string;
@@ -373,11 +233,7 @@ function buildPersonCardData(
     roleParts.push(person.degree);
   }
   if (person.admin_duty && person.admin_duty !== "无") {
-    const duty =
-      person.name === "郭建民" && person.admin_duty === "副院长"
-        ? "工研院副院长"
-        : person.admin_duty;
-    roleParts.push(duty);
+    roleParts.push(person.admin_duty);
   } else if (person.project_role === "applicant") {
     roleParts.push("课题负责人");
   } else {
@@ -394,13 +250,16 @@ function buildPersonCardData(
   const specialtyText =
     specialtyTags.length > 0 ? specialtyTags.join(" / ") : "课题组核心研究方向";
 
-  const hasSig = person.has_signature ?? true;
-  const dim = KNOWN_SIGNATURE_DIMENSIONS[person.name] || "140×60";
+  const hasSig = Boolean(person.has_signature ?? person.signature_sha256);
   const signatureLabel = hasSig
-    ? `✓ 真实内嵌签名已核验 ${dim}`
+    ? "✓ 真实内嵌签名已核验"
     : "暂未绑定内嵌签名";
 
-  const fallbackAppText = `${person.name}${person.degree && person.degree !== "无" ? `，${person.degree}` : ""}，${person.affiliation || "天津工业大学"}${person.title && person.title !== "无" ? `，${person.title}` : ""}；研究专长：${specialtyTags.join("、") || "课题组研究"}；在项目中承担角色：${person.project_role === "applicant" ? "课题负责人" : "项目组成员"}。`;
+  const affiliationPart =
+    person.affiliation && person.affiliation !== "无"
+      ? `，${person.affiliation}`
+      : "";
+  const fallbackAppText = `${person.name}${person.degree && person.degree !== "无" ? `，${person.degree}` : ""}${affiliationPart}${person.title && person.title !== "无" ? `，${person.title}` : ""}；研究专长：${specialtyTags.join("、") || "课题组研究"}；在项目中承担角色：${person.project_role === "applicant" ? "课题负责人" : "项目组成员"}。`;
 
   return {
     id: person.id,
@@ -420,13 +279,19 @@ export function extractMatchedPeopleForTurn(
   turn: Turn,
   labPeople: LabPersonItem[],
 ): MatchedPersonCardData[] {
-  if (turn.refused) return [];
+  if (
+    turn.refused ||
+    turn.pending ||
+    !turn.answer.trim() ||
+    labPeople.length === 0
+  ) {
+    return [];
+  }
 
-  const combinedCorpus = [
-    turn.question,
-    turn.answer,
-    ...turn.citations.map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`),
-  ].join(" ");
+  const citationCorpus = turn.citations
+    .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
+    .join(" ");
+  const verifiedCorpus = `${turn.answer} ${citationCorpus}`;
 
   const isMemberRelatedQuery =
     /专长|成员|团队|人员|职称|导师|申请人|负责人|谁|简介|简历|研究方向|课题组/.test(
@@ -439,46 +304,50 @@ export function extractMatchedPeopleForTurn(
         (c.title && /课题组资料库|申报书/.test(c.title)),
     );
 
-  const sourcePool =
-    labPeople.length > 0
-      ? labPeople.map((p) => ({
-          id: p.id,
-          name: p.name,
-          title: p.title,
-          degree: p.degree,
-          admin_duty: p.admin_duty,
-          tutor_role: p.tutor_role,
-          affiliation: p.affiliation,
-          research_specialty: p.research_specialty,
-          project_role: p.project_role,
-          has_signature: p.has_signature ?? Boolean(p.signature_sha256),
-          signature_url: p.signature_url,
-          application_text: p.application_text,
-          copy_text: p.copy_text,
-        }))
-      : FALLBACK_LAB_PEOPLE;
+  const sourcePool = labPeople.map((p) => ({
+    id: p.id,
+    name: p.name,
+    title: p.title,
+    degree: p.degree,
+    admin_duty: p.admin_duty,
+    tutor_role: p.tutor_role,
+    affiliation: p.affiliation,
+    research_specialty: p.research_specialty,
+    project_role: p.project_role,
+    has_signature: p.has_signature ?? Boolean(p.signature_sha256),
+    signature_sha256: p.signature_sha256,
+    signature_url: p.signature_url,
+    application_text: p.application_text,
+    copy_text: p.copy_text,
+  }));
 
-  // 1. Check explicitly named people in question + answer first
-  const qaText = `${turn.question} ${turn.answer}`;
-  const matchedInQa = sourcePool.filter((p) => p.name && qaText.includes(p.name));
+  // 1. Check people explicitly named in the verified answer first
+  const matchedInAnswer = sourcePool.filter(
+    (p) => p.name && turn.answer.includes(p.name),
+  );
 
-  if (matchedInQa.length > 0) {
-    // Sort so people mentioned in the question come first
-    matchedInQa.sort((a, b) => {
+  if (matchedInAnswer.length > 0) {
+    matchedInAnswer.sort((a, b) => {
       const aInQ = turn.question.includes(a.name) ? 0 : 1;
       const bInQ = turn.question.includes(b.name) ? 0 : 1;
       if (aInQ !== bInQ) return aInQ - bInQ;
       return 0;
     });
-    return matchedInQa.slice(0, 6).map(buildPersonCardData);
+    return matchedInAnswer.slice(0, 6).map(buildPersonCardData);
   }
 
   // 2. If the query is about team/member profiles and citations hit lab-profile member chunks
   if (isMemberRelatedQuery) {
     const matchedInCitations = sourcePool.filter(
-      (p) => p.name && combinedCorpus.includes(p.name),
+      (p) => p.name && verifiedCorpus.includes(p.name),
     );
     if (matchedInCitations.length > 0) {
+      matchedInCitations.sort((a, b) => {
+        const aInQ = turn.question.includes(a.name) ? 0 : 1;
+        const bInQ = turn.question.includes(b.name) ? 0 : 1;
+        if (aInQ !== bInQ) return aInQ - bInQ;
+        return 0;
+      });
       return matchedInCitations.slice(0, 4).map(buildPersonCardData);
     }
   }
@@ -487,12 +356,37 @@ export function extractMatchedPeopleForTurn(
 }
 
 export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
-  if (turn.refused) return null;
-  const fullText = [
-    turn.question,
-    turn.answer,
-    ...turn.citations.map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`),
-  ].join("\n");
+  if (
+    turn.refused ||
+    turn.pending ||
+    !turn.answer.trim() ||
+    turn.citations.length === 0
+  ) {
+    return null;
+  }
+
+  const usedSet =
+    turn.citationCheck && turn.citationCheck.used.length > 0
+      ? new Set(turn.citationCheck.used)
+      : null;
+  const activeCitations = usedSet
+    ? turn.citations.filter((c, i) => usedSet.has(c.index ?? i + 1))
+    : turn.citations;
+  const sourceCitations =
+    activeCitations.length > 0 ? activeCitations : turn.citations;
+
+  const citationText = sourceCitations
+    .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
+    .join("\n");
+  // Strip negated numeric claims from prose answer so e.g. "不是 420 A，上限为 300 A" never matches 420 A
+  const affirmativeAnswer = turn.answer.replace(
+    /(?:不是|并非|而非|不等于)\s*\d+(?:\.\d+)?\s*[A-Za-z%℃°小时天秒分钟台张卡万元]+/gi,
+    "",
+  );
+  // Prioritize authoritative citation excerpts before affirmative answer text; never include turn.question
+  const verifiedText = [citationText, affirmativeAnswer]
+    .filter(Boolean)
+    .join("\n");
 
   const rows: SpecTableRow[] = [];
   const seenParams = new Set<string>();
@@ -504,59 +398,84 @@ export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
     conditionTone: SpecTableRow["conditionTone"],
   ) => {
     const key = parameter.trim();
-    if (!key || seenParams.has(key)) return;
+    const val = indicator.trim();
+    if (!key || !val || seenParams.has(key)) return;
     seenParams.add(key);
-    rows.push({ parameter: key, indicator: indicator.trim(), condition: condition.trim(), conditionTone });
+    rows.push({
+      parameter: key,
+      indicator: val,
+      condition: condition.trim(),
+      conditionTone,
+    });
   };
 
-  // Detect superconducting magnet SOP parameters
-  if (/主磁体|额定.*电流|420\s*A/i.test(fullText)) {
-    const currentMatch = fullText.match(/(\d+(?:\.\d+)?\s*A)/i);
+  // Detect superconducting magnet SOP parameters strictly from verified source values
+  const currentMatch = verifiedText.match(
+    /(?:主磁体[^。；;\n]{0,28}?(?:额定(?:工作)?电流|工作电流|电流(?:上限)?)|额定(?:工作)?电流(?:上限)?)[^0-9\n]{0,18}?(\d+(?:\.\d+)?\s*A)\b/i,
+  );
+  if (currentMatch?.[1]) {
     pushRow(
       "主磁体额定电流",
-      currentMatch ? currentMatch[1].replace(/\s+/g, " ") : "420 A",
+      currentMatch[1].replace(/\s+/g, " "),
       "上限阈值",
       "limit",
     );
   }
 
-  if (/液氦液位|冷却液氦|65%|联锁停机/.test(fullText)) {
-    const levelMatch = fullText.match(/(\d+(?:\.\d+)?\s*%)/);
+  const levelMatch = verifiedText.match(
+    /(?:液氦液位|冷却液氦)[^0-9\n]{0,24}?(\d+(?:\.\d+)?\s*%)/,
+  );
+  if (levelMatch?.[1]) {
     pushRow(
       "冷却液氦液位",
-      levelMatch ? levelMatch[1].replace(/\s+/g, "") : "65%",
+      levelMatch[1].replace(/\s+/g, ""),
       "< 触发停机",
       "interlock",
     );
   }
 
-  if (/阻抗校准|失超保护|每\s*\d+\s*天/.test(fullText)) {
-    const dayMatch = fullText.match(/每\s*(\d+)\s*天/);
+  const dayMatch = verifiedText.match(
+    /(?:阻抗校准|失超保护)[^0-9\n]{0,24}?每\s*(\d+)\s*天/,
+  );
+  if (dayMatch?.[1]) {
     pushRow(
       "阻抗校准周期",
-      dayMatch ? `每 ${dayMatch[1]} 天一次` : "每 7 天一次",
+      `每 ${dayMatch[1]} 天一次`,
       "维护周期",
       "cycle",
     );
   }
 
-  // Detect GPU cluster / node spec queries if asked
-  if (rows.length === 0 && /A100|GPU\s*集群|节点|显存|算力/i.test(turn.question)) {
-    const nodeMatch = fullText.match(/(\d+\s*台(?:节点)?)/);
-    if (nodeMatch) {
+  // Detect GPU cluster / node spec values strictly from verified source text
+  if (
+    rows.length === 0 &&
+    /A100|GPU\s*集群|算力节点/i.test(verifiedText)
+  ) {
+    const nodeMatch = verifiedText.match(/(\d+\s*台(?:节点)?)/);
+    if (nodeMatch?.[1]) {
       pushRow("清衡-A100 集群规模", nodeMatch[1], "在线算力节点", "neutral");
     }
-    const gpuMatch = fullText.match(/(\d+\s*(?:张|卡)\s*[^，。；\n]{0,18})/);
-    if (gpuMatch) {
+    const gpuMatch = verifiedText.match(
+      /(\d+\s*(?:张|卡)\s*[^，。；\n]{0,18})/,
+    );
+    if (gpuMatch?.[1]) {
       pushRow("加速卡配置", gpuMatch[1], "单机/集群规格", "limit");
     }
   }
 
-  // Generic numeric threshold extraction when question asks about 规程 / 阈值 / 上限 / 参数
-  if (rows.length === 0 && /规程|参数|阈值|上限|下限|联锁|指标/.test(turn.question)) {
-    const clauses = turn.answer.split(/[。；;\n]+/).map((s) => s.trim()).filter(Boolean);
+  // Generic numeric threshold extraction from affirmative verified clauses
+  if (
+    rows.length === 0 &&
+    /规程|参数|阈值|上限|下限|联锁|指标/.test(verifiedText)
+  ) {
+    const clauses = affirmativeAnswer
+      .split(/[。；;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
     for (const clause of clauses) {
-      const m = clause.match(/^([^，,：:]{2,14}?)(?:上限|下限|阈值|为|是|达到|低于|高于)\s*([0-9]+(?:\.[0-9]+)?\s*[A-Za-z%℃°小时天秒分钟台张万元]+)/);
+      const m = clause.match(
+        /^([^，,：:]{2,14}?)(?:上限|下限|阈值|为|是|达到|低于|高于)\s*([0-9]+(?:\.[0-9]+)?\s*[A-Za-z%℃°小时天秒分钟台张万元]+)/,
+      );
       if (m) {
         const isInterlock = /停机|联锁|报警|切断/.test(clause);
         const isLimit = /上限|最大|不超过|阈值/.test(clause);
@@ -572,20 +491,21 @@ export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
 
   if (rows.length === 0) return null;
 
-  // Determine source basis title
-  const sopCitation = turn.citations.find(
-    (c) => c.title && /规程|约定|规范|手册|标准/.test(c.title),
-  ) || turn.citations[0];
+  // Determine source basis title from the turn's actual citations
+  const sopCitation =
+    sourceCitations.find(
+      (c) => c.title && /规程|约定|规范|手册|标准/.test(c.title),
+    ) || sourceCitations[0];
 
-  let basis = "《实验室安全与设备运行规程》";
+  let basis = "当前回合引用文档";
   if (sopCitation?.title) {
     const cleanTitle = sopCitation.title.replace(/-E2E实测$/, "");
     const cleanHeading = sopCitation.heading
       ? sopCitation.heading.replace(/^#+\s*/, "").trim()
-      : "§2.1";
-    basis = `《${cleanTitle}》${cleanHeading.startsWith("§") ? cleanHeading : `· ${cleanHeading}`}`;
-  } else if (/低温超导磁体/.test(fullText)) {
-    basis = "《低温超导磁体实验规程》§2.1";
+      : "";
+    basis = cleanHeading
+      ? `《${cleanTitle}》${cleanHeading.startsWith("§") ? cleanHeading : `· ${cleanHeading}`}`
+      : `《${cleanTitle}》`;
   }
 
   return {

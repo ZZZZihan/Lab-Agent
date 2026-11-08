@@ -28,7 +28,7 @@ import {
   type ConversationSummary,
   type MatchedPersonCardData,
   type Turn,
-  extractMatchedPeopleForTurn,
+  buildPersonCardData,
   mapErrorCode,
   mapToolPhase,
   messagesToTurns,
@@ -467,22 +467,16 @@ export default function ChatPage() {
         }
       }
     }
-    return docSet.size > 0 ? docSet.size : 2;
+    return docSet.size;
   }, [turns]);
 
   const verifiedMemberCount =
-    labOverview?.counts?.people || labPeople.length || 10;
+    labOverview?.counts?.people ?? labPeople.length;
 
-  // Initial preview dossier cards for empty canvas state
+  // Initial preview dossier cards for empty canvas state (only when real lab people exist)
   const previewDossierPeople = useMemo(() => {
-    const dummyTurn: Turn = {
-      id: "preview",
-      question: "课题组里郭建民和万振凯的研究专长分别是什么？",
-      answer: "郭建民 副教授 万振凯 教授",
-      pending: false,
-      citations: [],
-    };
-    return extractMatchedPeopleForTurn(dummyTurn, labPeople).slice(0, 2);
+    if (labPeople.length === 0) return [];
+    return labPeople.slice(0, 2).map(buildPersonCardData);
   }, [labPeople]);
 
   return (
@@ -635,7 +629,13 @@ export default function ChatPage() {
                                 {person.roleSubtitle}
                               </span>
                             </div>
-                            <span className="inline-flex items-center gap-1 rounded-md bg-emerald-950/6 px-2 py-0.5 font-mono text-[11px] tabular-nums text-primary ring-1 ring-primary/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-[11px] tabular-nums ${
+                                person.hasSignature
+                                  ? "bg-emerald-950/6 text-primary ring-1 ring-primary/20 dark:bg-emerald-500/10 dark:text-emerald-300"
+                                  : "bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400"
+                              }`}
+                            >
                               {person.signatureLabel}
                             </span>
                           </div>

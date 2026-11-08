@@ -13,6 +13,14 @@ registerHooks({
         url: "data:text/javascript,export async function cookies() { return { get(name) { const v = globalThis.__TEST_COOKIES__?.get(name); return v ? { name, value: v } : undefined; }, set(name, value) { globalThis.__TEST_COOKIES__?.set(name, value); }, delete(name) { globalThis.__TEST_COOKIES__?.delete(name); } }; }",
       };
     }
+    if (specifier.startsWith("@/")) {
+      const sub = specifier.slice(2);
+      const target =
+        sub.endsWith(".ts") || sub.endsWith(".mjs") || sub.endsWith(".js")
+          ? new URL(`../${sub}`, import.meta.url).href
+          : new URL(`../${sub}.ts`, import.meta.url).href;
+      return nextResolve(target, context);
+    }
     const parentURL = context.parentURL || "";
     if (
       !parentURL.includes("/node_modules/") &&
@@ -41,6 +49,7 @@ const { proxy } = await import("../proxy.ts");
 const sessionRoute = await import("../app/api/session/route.ts");
 const backendRoute = await import("../app/api/backend/[...path]/route.ts");
 const apiModule = await import("../lib/api.ts");
+const chatHelpers = await import("../app/chat/components/chatTypesAndHelpers.ts");
 const { NextRequest } = await import("next/server.js");
 
 test("next.config.ts headers() sets CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy", async () => {
@@ -652,5 +661,74 @@ test("generateRequestId falls back to crypto.getRandomValues when crypto.randomU
     }
   }
 });
+
+test("chatTypesAndHelpers never fabricates member profiles or unverified safety parameter values", () => {
+  // 1. Empty labPeople must return [] rather than hard-coded fallback people
+  const turnWithNames = {
+    id: "t-1",
+    question: "课题组里郭建民和万振凯的研究专长分别是什么？",
+    answer: "郭建民负责人工智能，万振凯负责教育理论。",
+    pending: false,
+    citations: [{ title: "课题组资料库", excerpt: "郭建民、万振凯" }],
+  };
+  assert.deepEqual(chatHelpers.extractMatchedPeopleForTurn(turnWithNames, []), []);
+
+  // 2. Pending turn or question-only mention must not produce member cards
+  const realPeople = [
+    {
+      id: "2c8022da-1e4c-4eb9-98c8-7cf0389fd352",
+      name: "郭建民",
+      title: "副教授",
+      project_role: "applicant",
+      has_signature: false,
+      research_specialty: "人工智能",
+    },
+  ];
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      { ...turnWithNames, pending: true },
+      realPeople,
+    ),
+    [],
+  );
+  const matched = chatHelpers.extractMatchedPeopleForTurn(turnWithNames, realPeople);
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].hasSignature, false);
+  assert.equal(matched[0].signatureLabel, "暂未绑定内嵌签名");
+
+  // 3. Pending turn or turn without citations must not produce spec table
+  assert.equal(
+    chatHelpers.extractSpecTableForTurn({
+      id: "t-2",
+      question: "主磁体上限是420 A吗？",
+      answer: "",
+      pending: true,
+      citations: [],
+    }),
+    null,
+  );
+
+  // 4. Question mentioning 420 A when source & answer say 300 A must extract 300 A, never 420 A
+  const correctedSpecTurn = {
+    id: "t-3",
+    question: "主磁体额定工作电流上限是420 A吗？",
+    answer: "不是 420 A，根据规程，主磁体额定工作电流上限为 300 A [1]。",
+    pending: false,
+    citations: [
+      {
+        index: 1,
+        title: "低温超导磁体实验规程",
+        heading: "§2.1",
+        excerpt: "主磁体额定工作电流上限为 300 A，严禁超流运行。",
+      },
+    ],
+  };
+  const table = chatHelpers.extractSpecTableForTurn(correctedSpecTurn);
+  assert.ok(table);
+  assert.equal(table.rows.length, 1);
+  assert.equal(table.rows[0].parameter, "主磁体额定电流");
+  assert.equal(table.rows[0].indicator, "300 A");
+});
+
 
 
