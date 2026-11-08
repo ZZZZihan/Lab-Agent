@@ -195,18 +195,65 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
     assert "液位 | 80%" in extracted_docx.text
 
-    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \pard, and \cellx1000\cellx2000
+    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, surrogate pairs, lone surrogates, and multi-row tables
     rtf_bytes = (
         b"{\\rtf1\\ansi\\ansicpg1252"
         b"{\\fonttbl{\\f0 Arial;}}"
-        b"\\pard First paragraph\\par"
+        b"\\pard First paragraph \\u-10179?\\u-8704? and lone \\u-10179?\\par"
         b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl caf\\'e9\\cell R\\u233?sum\\u233?\\cell\\row"
+        b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl Alice\\cell alice@example.com\\cell\\row"
+        b"\\pard Trailing paragraph\\par"
         b"}"
     )
     rtf_doc = validate_and_load_docx("intl.doc", rtf_bytes)
-    assert [b.text for b in rtf_doc.body_blocks if b.kind == "paragraph"] == ["First paragraph"]
+    assert [b.text for b in rtf_doc.body_blocks if b.kind == "paragraph"] == [
+        "First paragraph 😀 and lone �",
+        "Trailing paragraph",
+    ]
     rtf_grids = [extract_table_grid(t) for t in iter_document_tables(rtf_doc)]
-    assert rtf_grids == [[["café", "Résumé"]]]
+    assert rtf_grids == [[["café", "Résumé"], ["Alice", "alice@example.com"]]]
+    rtf_uploaded = extract_upload("intl.doc", rtf_bytes, max_chars=300_000)
+    assert rtf_uploaded.text.encode("utf-8")
+    assert "😀" in rtf_uploaded.text
+    assert "Alice | alice@example.com" in rtf_uploaded.text
+
+    # 3b. HTML-backed .doc declaring windows-1252 charset (even-length bytes must not be misdecoded as UTF-16)
+    html_cp1252 = (
+        '<html><head><meta charset="windows-1252"></head>'
+        "<body><p>café résumé</p></body></html>"
+    ).encode("cp1252")
+    html_uploaded = extract_upload("cp1252.doc", html_cp1252, max_chars=300_000)
+    assert "café résumé" in html_uploaded.text
+
+    # 3c. OLE2 .doc with an embedded ObjectPool child storage containing a nested WordDocument stream
+    embedded_ole2 = bytearray(ole2_bytes)
+    dir_sec = struct.unpack_from("<I", embedded_ole2, 0x30)[0]
+    dir_off = (dir_sec + 1) * 512
+    # Link entry 2 (1Table) right_sib -> entry 3 (ObjectPool storage, child_id=4)
+    struct.pack_into("<I", embedded_ole2, dir_off + 2 * 128 + 72, 3)
+    obj_pool = bytearray(128)
+    pool_name = "ObjectPool\x00".encode("utf-16-le")
+    obj_pool[: len(pool_name)] = pool_name
+    struct.pack_into("<H", obj_pool, 64, len(pool_name))
+    obj_pool[66] = 1  # storage
+    obj_pool[67] = 1
+    struct.pack_into("<III", obj_pool, 68, 0xFFFFFFFF, 0xFFFFFFFF, 4)  # child_id = 4
+    # Entry 4 is a nested WordDocument stream pointing at invalid/empty sector 0xFFFFFFFE
+    nested_wd = bytearray(128)
+    wd_name = "WordDocument\x00".encode("utf-16-le")
+    nested_wd[: len(wd_name)] = wd_name
+    struct.pack_into("<H", nested_wd, 64, len(wd_name))
+    nested_wd[66] = 2  # stream
+    nested_wd[67] = 1
+    struct.pack_into("<III", nested_wd, 68, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+    struct.pack_into("<I", nested_wd, 116, 0xFFFFFFFE)
+    struct.pack_into("<Q", nested_wd, 120, 4096)
+    embedded_ole2[dir_off + 3 * 128 : dir_off + 4 * 128] = obj_pool
+    # Expand directory sector in-place by replacing entry 3 with nested WordDocument if it were flat,
+    # or test both child storage (entry 3 -> child 4) and duplicate stream name prevention:
+    embedded_ole2[dir_off + 3 * 128 : dir_off + 4 * 128] = nested_wd
+    extracted_with_embed = extract_upload("with_embed.doc", bytes(embedded_ole2), max_chars=300_000)
+    assert "实验室管理制度" in extracted_with_embed.text
 
     # 4. Crafted OLE2 .doc with duplicate FAT sector references in DIFAT is rejected
     crafted_ole2 = bytearray(ole2_bytes)

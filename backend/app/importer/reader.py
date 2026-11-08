@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import io
 import posixpath
@@ -68,7 +69,10 @@ class DocxValidationError(ValueError):
 
 
 def normalize_cell_text(raw: str) -> str:
-    text = unicodedata.normalize("NFKC", raw or "")
+    s = raw or ""
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in s):
+        s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    text = unicodedata.normalize("NFKC", s)
     text = text.replace("\x0b", "\n").replace("\x0c", "\n")
     text = ZERO_WIDTH_RE.sub("", text)
     text = CONTROL_CHARS_RE.sub("", text)
@@ -360,6 +364,27 @@ def _read_ole2_streams(
     total_stream_bytes = 0
     num_entries = len(dir_bytes) // 128
 
+    # Collect direct children of Root Entry (entry 0) by traversing only sibling links
+    # (left_sib at offset 68, right_sib at offset 72) from Root Entry's child_id (offset 76),
+    # without descending into nested storages (obj_type == 1) such as ObjectPool.
+    root_direct_indices: set[int] = set()
+    if num_entries > 0:
+        root_child_id = struct.unpack_from("<I", dir_bytes, 76)[0]
+        stack: list[int] = [root_child_id]
+        while stack:
+            curr = stack.pop()
+            if curr == 0 or curr >= num_entries or curr in root_direct_indices:
+                continue
+            c_entry = dir_bytes[curr * 128 : (curr + 1) * 128]
+            if c_entry[66] == 0:
+                continue
+            root_direct_indices.add(curr)
+            left_sib, right_sib = struct.unpack_from("<II", c_entry, 68)
+            if left_sib < num_entries:
+                stack.append(left_sib)
+            if right_sib < num_entries:
+                stack.append(right_sib)
+
     for idx in range(num_entries):
         entry = dir_bytes[idx * 128 : (idx + 1) * 128]
         name_cb = struct.unpack_from("<H", entry, 64)[0]
@@ -384,6 +409,10 @@ def _read_ole2_streams(
                 "import_uncompressed_too_large",
                 "文档解压后大小超过安全上限",
             )
+        if root_direct_indices and idx not in root_direct_indices:
+            continue
+        if name in streams:
+            continue
         if stream_size < mini_cutoff and mini_stream:
             streams[name] = _read_mini_chain(start_sec, stream_size)
         else:
@@ -1067,6 +1096,41 @@ class _HtmlDocParser(HTMLParser):
             self._current_para.append(data)
 
 
+def _decode_html_doc_bytes(raw_bytes: bytes) -> str:
+    if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw_bytes.decode("utf-16", errors="replace")
+    if b"\x00<" in raw_bytes[:128] or b"<\x00" in raw_bytes[:128]:
+        enc = "utf-16-le" if b"<\x00" in raw_bytes[:128] else "utf-16-be"
+        return raw_bytes.decode(enc, errors="replace")
+
+    head_latin1 = raw_bytes[:4096].decode("latin-1", errors="ignore")
+    charset_match = re.search(
+        r"<meta\b[^>]*?\bcharset\s*=\s*[\"']?\s*([a-zA-Z0-9._-]+)",
+        head_latin1,
+        re.IGNORECASE,
+    ) or re.search(
+        r"<\?xml\b[^>]*?\bencoding\s*=\s*[\"']\s*([a-zA-Z0-9._-]+)",
+        head_latin1,
+        re.IGNORECASE,
+    )
+    if charset_match is not None:
+        declared = charset_match.group(1).strip().lower()
+        if declared in ("gb2312", "gbk", "gb18030", "x-gbk"):
+            declared = "gb18030"
+        try:
+            codecs.lookup(declared)
+            return raw_bytes.decode(declared, errors="replace")
+        except LookupError:
+            pass
+
+    for enc in ("utf-8-sig", "gb18030", "cp1252"):
+        try:
+            return raw_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
 def _parse_html_doc(
     raw_bytes: bytes,
     *,
@@ -1078,15 +1142,7 @@ def _parse_html_doc(
             "import_uncompressed_too_large",
             "文档大小超过安全上限",
         )
-    text = ""
-    for enc in ("utf-8-sig", "gb18030", "utf-16"):
-        try:
-            text = raw_bytes.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    if not text:
-        text = raw_bytes.decode("utf-8", errors="replace")
+    text = _decode_html_doc_bytes(raw_bytes)
     parser = _HtmlDocParser()
     parser.feed(text)
     if parser._current_para:
@@ -1234,6 +1290,8 @@ def _parse_rtf_doc(
         return chr(code) if 0 <= code <= 0x10FFFF else ""
 
     s = re.sub(r"\\u(-?\d+) ?(?:\?|\\'[0-9a-fA-F]{2})?", _replace_u, s)
+    # Combine UTF-16 surrogate pairs (e.g. \u-10179?\u-8704? -> U+1F600) and replace lone surrogates
+    s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
     # Decode hex escapes \'xx using the declared RTF code page (or auto-fallback gb18030 -> cp1252)
     def _replace_hex_runs(m: re.Match[str]) -> str:
@@ -1249,8 +1307,9 @@ def _parse_rtf_doc(
     s = re.sub(r"(?:\\'[0-9a-fA-F]{2})+", _replace_hex_runs, s)
 
     # Enforce complete control-word boundaries (?![a-zA-Z]) so \pard and \cellx1000 are never partially matched
+    s = re.sub(r"\\trowd(?![a-zA-Z])-?\d* ?", "\x1d", s)
     s = re.sub(r"\\(?:cell|nestcell)(?![a-zA-Z])-?\d* ?", "\x07", s)
-    s = re.sub(r"\\(?:row|nestrow)(?![a-zA-Z])-?\d* ?", "\r\x07", s)
+    s = re.sub(r"\\(?:row|nestrow)(?![a-zA-Z])-?\d* ?", "\x1e", s)
     s = re.sub(r"\\par(?![a-zA-Z])-?\d* ?", "\r", s)
     s = re.sub(r"\\line(?![a-zA-Z])-?\d* ?", "\n", s)
     s = re.sub(r"\\tab(?![a-zA-Z])-?\d* ?", "\t", s)
@@ -1262,6 +1321,13 @@ def _parse_rtf_doc(
         .replace("\x00LB\x00", "{")
         .replace("\x00RB\x00", "}")
     )
+    # Convert in-cell paragraph breaks (\r inside a table row before \x1e) into \n, then split rows cleanly on \r
+    s = re.sub(
+        r"[\x1d\x1e][^\x1e]*?\x1e",
+        lambda m: m.group(0).replace("\r", "\n"),
+        s,
+    )
+    s = s.replace("\x1d", "").replace("\x1e", "\r")
 
     tables: list[list[list[str]]] = []
     raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
