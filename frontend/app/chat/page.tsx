@@ -441,22 +441,18 @@ export default function ChatPage() {
     }
   }
 
-  // Derive canvas header topic & metrics (avoid duplicating the literal question heading below)
+  // Derive canvas header topic from the selected conversation or current question
   const activeConvTitle = useMemo(() => {
-    const allQuestions = turns.map((item) => item.question).join(" ");
-    const hasSop = /磁体|电流|液氦|规程|阈值|联锁/.test(allQuestions);
-    const hasMember = /专长|万振凯|郭建民|成员|课题组/.test(allQuestions);
-    if (hasSop && hasMember) {
-      return "教育考试专属大模型课题组资产与实验规程综合研报";
+    if (conversationId) {
+      const found = conversations.find((c) => c.id === conversationId);
+      if (found?.title) return found.title;
     }
-    if (hasSop) {
-      return "低温超导磁体实验规程与安全联锁参数核验";
-    }
-    if (hasMember) {
-      return "教育考试专属大模型课题组成员专长与申报档案检索";
-    }
-    return "教育考试专属大模型课题组资产与规程检索";
-  }, [turns]);
+    const firstQuestion = turns
+      .find((item) => item.question.trim())
+      ?.question.trim();
+    if (firstQuestion) return firstQuestion;
+    return t.chat;
+  }, [conversationId, conversations, turns, t.chat]);
 
   const linkedDocCount = useMemo(() => {
     const docSet = new Set<string>();

@@ -120,8 +120,8 @@ export function CopilotInspectorRail({
 
   const modeLabel =
     latestTurn?.retrieval?.mode === "hybrid_rrf_rerank"
-      ? "Hybrid RRF + Rerank (4096维)"
-      : "Hybrid RRF (4096维)";
+      ? "Hybrid RRF + Rerank"
+      : latestTurn?.retrieval?.mode || "Hybrid RRF";
 
   return (
     <aside

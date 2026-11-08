@@ -662,7 +662,7 @@ test("generateRequestId falls back to crypto.getRandomValues when crypto.randomU
   }
 });
 
-test("chatTypesAndHelpers never fabricates member profiles or unverified safety parameter values", () => {
+test("chatTypesAndHelpers never fabricates member profiles or unverified member cards", () => {
   // 1. Empty labPeople must return [] rather than hard-coded fallback people
   const turnWithNames = {
     id: "t-1",
@@ -673,7 +673,7 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified safety 
   };
   assert.deepEqual(chatHelpers.extractMatchedPeopleForTurn(turnWithNames, []), []);
 
-  // 2. Pending turn or question-only mention must not produce member cards
+  // 2. Pending turn, turn without citations, or negated mention must not produce member cards
   const realPeople = [
     {
       id: "2c8022da-1e4c-4eb9-98c8-7cf0389fd352",
@@ -691,86 +691,29 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified safety 
     ),
     [],
   );
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      { ...turnWithNames, citations: [] },
+      realPeople,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      {
+        ...turnWithNames,
+        answer: "该纪要中未提及郭建民。",
+      },
+      realPeople,
+    ),
+    [],
+  );
+
+  // 3. Verified answer + citation match returns accurate structured person data without fabricated signature claim
   const matched = chatHelpers.extractMatchedPeopleForTurn(turnWithNames, realPeople);
   assert.equal(matched.length, 1);
   assert.equal(matched[0].hasSignature, false);
   assert.equal(matched[0].signatureLabel, "暂未绑定内嵌签名");
-
-  // 3. Pending turn or turn without citations must not produce spec table
-  assert.equal(
-    chatHelpers.extractSpecTableForTurn({
-      id: "t-2",
-      question: "主磁体上限是420 A吗？",
-      answer: "",
-      pending: true,
-      citations: [],
-    }),
-    null,
-  );
-
-  // 4. Question mentioning 420 A when source & answer say 300 A (and citation also mentions normal operating level 80% before 65% interlock)
-  const correctedSpecTurn = {
-    id: "t-3",
-    question: "主磁体额定工作电流上限是420 A吗？液氦联锁阈值是多少？",
-    answer:
-      "不是 420 A，根据规程，主磁体正常工作电流为 280 A，额定工作电流上限为 300 A；冷却液氦液位低于 65% 时触发联锁停机 [1]。",
-    pending: false,
-    citations: [
-      {
-        index: 1,
-        title: "低温超导磁体实验规程",
-        heading: "§2.1",
-        excerpt:
-          "主磁体正常工作电流为 280 A，额定工作电流上限为 300 A。液氦液位正常工作时为 80%，低于 65% 时触发联锁停机。",
-      },
-    ],
-  };
-  const table = chatHelpers.extractSpecTableForTurn(correctedSpecTurn);
-  assert.ok(table);
-  assert.equal(table.rows.length, 2);
-  assert.equal(table.rows[0].parameter, "主磁体额定电流");
-  assert.equal(table.rows[0].indicator, "300 A");
-  assert.equal(table.rows[1].parameter, "冷却液氦液位");
-  assert.equal(table.rows[1].indicator, "65%");
-  assert.equal(table.rows[1].condition, "< 触发联锁停机");
-
-  // 5. Citation with only normal liquid level or alarm-only / negated interlock must not produce a shutdown interlock row
-  assert.equal(
-    chatHelpers.extractSpecTableForTurn({
-      id: "t-4",
-      question: "液氦液位是多少？",
-      answer: "液氦液位正常工作时为 80%，低于 65% 时仅报警，不触发联锁停机 [1]。",
-      pending: false,
-      citations: [
-        {
-          index: 1,
-          title: "低温超导磁体实验规程",
-          excerpt: "液氦液位正常工作时为 80%，低于 65% 时仅报警，不触发联锁停机。",
-        },
-      ],
-    }),
-    null,
-  );
-
-  // 6. Citation distinguishing warning (70%) from shutdown interlock (65%) must select 65%, never 70%
-  const alarmVsShutdownTurn = {
-    id: "t-5",
-    question: "液氦联锁停机阈值是多少？",
-    answer: "液氦液位低于 70% 时报警，低于 65% 时触发联锁停机 [1]。",
-    pending: false,
-    citations: [
-      {
-        index: 1,
-        title: "低温超导磁体实验规程",
-        heading: "§2.1",
-        excerpt: "液氦液位低于 70% 时报警，低于 65% 时触发联锁停机。",
-      },
-    ],
-  };
-  const alarmVsShutdownTable = chatHelpers.extractSpecTableForTurn(alarmVsShutdownTurn);
-  assert.ok(alarmVsShutdownTable);
-  assert.equal(alarmVsShutdownTable.rows.length, 1);
-  assert.equal(alarmVsShutdownTable.rows[0].indicator, "65%");
 });
 
 

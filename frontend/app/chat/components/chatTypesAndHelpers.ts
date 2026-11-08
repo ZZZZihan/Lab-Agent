@@ -85,19 +85,6 @@ export type MatchedPersonCardData = {
   projectRole: "applicant" | "member" | string;
 };
 
-export type SpecTableRow = {
-  parameter: string;
-  indicator: string;
-  condition: string;
-  conditionTone: "limit" | "interlock" | "cycle" | "neutral";
-};
-
-export type SpecTableData = {
-  title: string;
-  rows: SpecTableRow[];
-  basis: string;
-};
-
 export const CANVAS_SUGGESTIONS = [
   "主磁体额定工作电流上限是多少？液氦液位低于多少会触发联锁停机？",
   "课题组里万振凯和郭建民的研究专长分别是什么？",
@@ -236,8 +223,11 @@ export function buildPersonCardData(
     roleParts.push(person.admin_duty);
   } else if (person.project_role === "applicant") {
     roleParts.push("课题负责人");
-  } else {
+  } else if (person.project_role === "member") {
     roleParts.push("项目组成员");
+  }
+  if (roleParts.length === 0) {
+    roleParts.push("课题组成员");
   }
 
   const rawSpec = (person.research_specialty || "").trim();
@@ -248,7 +238,7 @@ export function buildPersonCardData(
         .filter(Boolean)
     : [];
   const specialtyText =
-    specialtyTags.length > 0 ? specialtyTags.join(" / ") : "课题组核心研究方向";
+    specialtyTags.length > 0 ? specialtyTags.join(" / ") : "暂未登记研究专长";
 
   const hasSig = Boolean(person.has_signature ?? person.signature_sha256);
   const signatureLabel = hasSig
@@ -259,7 +249,15 @@ export function buildPersonCardData(
     person.affiliation && person.affiliation !== "无"
       ? `，${person.affiliation}`
       : "";
-  const fallbackAppText = `${person.name}${person.degree && person.degree !== "无" ? `，${person.degree}` : ""}${affiliationPart}${person.title && person.title !== "无" ? `，${person.title}` : ""}；研究专长：${specialtyTags.join("、") || "课题组研究"}；在项目中承担角色：${person.project_role === "applicant" ? "课题负责人" : "项目组成员"}。`;
+  const specPart =
+    specialtyTags.length > 0 ? `；研究专长：${specialtyTags.join("、")}` : "";
+  const rolePart =
+    person.project_role === "applicant"
+      ? "；在项目中承担角色：课题负责人"
+      : person.project_role === "member"
+        ? "；在项目中承担角色：项目组成员"
+        : "";
+  const fallbackAppText = `${person.name}${person.degree && person.degree !== "无" ? `，${person.degree}` : ""}${affiliationPart}${person.title && person.title !== "无" ? `，${person.title}` : ""}${specPart}${rolePart}。`;
 
   return {
     id: person.id,
@@ -334,12 +332,17 @@ export function extractMatchedPeopleForTurn(
 
   const isAffirmedInAnswer = (name: string): boolean => {
     if (!name || !turn.answer.includes(name)) return false;
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const negatedRe = new RegExp(
-      `(?:未提及|没有提及|未包含|不含|不包括|未找到|没有找到|并非|不是)\\s*${escaped}`,
+    const clauses = turn.answer
+      .split(/[。；;，,\n]+/)
+      .map((c) => c.trim())
+      .filter((c) => c.includes(name));
+    if (clauses.length === 0) return false;
+    return clauses.some(
+      (clause) =>
+        !/未提及|没有提及|未包含|不含|不包括|未找到|没有找到|并非|不是|无关|除外/.test(
+          clause,
+        ),
     );
-    const cleaned = turn.answer.replace(negatedRe, "");
-    return cleaned.includes(name);
   };
 
   // 1. Check people affirmed in the answer AND backed by the turn's citations
@@ -360,206 +363,7 @@ export function extractMatchedPeopleForTurn(
     return matchedInAnswer.slice(0, 6).map(buildPersonCardData);
   }
 
-  // 2. If the query is about team/member profiles and citations hit lab-profile member chunks
-  if (isMemberRelatedQuery) {
-    const namedInQuestion = sourcePool.filter(
-      (p) => p.name && turn.question.includes(p.name),
-    );
-    const candidatePool =
-      namedInQuestion.length > 0 ? namedInQuestion : sourcePool;
-    const matchedInCitations = candidatePool.filter(
-      (p) => p.name && citationCorpus.includes(p.name),
-    );
-    if (matchedInCitations.length > 0) {
-      return matchedInCitations.slice(0, 4).map(buildPersonCardData);
-    }
-  }
-
   return [];
-}
-
-const NEGATED_OR_NON_STANDARD_CLAUSE_RE =
-  /不是|并非|而非|不等于|不触发|未触发|不会触发|不执行|无需|不需要|不必|仅报警|只报警|原为|曾为|旧规程|修订前|测试模式|调试模式|旁路/;
-
-function extractUnambiguousSopRows(text: string): SpecTableRow[] {
-  const sentences = text
-    .split(/[。；;\n]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const magnetLimits = new Set<string>();
-  const magnetRatedFallbacks = new Set<string>();
-  const heliumInterlocks = new Map<string, string>();
-  const calibrationDays = new Set<string>();
-
-  for (const sentence of sentences) {
-    const clauses = sentence
-      .split(/[，,]+/)
-      .map((c) => c.trim())
-      .filter(Boolean);
-
-    const hasMagnetSubject = /主磁体|超导磁体|额定(?:工作)?电流/.test(sentence);
-    const hasHeliumSubject = /液氦/.test(sentence);
-    const hasCalibrationSubject = /阻抗校准/.test(sentence);
-
-    for (let i = 0; i < clauses.length; i += 1) {
-      const clause = clauses[i];
-      if (NEGATED_OR_NON_STANDARD_CLAUSE_RE.test(clause)) continue;
-
-      if (hasMagnetSubject) {
-        for (const m of clause.matchAll(
-          /(?:额定(?:工作)?电流|工作电流|主磁体电流|电流)(?:的)?(?:上限(?:阈值)?(?:为|是)?|(?:不得|不)超过|最大(?:允许)?(?:值|电流)?(?:为|是)?|≤|<=)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*A\b/gi,
-        )) {
-          magnetLimits.add(`${m[1]} A`);
-        }
-        for (const m of clause.matchAll(
-          /(?:上限(?:阈值)?|最大(?:允许)?电流)\s*(?:为|是|≤|<=)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*A\b/gi,
-        )) {
-          magnetLimits.add(`${m[1]} A`);
-        }
-        if (!/正常|日常|平均|最小|下限|低于|小于/.test(clause)) {
-          for (const m of clause.matchAll(
-            /额定(?:工作)?电流\s*(?:为|是)\s*(\d+(?:\.\d+)?)\s*A\b/gi,
-          )) {
-            magnetRatedFallbacks.add(`${m[1]} A`);
-          }
-        }
-      }
-
-      if (hasHeliumSubject) {
-        const nextClause =
-          i + 1 < clauses.length &&
-          !NEGATED_OR_NON_STANDARD_CLAUSE_RE.test(clauses[i + 1]) &&
-          !/%|低于|小于|下限|不足|<=|≤|<|高于|大于/.test(clauses[i + 1])
-            ? `${clause}，${clauses[i + 1]}`
-            : clause;
-
-        for (const m of nextClause.matchAll(
-          /(低于|小于|下限(?:为|是)?|不足|<=|≤|<)\s*(\d+(?:\.\d+)?)\s*%\s*(?:时|后|则)?(?:，)?\s*(?:立即|自动|将)?(?:触发)?(?:联锁(?:保护)?停机|停机联锁)/g,
-        )) {
-          const cond =
-            /<=|≤|下限/.test(m[1]) ? "≤ 触发联锁停机" : "< 触发联锁停机";
-          heliumInterlocks.set(`${m[2]}%`, cond);
-        }
-        for (const m of clause.matchAll(
-          /(?:联锁(?:保护)?停机|停机联锁)(?:液位|阈值)\s*(低于|小于|下限(?:为|是)?|为|是|<=|≤|<)\s*(\d+(?:\.\d+)?)\s*%/g,
-        )) {
-          const cond =
-            /<=|≤|下限/.test(m[1]) ? "≤ 触发联锁停机" : "< 触发联锁停机";
-          heliumInterlocks.set(`${m[2]}%`, cond);
-        }
-      }
-
-      if (hasCalibrationSubject) {
-        for (const m of clause.matchAll(
-          /(?:阻抗校准(?:周期)?(?:为|是)?\s*每\s*(\d+)\s*天(?:\s*一次)?|每\s*(\d+)\s*天\s*(?:进行|完成|执行)?(?:一次)?阻抗校准)/g,
-        )) {
-          const day = m[1] || m[2];
-          if (day) calibrationDays.add(day);
-        }
-      }
-    }
-  }
-
-  const rows: SpecTableRow[] = [];
-  const chosenMagnetSet =
-    magnetLimits.size > 0 ? magnetLimits : magnetRatedFallbacks;
-  if (chosenMagnetSet.size === 1) {
-    const [indicator] = Array.from(chosenMagnetSet);
-    rows.push({
-      parameter: "主磁体额定电流",
-      indicator,
-      condition: "上限阈值",
-      conditionTone: "limit",
-    });
-  }
-
-  if (heliumInterlocks.size === 1) {
-    const [[indicator, condition]] = Array.from(heliumInterlocks.entries());
-    rows.push({
-      parameter: "冷却液氦液位",
-      indicator,
-      condition,
-      conditionTone: "interlock",
-    });
-  }
-
-  if (calibrationDays.size === 1) {
-    const [day] = Array.from(calibrationDays);
-    rows.push({
-      parameter: "阻抗校准周期",
-      indicator: `每 ${day} 天一次`,
-      condition: "维护周期",
-      conditionTone: "cycle",
-    });
-  }
-
-  return rows;
-}
-
-export function extractSpecTableForTurn(turn: Turn): SpecTableData | null {
-  if (
-    turn.refused ||
-    turn.pending ||
-    Boolean(turn.error) ||
-    !turn.answer.trim() ||
-    turn.citations.length === 0
-  ) {
-    return null;
-  }
-
-  const usedSet =
-    turn.citationCheck && turn.citationCheck.used.length > 0
-      ? new Set(turn.citationCheck.used)
-      : null;
-  const activeCitations = usedSet
-    ? turn.citations.filter((c, i) => usedSet.has(c.index ?? i + 1))
-    : turn.citations;
-  const sourceCitations =
-    activeCitations.length > 0 ? activeCitations : turn.citations;
-
-  const citationText = sourceCitations
-    .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
-    .join("\n");
-
-  // Extract unambiguous rows independently from source citations and from the assistant answer,
-  // and only emit rows where both the cited source and the answer agree on the exact value.
-  const citationRows = extractUnambiguousSopRows(citationText);
-  const answerRows = extractUnambiguousSopRows(turn.answer);
-  const answerByParam = new Map(answerRows.map((r) => [r.parameter, r]));
-
-  const rows: SpecTableRow[] = [];
-  for (const citeRow of citationRows) {
-    const ansRow = answerByParam.get(citeRow.parameter);
-    if (ansRow && ansRow.indicator === citeRow.indicator) {
-      rows.push(citeRow);
-    }
-  }
-
-  if (rows.length === 0) return null;
-
-  // Determine source basis title from the turn's actual citations
-  const sopCitation =
-    sourceCitations.find(
-      (c) => c.title && /规程|约定|规范|手册|标准/.test(c.title),
-    ) || sourceCitations[0];
-
-  let basis = "当前回合引用文档";
-  if (sopCitation?.title) {
-    const cleanTitle = sopCitation.title.replace(/-E2E实测$/, "");
-    const cleanHeading = sopCitation.heading
-      ? sopCitation.heading.replace(/^#+\s*/, "").trim()
-      : "";
-    basis = cleanHeading
-      ? `《${cleanTitle}》${cleanHeading.startsWith("§") ? cleanHeading : `· ${cleanHeading}`}`
-      : `《${cleanTitle}》`;
-  }
-
-  return {
-    title: "规程参数标准表",
-    rows,
-    basis,
-  };
 }
 
 export function formatSourcePillTitle(citation: Citation): string {
@@ -570,11 +374,6 @@ export function formatSourcePillTitle(citation: Citation): string {
     (citation.doc_key && citation.doc_key.startsWith("lab-profile-")) ||
     rawTitle.includes("课题组资料库")
   ) {
-    // Extract member name or concise section name if present
-    const personMatch = rawHeading.match(/([一-龥]{2,4})/);
-    if (personMatch && !/课题组|团队成员|承担项目|前期成果|支撑条件/.test(personMatch[1])) {
-      return `申报书·${personMatch[1]}`;
-    }
     if (rawHeading) {
       const shortHeading = rawHeading
         .replace(/^课题组概况与/, "")
@@ -582,7 +381,7 @@ export function formatSourcePillTitle(citation: Citation): string {
         .slice(0, 12);
       return `申报书·${shortHeading || "课题组档案"}`;
     }
-    return "2026申报书·课题组档案";
+    return rawTitle || "课题组资料库";
   }
 
   const cleanDocTitle = rawTitle.replace(/-E2E实测$/, "");

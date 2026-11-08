@@ -9,10 +9,8 @@ import { useI18n } from "@/lib/i18n";
 import {
   type ActiveEvidenceSelection,
   type MatchedPersonCardData,
-  type SpecTableData,
   type Turn,
   extractMatchedPeopleForTurn,
-  extractSpecTableForTurn,
 } from "./chatTypesAndHelpers";
 
 function renderInlineCitations(
@@ -135,7 +133,7 @@ function MemberDossierCardList({
           </span>
         </div>
         <span className="font-mono text-[11px] tabular-nums text-stone-500 dark:text-stone-400">
-          命中 {people.length} 位核验成员
+          关联 {people.length} 位课题组成员
         </span>
       </div>
 
@@ -215,80 +213,6 @@ function MemberDossierCardList({
   );
 }
 
-function SpecParameterTableCard({ specTable }: { specTable: SpecTableData }) {
-  return (
-    <section
-      aria-label={specTable.title}
-      className="overflow-hidden rounded-[14px] border border-stone-200/90 bg-white shadow-[0_1px_3px_rgba(28,25,23,0.05)] dark:border-stone-800 dark:bg-[#22221F]"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#F6F4EE]/80 px-4 py-2.5 dark:border-stone-800 dark:bg-stone-900/60">
-        <div className="flex items-center gap-2">
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-primary/10 text-xs text-primary dark:bg-emerald-500/15 dark:text-emerald-300">
-            ⚙️
-          </span>
-          <h3 className="text-xs font-semibold tracking-wide text-stone-700 dark:text-stone-200">
-            {specTable.title}
-          </h3>
-          <span className="rounded-md bg-stone-200/70 px-1.5 py-0.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-400">
-            规程/设备类提问响应
-          </span>
-        </div>
-        <span className="text-[11px] text-stone-500 dark:text-stone-400">
-          结构化参数核验
-        </span>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left text-xs">
-          <thead>
-            <tr className="border-b border-stone-200/70 bg-stone-50/70 text-[11px] font-medium text-stone-500 dark:border-stone-800 dark:bg-stone-900/40 dark:text-stone-400">
-              <th className="px-4 py-2.5 font-medium">参数项</th>
-              <th className="px-4 py-2.5 font-medium">标准工作指标</th>
-              <th className="px-4 py-2.5 font-medium">联锁条件</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-stone-200/60 dark:divide-stone-800/70">
-            {specTable.rows.map((row) => {
-              const badgeClass =
-                row.conditionTone === "interlock"
-                  ? "bg-amber-500/10 text-amber-800 ring-1 ring-amber-600/20 dark:bg-amber-500/15 dark:text-amber-300"
-                  : row.conditionTone === "limit"
-                    ? "bg-emerald-950/6 text-primary ring-1 ring-primary/20 dark:bg-emerald-500/10 dark:text-emerald-300"
-                    : "bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300";
-
-              return (
-                <tr
-                  key={row.parameter}
-                  className="transition-colors hover:bg-stone-50/60 dark:hover:bg-stone-800/20"
-                >
-                  <td className="px-4 py-2.5 font-medium text-stone-800 dark:text-stone-200">
-                    {row.parameter}
-                  </td>
-                  <td className="px-4 py-2.5 font-mono text-[13px] font-semibold tabular-nums text-stone-900 dark:text-stone-100">
-                    {row.indicator}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span
-                      className={`inline-flex items-center rounded-md px-2 py-0.5 font-mono text-[11px] font-medium tabular-nums ${badgeClass}`}
-                    >
-                      {row.condition}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-200/60 bg-[#FAF9F6]/70 px-4 py-2 text-[11px] text-stone-500 dark:border-stone-800 dark:bg-stone-900/40 dark:text-stone-400">
-        <span>依据: {specTable.basis}</span>
-        <span className="font-mono tabular-nums">已与原文条款交叉核对</span>
-      </div>
-    </section>
-  );
-}
-
 function AcademicBoundaryMemo({
   turn,
   onSelectCitation,
@@ -312,7 +236,7 @@ function AcademicBoundaryMemo({
             </span>
           </div>
           <p className="text-sm leading-[1.7] text-stone-800 dark:text-stone-200">
-            当前可查阅的规程与文档中暂未记载该参数。
+            {t.refusalTitle}
             <span className="ml-1 text-stone-500 dark:text-stone-400">
               {isModelDeclined
                 ? t.modelDeclinedBody
@@ -424,7 +348,6 @@ export function SmartTurnBlock({
 }) {
   const { t } = useI18n();
   const matchedPeople = extractMatchedPeopleForTurn(turn, labPeople);
-  const specTable = extractSpecTableForTurn(turn);
 
   return (
     <article className="space-y-4 border-b border-stone-200/70 pb-7 last:border-b-0 dark:border-stone-800/80">
@@ -458,7 +381,7 @@ export function SmartTurnBlock({
             />
           )}
 
-          {/* Smart Structured Block 1: Member Dossier Cards */}
+          {/* Smart Structured Block: Member Dossier Cards */}
           {matchedPeople.length > 0 ? (
             <MemberDossierCardList
               people={matchedPeople}
@@ -468,9 +391,6 @@ export function SmartTurnBlock({
               onToggleBasket={onToggleBasket}
             />
           ) : null}
-
-          {/* Smart Structured Block 2: SOP / Equipment Parameter Table */}
-          {specTable ? <SpecParameterTableCard specTable={specTable} /> : null}
 
           {/* Citation Verification Notes */}
           {turn.citationCheck?.invalid && turn.citationCheck.invalid.length > 0 ? (
