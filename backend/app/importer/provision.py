@@ -242,8 +242,22 @@ async def provision_import_job(
     if not raw_people:
         raise ProvisionError(422, "import_parse_failed", "预览中没有可开通的人员记录")
 
+    overrides_by_key = {ov.key: ov for ov in body.people}
+    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
+
     # Recompute login_name and matches against current DB users & existing LabPerson fingerprints
-    for p in raw_people:
+    for idx_p, p in enumerate(raw_people, start=1):
+        pkey_init = str(p.get("key") or p.get("temp_id") or f"p{idx_p}")
+        ov_init = overrides_by_key.get(pkey_init)
+        if (
+            (ov_init and ov_init.exclude)
+            or pkey_init in exclude_key_set
+            or p.get("exclude") is True
+            or p.get("excluded") is True
+            or p.get("include") is False
+            or p.get("imported") is False
+        ):
+            p["exclude"] = True
         if p.get("tier") == "T1":
             p["cert"] = p.get("student_id") or p.get("login_name")
     assign_people_identities(
@@ -252,8 +266,6 @@ async def provision_import_job(
         existing_people=existing_people,
     )
 
-    overrides_by_key = {ov.key: ov for ov in body.people}
-    exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
     active_people: list[dict[str, Any]] = []
 
     for person in raw_people:

@@ -2254,6 +2254,29 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
     assert inc_conflicting_t1[0]["match"]["status"] == "new"  # type: ignore[index]
     assert inc_conflicting_t1[0]["login_name"] == "2531109999"
 
+    # 7. Excluded row preceding an included row must not consume the existing user match.
+    inc_excluded_then_included = [
+        {
+            "name": "张三",
+            "affiliation": "天津工业大学",
+            "cert": "2531108888",
+            "exclude": True,
+        },
+        {
+            "name": "张三",
+            "affiliation": "天津工业大学",
+        },
+    ]
+    assign_people_identities(
+        inc_excluded_then_included,
+        existing_users=[u_suffixed],
+        existing_people=[lp_suffixed_t2],
+    )
+    assert inc_excluded_then_included[0]["match"]["status"] == "new"  # type: ignore[index]
+    assert inc_excluded_then_included[1]["match"]["status"] == "existing"  # type: ignore[index]
+    assert inc_excluded_then_included[1]["match"]["user_id"] == str(u_suffixed.id)  # type: ignore[index]
+    assert inc_excluded_then_included[1]["login_name"] == "zhangsan2"
+
 
 
 

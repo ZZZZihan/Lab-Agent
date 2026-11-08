@@ -157,15 +157,18 @@ def assign_people_identities(
         ).strip().lower()
         return bool(login_cand and T1_CERT_RE.match(login_cand))
 
-    incoming_name_counts: dict[str, int] = {}
-    incoming_name_aff_counts: dict[tuple[str, str], int] = {}
-    for p in people:
-        if (
+    def _is_person_excluded(p: dict[str, object]) -> bool:
+        return (
             p.get("exclude") is True
             or p.get("excluded") is True
             or p.get("include") is False
             or p.get("imported") is False
-        ):
+        )
+
+    incoming_name_counts: dict[str, int] = {}
+    incoming_name_aff_counts: dict[tuple[str, str], int] = {}
+    for p in people:
+        if _is_person_excluded(p):
             continue
         pn = norm(normalize_person_name(str(p.get("name") or "")))
         pa = norm(str(p.get("affiliation") or "").strip())
@@ -246,6 +249,7 @@ def assign_people_identities(
             email=valid_email,
         )
 
+        is_excluded = _is_person_excluded(person)
         matched_user: User | None = None
         matched_lp: LabPerson | None = None
         match_status = "new"
@@ -282,7 +286,7 @@ def assign_people_identities(
                 match_status = "conflict"
                 if "LOGIN_CONFLICT" not in existing_warnings:
                     existing_warnings.append("LOGIN_CONFLICT")
-        else:
+        elif not is_excluded:
             norm_name = norm(name)
             norm_aff = norm(affiliation)
             inc_has_t1 = tier == "T1" and bool(base_login)
@@ -328,13 +332,15 @@ def assign_people_identities(
                         matched_user = users_by_id[matched_lp.user_id]  # type: ignore[index]
                         match_status = "existing"
 
+        target_used_logins = set(used_logins) if is_excluded else used_logins
         if match_status == "existing" and matched_user is not None:
-            used_matched_user_ids.add(matched_user.id)
+            if not is_excluded:
+                used_matched_user_ids.add(matched_user.id)
             if matched_user.login_name:
                 allocated = matched_user.login_name
-                used_logins.add(allocated.lower())
+                target_used_logins.add(allocated.lower())
             else:
-                allocated = _allocate_unique_login(base_login, used_logins, existing_warnings)
+                allocated = _allocate_unique_login(base_login, target_used_logins, existing_warnings)
             person["login_name"] = allocated
             person["match"] = {"status": "existing", "user_id": str(matched_user.id)}
         elif match_status == "conflict" and matched_user is not None:
@@ -345,9 +351,9 @@ def assign_people_identities(
                 person["login_name"] = base_login
             elif tier == "T1":
                 person["login_name"] = base_login
-                used_logins.add(base_login)
+                target_used_logins.add(base_login)
             else:
-                allocated = _allocate_unique_login(base_login, used_logins, existing_warnings)
+                allocated = _allocate_unique_login(base_login, target_used_logins, existing_warnings)
                 person["login_name"] = allocated
             person["match"] = {"status": "new"}
 
