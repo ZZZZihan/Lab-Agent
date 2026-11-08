@@ -124,22 +124,35 @@ def _decode_msdoc_compressed(chunk: bytes) -> str:
     return "".join(out)
 
 
-def _strip_msdoc_fields(raw: str) -> str:
+def _strip_msdoc_fields(
+    raw: str,
+    state: tuple[list[bool], list[int]] | None = None,
+) -> str:
     """Strip Word field instructions (`\\x13...\\x14`), keeping visible field results (`\\x14...\\x15`)."""
-    if "\x13" not in raw and "\x14" not in raw and "\x15" not in raw:
-        return raw
+    if state is None:
+        if "\x13" not in raw and "\x14" not in raw and "\x15" not in raw:
+            return raw
+        field_stack: list[bool] = []
+        active_instr = [0]
+    else:
+        field_stack, active_instr = state
+        if "\x13" not in raw and "\x14" not in raw and "\x15" not in raw:
+            return "" if active_instr[0] > 0 else raw
+
     out: list[str] = []
-    field_stack: list[bool] = []
     for ch in raw:
         if ch == "\x13":
             field_stack.append(True)
+            active_instr[0] += 1
         elif ch == "\x14":
-            if field_stack:
+            if field_stack and field_stack[-1]:
                 field_stack[-1] = False
+                active_instr[0] -= 1
         elif ch == "\x15":
             if field_stack:
-                field_stack.pop()
-        elif not any(field_stack):
+                if field_stack.pop():
+                    active_instr[0] -= 1
+        elif active_instr[0] == 0:
             out.append(ch)
     return "".join(out)
 
@@ -906,13 +919,14 @@ def _parse_msdoc_ole2(
     n_chars = len(main_text)
     idx = 0
     seg_start = 0
+    field_state: tuple[list[bool], list[int]] = ([], [0])
     while idx < n_chars:
         ch = main_text[idx]
         if ch not in ("\r", "\x07"):
             idx += 1
             continue
 
-        raw_seg = _strip_msdoc_fields(main_text[seg_start:idx])
+        raw_seg = _strip_msdoc_fields(main_text[seg_start:idx], state=field_state)
         fc_end = _cp_to_fc_end(idx)
 
         # Check for \r\x07 pair (standard row-end or cell-end sequence)
@@ -991,7 +1005,7 @@ def _parse_msdoc_ole2(
         seg_start = idx
 
     if seg_start < n_chars:
-        tail = _strip_msdoc_fields(main_text[seg_start:]).strip()
+        tail = _strip_msdoc_fields(main_text[seg_start:], state=field_state).strip()
         if tail:
             if current_row or cell_lines:
                 cell_lines.append(tail)

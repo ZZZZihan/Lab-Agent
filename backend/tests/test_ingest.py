@@ -333,11 +333,16 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert fn_extracted.text.strip() == "Main 😀\n\nSub 🚀"
     assert "FOOTNOTE" not in fn_extracted.text
     nested_field_ole2 = build_ole2_doc_bytes(
-        paragraphs=['\x13 IF \x13 REF x \x14 1 \x15 = 1 "Yes" "No" \x14Yes\x15']
+        paragraphs=[
+            '\x13 IF \x13 REF x \x14 1 \x15 = 1 "Yes" "No" \x14Yes\x15',
+            "\x13 IF X",
+            ' = 1 "Yes" "No" \x14MultiParaYes\x15',
+            ("\x13\x14" * 2000) + "DeepResult" + ("\x15" * 2000),
+        ]
     )
     assert (
         extract_upload("nested_field.doc", nested_field_ole2, max_chars=300_000).text.strip()
-        == "Yes"
+        == "Yes\n\nMultiParaYes\n\nDeepResult"
     )
 
     # 3c. OLE2 .doc with an embedded ObjectPool child storage containing a nested WordDocument stream
