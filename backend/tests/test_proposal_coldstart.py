@@ -2069,6 +2069,93 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
     assert preview3_people["徐子晗"]["match"]["status"] == "existing"
     assert preview3_people["徐子晗"]["login_name"] == "xuzihan"
 
+    # 4. Ambiguity guard: if an unlinked LabPerson with the same (name, affiliation) also exists,
+    # an incoming T2 row must NOT auto-link to the linked person.
+    import uuid as _uuid
+
+    from app.importer.fingerprint import person_fp
+    from app.importer.people import assign_people_identities
+    from app.importer.provenance import _match_existing_person
+    from app.models import LabPerson
+
+    u_linked = User(
+        id=_uuid.uuid4(),
+        login_name="2431101262",
+        display_name="林雪莹",
+        role="member",
+        password_hash="x",
+        is_active=True,
+    )
+    lp_linked = LabPerson(
+        id=_uuid.uuid4(),
+        user_id=u_linked.id,
+        name="林雪莹",
+        affiliation="天津工业大学",
+        entity_fingerprint=person_fp(
+            tier="T1",
+            login_name="2431101262",
+            name="林雪莹",
+            affiliation="天津工业大学",
+        ),
+    )
+    lp_unlinked = LabPerson(
+        id=_uuid.uuid4(),
+        user_id=None,
+        name="林雪莹",
+        affiliation="天津工业大学",
+        entity_fingerprint=person_fp(
+            tier="T1",
+            login_name="2531109999",
+            name="林雪莹",
+            affiliation="天津工业大学",
+        ),
+    )
+    inc_ambiguous = [{"name": "林雪莹", "affiliation": "天津工业大学"}]
+    assign_people_identities(
+        inc_ambiguous,
+        existing_users=[u_linked],
+        existing_people=[lp_linked, lp_unlinked],
+    )
+    assert inc_ambiguous[0]["match"]["status"] == "new"  # type: ignore[index]
+
+    # 5. Conflicting affiliation guard in _match_existing_person:
+    # An existing T2 person in affiliation A must not match an incoming T1 person in affiliation B.
+    lp_t2_univ_a = LabPerson(
+        id=_uuid.uuid4(),
+        user_id=_uuid.uuid4(),
+        name="单立飞",
+        affiliation="天津天狮学院",
+        entity_fingerprint=person_fp(
+            tier="T2",
+            login_name="shanlifei",
+            name="单立飞",
+            affiliation="天津天狮学院",
+        ),
+    )
+    inc_t1_univ_b = {
+        "name": "单立飞",
+        "tier": "T1",
+        "login_name": "2531107777",
+        "affiliation": "北京大学",
+        "match": {"status": "new"},
+    }
+    inc_t1_fp = person_fp(
+        tier="T1",
+        login_name="2531107777",
+        name="单立飞",
+        affiliation="北京大学",
+    )
+    matched_conflicting_aff = _match_existing_person(
+        inc_t1_univ_b,
+        "单立飞",
+        inc_t1_fp,
+        {"affiliation": "北京大学", "email": None},
+        [lp_t2_univ_a],
+        {"单立飞": 1},
+    )
+    assert matched_conflicting_aff is None
+
+
 
 
 

@@ -128,10 +128,11 @@ def assign_people_identities(
         for u in users
         if u.login_name is not None and u.login_name.strip()
     }
+    all_existing_people = list(existing_people or [])
     by_fp: dict[str, User] = {}
     lp_by_fp: dict[str, LabPerson] = {}
     lp_with_user: list[LabPerson] = []
-    for lp in existing_people or []:
+    for lp in all_existing_people:
         if lp.user_id is not None and lp.user_id in users_by_id:
             lp_with_user.append(lp)
             if lp.entity_fingerprint:
@@ -145,17 +146,26 @@ def assign_people_identities(
             or getattr(lp, "login_name", None)
             or ""
         ).strip().lower()
-        if not login_cand or not T1_CERT_RE.match(login_cand):
-            return False
+        if login_cand and T1_CERT_RE.match(login_cand):
+            if lp.entity_fingerprint:
+                return lp.entity_fingerprint == person_fp(
+                    tier="T1",
+                    login_name=login_cand,
+                    name=lp.name,
+                    affiliation=lp.affiliation,
+                    email=lp.email,
+                )
+            return True
         if lp.entity_fingerprint:
-            return lp.entity_fingerprint == person_fp(
-                tier="T1",
-                login_name=login_cand,
+            non_t1_fp = person_fp(
+                tier="T3" if lp.email else "T2",
+                login_name=None,
                 name=lp.name,
                 affiliation=lp.affiliation,
                 email=lp.email,
             )
-        return True
+            return lp.entity_fingerprint != non_t1_fp
+        return False
 
     incoming_name_counts: dict[str, int] = {}
     incoming_name_aff_counts: dict[tuple[str, str], int] = {}
@@ -184,7 +194,11 @@ def assign_people_identities(
         inc_has_t1: bool,
         inc_email: str | None,
     ) -> bool:
-        if lp.user_id is None or lp.user_id in used_matched_user_ids:
+        if (
+            lp.user_id is None
+            or lp.user_id not in users_by_id
+            or lp.user_id in used_matched_user_ids
+        ):
             return False
         if inc_has_t1 and _lp_has_t1(lp):
             return False
@@ -271,7 +285,7 @@ def assign_people_identities(
             if norm_name and incoming_name_aff_counts.get((norm_name, norm_aff), 0) == 1:
                 same_name_aff = [
                     lp
-                    for lp in lp_with_user
+                    for lp in all_existing_people
                     if norm(normalize_person_name(lp.name)) == norm_name
                     and norm(lp.affiliation) == norm_aff
                 ]
@@ -291,7 +305,7 @@ def assign_people_identities(
                 elif not same_name_aff and incoming_name_counts.get(norm_name, 0) == 1:
                     same_name_only = [
                         lp
-                        for lp in lp_with_user
+                        for lp in all_existing_people
                         if norm(normalize_person_name(lp.name)) == norm_name
                     ]
                     compat_name = [

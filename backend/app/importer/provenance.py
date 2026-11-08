@@ -970,7 +970,11 @@ def _match_existing_person(
             fp_val != inc_non_t1_fp
         )
 
-        def _can_fallback_to_person(p: LabPerson) -> bool:
+        def _can_fallback_to_person(
+            p: LabPerson,
+            *,
+            allow_affiliation_change: bool = True,
+        ) -> bool:
             p_non_t1_fp = person_fp(
                 tier="T3" if p.email else "T2",
                 login_name=None,
@@ -981,6 +985,14 @@ def _match_existing_person(
             ex_has_t1 = p.entity_fingerprint != p_non_t1_fp
             if inc_has_t1 and ex_has_t1:
                 return False
+            p_aff = norm(p.affiliation or "")
+            if (
+                (not allow_affiliation_change or inc_has_t1 or ex_has_t1)
+                and norm_aff
+                and p_aff
+                and norm_aff != p_aff
+            ):
+                return False
             if (
                 inc_email
                 and p.email
@@ -989,22 +1001,38 @@ def _match_existing_person(
                 return False
             return True
 
-        same_name_aff = [
+        all_same_name_aff = [
             p
             for p in existing_people
             if norm(p.name) == norm_name
             and norm(p.affiliation or "") == norm_aff
-            and _can_fallback_to_person(p)
         ]
-        if len(same_name_aff) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
+        same_name_aff = [
+            p for p in all_same_name_aff if _can_fallback_to_person(p)
+        ]
+        if (
+            len(same_name_aff) == 1
+            and len(all_same_name_aff) == 1
+            and incoming_name_counts.get(norm_name, 0) == 1
+        ):
             return same_name_aff[0]
 
+        all_same_name = [
+            p for p in existing_people if norm(p.name) == norm_name
+        ]
         same_name = [
             p
-            for p in existing_people
-            if norm(p.name) == norm_name and _can_fallback_to_person(p)
+            for p in all_same_name
+            if _can_fallback_to_person(
+                p,
+                allow_affiliation_change=not (inc_has_t1 or p.user_id is not None),
+            )
         ]
-        if len(same_name) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
+        if (
+            len(same_name) == 1
+            and len(all_same_name) == 1
+            and incoming_name_counts.get(norm_name, 0) == 1
+        ):
             return same_name[0]
 
     return None
