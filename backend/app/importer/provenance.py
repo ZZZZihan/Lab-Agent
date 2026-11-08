@@ -979,7 +979,7 @@ def _match_existing_person(
                 email=p.email,
             )
             ex_has_t1 = p.entity_fingerprint != p_non_t1_fp
-            if inc_has_t1 and (ex_has_t1 or p.user_id is not None):
+            if inc_has_t1 and ex_has_t1:
                 return False
             if (
                 inc_email

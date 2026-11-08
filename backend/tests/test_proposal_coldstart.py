@@ -1927,6 +1927,150 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_clear_fac.json()["facility"]["usage_scenario"] is None
 
 
+async def test_cross_tier_member_deduplication_when_second_proposal_omits_student_ids(
+    client: AsyncClient,
+) -> None:
+    """Regression guard: importing a second proposal without student IDs must link existing T1 members instead of duplicating them as T2."""
+    await _seed_admin()
+    headers = await _login_headers(client, ADMIN_EMAIL)
+
+    # 1. First import: members 林雪莹 (2431101262), 王诗涵 (2431101226), 曹梦轩 (2431111321) have T1 student IDs
+    raw_docx_1 = build_synthetic_proposal_docx()
+    r_up1 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={
+            "file": (
+                "first_with_student_ids.docx",
+                raw_docx_1,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        headers=headers,
+    )
+    assert r_up1.status_code == 200, r_up1.text
+    job1_id = r_up1.json()["job_id"]
+
+    r_exec1 = await client.post(
+        f"/api/v1/admin/imports/{job1_id}/provision",
+        json={"initial_password": INITIAL_PW},
+        headers=headers,
+    )
+    assert r_exec1.status_code == 200, r_exec1.text
+
+    # 2. Second import: same members WITHOUT student IDs (empty cert), plus two new members 徐子晗 and 米琦
+    doc2 = docx.Document(io.BytesIO(raw_docx_1))
+    t2 = doc2.tables[1]
+    # Clear student IDs on rows 11, 12, 13 (林雪莹, 王诗涵, 曹梦轩)
+    for row_idx in (11, 12, 13):
+        t2.rows[row_idx].cells[2].text = ""
+    # Append two new members without student IDs: 徐子晗, 米琦
+    for seq, name, spec in [("10", "徐子晗", "智能评测"), ("11", "米琦", "教育数据挖掘")]:
+        new_row = t2.add_row()
+        vals = [seq, name, "", "无", "无", "无", spec, "学士", "天津工业大学", ""]
+        for c_idx, val in enumerate(vals):
+            new_row.cells[c_idx].text = val
+
+    buf2 = io.BytesIO()
+    doc2.save(buf2)
+    raw_docx_2 = buf2.getvalue()
+
+    r_up2 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={
+            "file": (
+                "second_without_student_ids.docx",
+                raw_docx_2,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        headers=headers,
+    )
+    assert r_up2.status_code == 200, r_up2.text
+    preview2_people = {p["name"]: p for p in r_up2.json()["preview"]["people"] if p["affiliation"] == "天津工业大学"}
+    assert preview2_people["林雪莹"]["match"]["status"] == "existing"
+    assert preview2_people["林雪莹"]["login_name"] == "2431101262"
+    assert preview2_people["王诗涵"]["match"]["status"] == "existing"
+    assert preview2_people["王诗涵"]["login_name"] == "2431101226"
+    assert preview2_people["曹梦轩"]["match"]["status"] == "existing"
+    assert preview2_people["曹梦轩"]["login_name"] == "2431111321"
+    assert preview2_people["徐子晗"]["match"]["status"] == "new"
+    assert preview2_people["徐子晗"]["login_name"] == "xuzihan"
+    assert preview2_people["米琦"]["match"]["status"] == "new"
+    assert preview2_people["米琦"]["login_name"] == "miqi"
+
+    job2_id = r_up2.json()["job_id"]
+    r_exec2 = await client.post(
+        f"/api/v1/admin/imports/{job2_id}/provision",
+        json={"initial_password": INITIAL_PW},
+        headers=headers,
+    )
+    assert r_exec2.status_code == 200, r_exec2.text
+    exec2_stats = r_exec2.json()["stats"]
+    assert exec2_stats["users_created"] == 2
+    assert exec2_stats["users_linked"] == 10
+    roster_rows2 = exec2_stats["roster_rows"]
+    created_names2 = {
+        r["name"] for r in roster_rows2 if r["account_status"] == "new"
+    }
+    assert created_names2 == {"徐子晗", "米琦"}
+    existing_by_name2 = {
+        r["name"]: r for r in roster_rows2 if r["account_status"] == "existing"
+    }
+    assert existing_by_name2["林雪莹"]["login_name"] == "2431101262"
+    assert existing_by_name2["王诗涵"]["login_name"] == "2431101226"
+    assert existing_by_name2["曹梦轩"]["login_name"] == "2431111321"
+
+    r_roster2 = await client.get(f"/api/v1/admin/imports/{job2_id}/roster", headers=headers)
+    assert r_roster2.status_code == 200, r_roster2.text
+    roster_text2 = r_roster2.json()["roster_text"]
+    assert "徐子晗　登录名：xuzihan" in roster_text2
+    assert "米琦　登录名：miqi" in roster_text2
+    assert "linxueying" not in roster_text2
+    assert "wangshihan" not in roster_text2
+    assert "caomengxuan" not in roster_text2
+
+    r_people = await client.get("/api/v1/lab/people", headers=headers)
+    assert r_people.status_code == 200, r_people.text
+    people_items = r_people.json()["people"]
+    maker = get_sessionmaker()
+    async with maker() as session:
+        all_users = {str(u.id): u for u in await session.scalars(select(User))}
+    for student_name, expected_login in [
+        ("林雪莹", "2431101262"),
+        ("王诗涵", "2431101226"),
+        ("曹梦轩", "2431111321"),
+    ]:
+        matches = [p for p in people_items if p["name"] == student_name]
+        assert len(matches) == 1
+        assert matches[0]["user_id"] in all_users
+        assert all_users[matches[0]["user_id"]].login_name == expected_login
+
+    # 3. Third import (T2 -> T1): 徐子晗 was created as T2 (xuzihan), now imported with student ID 2531108888
+    doc3 = docx.Document(io.BytesIO(raw_docx_2))
+    t3 = doc3.tables[1]
+    xuzihan_row = next(r for r in t3.rows if r.cells[1].text == "徐子晗")
+    xuzihan_row.cells[2].text = "2531108888"
+    buf3 = io.BytesIO()
+    doc3.save(buf3)
+
+    r_up3 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={
+            "file": (
+                "third_with_xuzihan_student_id.docx",
+                buf3.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        headers=headers,
+    )
+    assert r_up3.status_code == 200, r_up3.text
+    preview3_people = {p["name"]: p for p in r_up3.json()["preview"]["people"] if p["affiliation"] == "天津工业大学"}
+    assert preview3_people["徐子晗"]["match"]["status"] == "existing"
+    assert preview3_people["徐子晗"]["login_name"] == "xuzihan"
+
+
+
 
 
 
