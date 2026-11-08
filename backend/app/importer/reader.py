@@ -130,6 +130,8 @@ def _strip_msdoc_fields(
     state: tuple[list[bool], list[int]] | None = None,
 ) -> str:
     """Strip Word field instructions (`\\x13...\\x14`), keeping visible field results (`\\x14...\\x15`)."""
+    if "\x1e" in raw:
+        raw = raw.replace("\x1e", "-")
     if state is None:
         if "\x13" not in raw and "\x14" not in raw and "\x15" not in raw:
             return raw
@@ -1070,7 +1072,7 @@ def _parse_word2003_xml_doc(
 
         def _walk(node: ET.Element) -> None:
             ln = _local(node.tag)
-            if ln == "Fallback":
+            if ln in ("Fallback", "del", "moveFrom"):
                 return
             if ln == "t" and node.text:
                 parts.append(node.text)
@@ -1078,6 +1080,8 @@ def _parse_word2003_xml_doc(
                 parts.append("\n")
             elif ln in ("tab", "ptab"):
                 parts.append("\t")
+            elif ln == "noBreakHyphen":
+                parts.append("-")
             for ch in node:
                 _walk(ch)
 
@@ -2294,7 +2298,7 @@ def _extract_element_lines_text(elem: Any) -> str:
     )
     def _walk_p(node: Any, out: list[str]) -> None:
         local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
-        if local_name == "Fallback":
+        if local_name in ("Fallback", "del", "moveFrom"):
             return
         if node.tag in (f"{{{W_NS}}}t", f"{{{M_NS}}}t"):
             out.append(node.text or "")
@@ -2302,6 +2306,8 @@ def _extract_element_lines_text(elem: Any) -> str:
             out.append("\n")
         elif node.tag in (f"{{{W_NS}}}tab", f"{{{W_NS}}}ptab"):
             out.append("\t")
+        elif node.tag == f"{{{W_NS}}}noBreakHyphen":
+            out.append("-")
         for child in node:
             _walk_p(child, out)
 

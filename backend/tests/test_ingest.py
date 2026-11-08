@@ -192,6 +192,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
             "<m:r><m:t>E=mc^2</m:t></m:r></m:oMath>"
         )
     )
+    p_tab._p.append(
+        parse_xml(
+            '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:t> 10</w:t><w:noBreakHyphen/><w:t>20 mg</w:t></w:r>"
+        )
+    )
     tbl = d.add_table(rows=2, cols=2)
     tbl.rows[0].cells[0].text = "项目"
     tbl.rows[0].cells[1].text = "阈值"
@@ -212,7 +218,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     extracted_docx = extract_upload("sop.docx", docx_bytes, max_chars=300_000)
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
-    assert "Sample Temperature E=mc^2" in extracted_docx.text
+    assert "Sample Temperature E=mc^2 10-20 mg" in extracted_docx.text
     assert "液位 | 80%+ΔT 温度 | -196C" in extracted_docx.text
     docx_grids = [
         extract_table_grid(t)
