@@ -2069,6 +2069,38 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
     assert preview3_people["徐子晗"]["match"]["status"] == "existing"
     assert preview3_people["徐子晗"]["login_name"] == "xuzihan"
 
+    job3_id = r_up3.json()["job_id"]
+    r_exec3 = await client.post(
+        f"/api/v1/admin/imports/{job3_id}/provision",
+        json={"initial_password": INITIAL_PW},
+        headers=headers,
+    )
+    assert r_exec3.status_code == 200, r_exec3.text
+
+    # 3b. Fourth import: homonym 徐子晗 with a DIFFERENT T1 student ID (2531109999) must NOT link to xuzihan (2531108888)
+    doc4 = docx.Document(io.BytesIO(raw_docx_2))
+    t4 = doc4.tables[1]
+    xuzihan_row4 = next(r for r in t4.rows if r.cells[1].text == "徐子晗")
+    xuzihan_row4.cells[2].text = "2531109999"
+    buf4 = io.BytesIO()
+    doc4.save(buf4)
+
+    r_up4 = await client.post(
+        "/api/v1/admin/imports/proposal",
+        files={
+            "file": (
+                "fourth_with_homonym_xuzihan.docx",
+                buf4.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+        headers=headers,
+    )
+    assert r_up4.status_code == 200, r_up4.text
+    preview4_people = {p["name"]: p for p in r_up4.json()["preview"]["people"] if p["affiliation"] == "天津工业大学"}
+    assert preview4_people["徐子晗"]["match"]["status"] == "new"
+    assert preview4_people["徐子晗"]["login_name"] == "2531109999"
+
     # 4. Ambiguity guard: if an unlinked LabPerson with the same (name, affiliation) also exists,
     # an incoming T2 row must NOT auto-link to the linked person.
     import uuid as _uuid

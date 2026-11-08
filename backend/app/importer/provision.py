@@ -28,6 +28,7 @@ from app.importer.fingerprint import (
 )
 from app.importer.formatters import render_lab_profile_markdown
 from app.importer.people import (
+    T1_CERT_RE,
     assign_people_identities,
     is_valid_login_name,
     normalize_person_name,
@@ -244,7 +245,7 @@ async def provision_import_job(
     # Recompute login_name and matches against current DB users & existing LabPerson fingerprints
     for p in raw_people:
         if p.get("tier") == "T1":
-            p["cert"] = p.get("login_name")
+            p["cert"] = p.get("student_id") or p.get("login_name")
     assign_people_identities(
         raw_people,
         existing_users=existing_users,
@@ -280,6 +281,47 @@ async def provision_import_job(
             person["match"] = {"status": "existing", "user_id": str(linked_target.id)}
             if linked_target.login_name:
                 person["login_name"] = linked_target.login_name
+            target_lp = next(
+                (lp for lp in existing_people if lp.user_id == linked_target.id),
+                None,
+            )
+            p_tier_ov = str(person.get("tier") or "T2")
+            p_sid_ov = str(person.get("student_id") or "").strip().lower()
+            if target_lp is not None and target_lp.entity_fingerprint:
+                target_non_t1_fp = person_fp(
+                    tier="T3" if target_lp.email else "T2",
+                    login_name=None,
+                    name=target_lp.name,
+                    affiliation=target_lp.affiliation,
+                    email=target_lp.email,
+                )
+                if (
+                    p_tier_ov == "T1"
+                    and p_sid_ov
+                    and T1_CERT_RE.match(p_sid_ov)
+                    and target_lp.entity_fingerprint == target_non_t1_fp
+                ):
+                    person["fingerprint"] = person_fp(
+                        tier="T1",
+                        login_name=p_sid_ov,
+                        name=target_lp.name,
+                        affiliation=target_lp.affiliation,
+                        email=target_lp.email,
+                    )
+                else:
+                    person["fingerprint"] = target_lp.entity_fingerprint
+            else:
+                person["fingerprint"] = person_fp(
+                    tier=p_tier_ov,
+                    login_name=(
+                        p_sid_ov
+                        if (p_tier_ov == "T1" and p_sid_ov)
+                        else str(person.get("login_name") or "")
+                    ),
+                    name=normalize_person_name(str(person.get("name") or "")),
+                    affiliation=str(person.get("affiliation") or "").strip() or None,
+                    email=str(person.get("email") or "").strip().lower() or None,
+                )
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
             ]
@@ -474,10 +516,44 @@ async def provision_import_job(
 
             if fp_val in existing_person_fps or user_id in existing_person_user_ids:
                 people_skipped += 1
-                matched_existing_lp = existing_people_by_fp.get(
-                    fp_val
-                ) or existing_people_by_uid.get(user_id)
+                if match_status == "existing" and user_id in existing_people_by_uid:
+                    matched_existing_lp = existing_people_by_uid.get(user_id)
+                else:
+                    matched_existing_lp = existing_people_by_fp.get(
+                        fp_val
+                    ) or existing_people_by_uid.get(user_id)
                 if matched_existing_lp is not None:
+                    p_sid = str(
+                        person.get("student_id")
+                        or (p_login if p_tier == "T1" else "")
+                        or ""
+                    ).strip().lower()
+                    if p_tier == "T1" and p_sid and T1_CERT_RE.match(p_sid):
+                        cur_non_t1_fp = person_fp(
+                            tier="T3" if matched_existing_lp.email else "T2",
+                            login_name=None,
+                            name=matched_existing_lp.name,
+                            affiliation=matched_existing_lp.affiliation,
+                            email=matched_existing_lp.email,
+                        )
+                        learned_t1_fp = person_fp(
+                            tier="T1",
+                            login_name=p_sid,
+                            name=matched_existing_lp.name,
+                            affiliation=matched_existing_lp.affiliation,
+                            email=matched_existing_lp.email,
+                        )
+                        if (
+                            matched_existing_lp.entity_fingerprint == cur_non_t1_fp
+                            and learned_t1_fp not in existing_person_fps
+                        ):
+                            old_fp = matched_existing_lp.entity_fingerprint
+                            existing_person_fps.discard(old_fp)
+                            existing_people_by_fp.pop(old_fp, None)
+                            matched_existing_lp.entity_fingerprint = learned_t1_fp
+                            existing_person_fps.add(learned_t1_fp)
+                            existing_people_by_fp[learned_t1_fp] = matched_existing_lp
+                            person["fingerprint"] = learned_t1_fp
                     if (
                         matched_existing_lp.user_id is None
                         and user_id is not None

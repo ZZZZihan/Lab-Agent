@@ -212,8 +212,16 @@ def assign_people_identities(
         person["role"] = "pi" if person.get("project_role") == "applicant" else "member"
         name = normalize_person_name(str(person.get("name") or ""))
         person["name"] = name
-        raw_cert = str(person.pop("cert", "") or person.get("student_id") or "")
-        person.pop("student_id", None)
+        popped_cert = str(person.pop("cert", "") or "").strip()
+        saved_student_id = str(person.pop("student_id", "") or "").strip()
+        if (
+            saved_student_id
+            and T1_CERT_RE.match(saved_student_id.lower())
+            and (not popped_cert or not T1_CERT_RE.match(popped_cert.lower()))
+        ):
+            raw_cert = saved_student_id
+        else:
+            raw_cert = popped_cert or saved_student_id
         raw_email = str(person.get("email") or "") if person.get("email") else None
 
         tier, base_login, valid_email, item_warnings = decide_login_identity(
@@ -221,6 +229,8 @@ def assign_people_identities(
             cert=raw_cert,
             email=raw_email,
         )
+        if tier == "T1" and base_login:
+            person["student_id"] = base_login
         existing_warnings = [
             w
             for w in list(person.get("warnings") or [])  # type: ignore[call-overload]
@@ -351,12 +361,17 @@ def assign_people_identities(
             match_status == "existing"
             and matched_lp is not None
             and matched_lp.entity_fingerprint
+            and not (tier == "T1" and base_login and not _lp_has_t1(matched_lp))
         ):
             person["fingerprint"] = matched_lp.entity_fingerprint
         else:
             person["fingerprint"] = person_fp(
                 tier=tier,
-                login_name=str(person.get("login_name") or ""),
+                login_name=(
+                    base_login
+                    if (tier == "T1" and base_login)
+                    else str(person.get("login_name") or "")
+                ),
                 name=name,
                 affiliation=affiliation,
                 email=valid_email,
