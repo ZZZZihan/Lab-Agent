@@ -226,7 +226,9 @@ async def query_lab_assets(
         group_ids=group_ids,
         rerank_client=rerank_client,
     )
-    people_count = len(list(await session.scalars(select(LabPerson.id))))
+    raw_people_names = list(await session.scalars(select(LabPerson.name)))
+    people_count = len(raw_people_names)
+    people_names = {n for n in raw_people_names if n}
     projects_count = len(list(await session.scalars(select(LabProject.id))))
     achievements_count = len(list(await session.scalars(select(LabAchievement.id))))
     facilities_count = len(list(await session.scalars(select(LabFacility.id))))
@@ -282,9 +284,14 @@ async def query_lab_assets(
             if any(w in q_lower for w in ("设备", "算力", "工作站", "支撑条件", "实验室")):
                 if "设备与支撑条件" in h_text:
                     bonus += 0.90
-            # Direct entity name match
+            # Exact person name match gets highest priority
+            for p_name in people_names:
+                if p_name.lower() in q_lower and p_name.lower() in h_text:
+                    bonus = max(bonus, 0.98)
+            # Direct entity name match (exclude generic academic stop words)
+            generic_tokens = {"研究", "课题", "项目", "成果", "技术", "报告", "实践", "开发", "应用"}
             for token in ch.tokens or []:
-                if len(token) >= 2 and token.lower() in q_lower:
+                if len(token) >= 2 and token.lower() in q_lower and token.lower() not in generic_tokens:
                     bonus = max(bonus, 0.86)
                     if token.lower() in h_text:
                         bonus = max(bonus, 0.94)

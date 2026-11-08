@@ -1,214 +1,44 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Shell } from "@/components/shell";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { api, type ChatEvent, type Citation } from "@/lib/api";
-import { type Copy, useI18n } from "@/lib/i18n";
+import {
+  api,
+  copyTextToClipboard,
+  currentUser,
+  formatLabBatch,
+  generateRequestId,
+  type BasketItem,
+  type ChatEvent,
+  type Citation,
+  type LabOverview,
+  type LabPersonItem,
+  type User,
+} from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 
-type CitationCheckState = {
-  used: number[];
-  invalid: number[];
-  uncited: boolean;
-};
-
-type Turn = {
-  id: string;
-  question: string;
-  answer: string;
-  pending: boolean;
-  error?: string;
-  refused?: boolean;
-  refusal?: ChatEvent;
-  citations: Citation[];
-  citationCheck?: CitationCheckState;
-  paperStatus?: string | null;
-  phase?: string;
-};
-
-type ConversationSummary = {
-  id: string;
-  title: string;
-  created_at: string;
-};
-
-type StoredMessage = {
-  id: string;
-  role: string;
-  content: string;
-  refused: boolean;
-  citations: Citation[];
-};
-
-type ConversationDetail = {
-  id: string;
-  title: string;
-  messages: StoredMessage[];
-};
-
-const SUGGESTIONS = [
-  "清衡-A100 一共有多少台节点？",
-  "周三学术例会在哪间实体会议室？",
-  "赫利俄斯的内部代号是什么？",
-  "实验室本科生宿舍在哪一栋？",
-];
-
-function mapErrorCode(code: string | undefined, t: Copy): string {
-  if (code === "llm_unavailable") return t.llmUnavailable;
-  if (code === "embedding_unavailable") return t.embeddingUnavailable;
-  if (code === "unauthorized") return t.noSession;
-  return t.error;
-}
-
-function mapToolPhase(name: string | undefined, t: Copy): string {
-  if (name === "search_knowledge_base") return t.toolSearchKnowledgeBase;
-  if (name === "query_lab_assets") return t.toolQueryLabAssets;
-  if (name === "search_papers") return t.toolSearchPapers;
-  if (name === "fetch_document") return t.toolFetchDocument;
-  return t.asking;
-}
-
-function reconstructCitationCheck(
-  answer: string,
-  citations: Citation[],
-  refused: boolean,
-): CitationCheckState | undefined {
-  if (refused) return undefined;
-  const validIndices = new Set(citations.map((c, idx) => c.index ?? idx + 1));
-  const used: number[] = [];
-  const invalid: number[] = [];
-  for (const match of answer.matchAll(/\[([0-9]{1,2})\]/g)) {
-    const num = Number(match[1]);
-    if (validIndices.has(num)) {
-      if (!used.includes(num)) {
-        used.push(num);
-      }
-    } else if (!invalid.includes(num)) {
-      invalid.push(num);
-    }
-  }
-  if (citations.length === 0 && used.length === 0 && invalid.length === 0) {
-    return undefined;
-  }
-  return {
-    used,
-    invalid,
-    uncited: used.length === 0,
-  };
-}
-
-function messagesToTurns(messages: StoredMessage[]): Turn[] {
-  const result: Turn[] = [];
-  for (const msg of messages) {
-    if (msg.role === "user") {
-      result.push({
-        id: msg.id,
-        question: msg.content,
-        answer: "",
-        pending: false,
-        citations: [],
-      });
-    } else if (msg.role === "assistant") {
-      const citations = Array.isArray(msg.citations) ? msg.citations : [];
-      const citationCheck = reconstructCitationCheck(msg.content, citations, msg.refused);
-      const last = result[result.length - 1];
-      if (last && !last.answer && !last.refused) {
-        last.answer = msg.content;
-        last.refused = msg.refused;
-        last.citations = citations;
-        last.citationCheck = citationCheck;
-      } else {
-        result.push({
-          id: msg.id,
-          question: "",
-          answer: msg.content,
-          pending: false,
-          refused: msg.refused,
-          citations,
-          citationCheck,
-        });
-      }
-    }
-  }
-  return result;
-}
-
-function renderAnswerWithCitations(answer: string, turnId: string): ReactNode[] {
-  const parts = answer.split(/(\[[0-9]{1,2}\])/g);
-  return parts.map((part, idx) => {
-    const match = /^\[([0-9]{1,2})\]$/.exec(part);
-    if (!match) return <span key={idx}>{part}</span>;
-    const num = Number(match[1]);
-    const targetId = `citation-${turnId}-${num}`;
-    return (
-      <sup key={idx} className="mx-0.5">
-        <button
-          type="button"
-          className="cursor-pointer text-xs font-medium text-primary underline hover:opacity-80"
-          onClick={() => {
-            const el = document.getElementById(targetId);
-            el?.scrollIntoView({ behavior: "smooth", block: "center" });
-          }}
-        >
-          [{num}]
-        </button>
-      </sup>
-    );
-  });
-}
-
-function Citations({
-  items,
-  label,
-  turnId,
-}: {
-  items: Citation[];
-  label: string;
-  turnId: string;
-}) {
-  const { t } = useI18n();
-  if (!items.length) return null;
-  return (
-    <div className="mt-3 grid gap-2">
-      <p className="text-xs tracking-wide text-muted-foreground">{label}</p>
-      {items.map((item, index) => {
-        const citeIndex = item.index ?? index + 1;
-        return (
-          <div
-            key={`${item.chunk_id || index}`}
-            id={`citation-${turnId}-${citeIndex}`}
-            className="rounded-lg border border-border bg-background px-3 py-2"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline">[{citeIndex}]</Badge>
-              <Badge variant="secondary">{item.heading || "—"}</Badge>
-              <span className="text-sm">{item.title}</span>
-              {typeof item.score === "number" ? (
-                <span className="text-xs text-muted-foreground">{item.score.toFixed(2)}</span>
-              ) : null}
-            </div>
-            <p className="mt-2 text-sm leading-6">{item.excerpt}</p>
-            {item.document_id ? (
-              <Link
-                className="mt-2 inline-block text-xs text-primary underline"
-                href={`/documents/${item.document_id}`}
-              >
-                {t.openDoc}
-              </Link>
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+import { CopilotInspectorRail } from "./components/CopilotInspectorRail";
+import { SmartTurnBlock } from "./components/SmartBlockRenderer";
+import {
+  CANVAS_SUGGESTIONS,
+  type ActiveEvidenceSelection,
+  type ConversationDetail,
+  type ConversationSummary,
+  type MatchedPersonCardData,
+  type Turn,
+  buildPersonCardData,
+  mapErrorCode,
+  mapToolPhase,
+  messagesToTurns,
+  readReuseBasket,
+  togglePersonInReuseBasket,
+} from "./components/chatTypesAndHelpers";
 
 export default function ChatPage() {
   const { t } = useI18n();
+  const [me, setMe] = useState<User | null>(null);
   const [draft, setDraft] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
@@ -216,16 +46,40 @@ export default function ChatPage() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Lab assets & Reuse Basket state for Research Canvas integration
+  const [labPeople, setLabPeople] = useState<LabPersonItem[]>([]);
+  const [labOverview, setLabOverview] = useState<LabOverview | null>(null);
+  const [basketItems, setBasketItems] = useState<BasketItem[]>([]);
+  const [copiedPersonId, setCopiedPersonId] = useState<string | null>(null);
+  const [canvasNotice, setCanvasNotice] = useState<string | null>(null);
+  const [activeEvidence, setActiveEvidence] =
+    useState<ActiveEvidenceSelection | null>(null);
+
   const activeSelectionRef = useRef<string | null>(null);
   const historyRequestIdRef = useRef(0);
   const listRequestIdRef = useRef(0);
   const deletedIdsRef = useRef<Set<string>>(new Set());
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const uiLocked = busy || loadingHistory || deletingId !== null;
+
+  const showTransientNotice = useCallback((msg: string) => {
+    setCanvasNotice(msg);
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    noticeTimerRef.current = setTimeout(() => {
+      setCanvasNotice(null);
+    }, 2400);
+  }, []);
 
   const loadConversations = useCallback(async () => {
     const reqId = ++listRequestIdRef.current;
     try {
-      const res = await api<{ conversations: ConversationSummary[] }>("conversations");
+      const res = await api<{ conversations: ConversationSummary[] }>(
+        "conversations",
+      );
       if (listRequestIdRef.current !== reqId) return;
       const incoming = (res.conversations || []).filter(
         (c) => !deletedIdsRef.current.has(c.id),
@@ -239,26 +93,73 @@ export default function ChatPage() {
   useEffect(() => {
     let cancelled = false;
     const reqId = ++listRequestIdRef.current;
+
     api<{ conversations: ConversationSummary[] }>("conversations")
       .then((res) => {
         if (!cancelled && listRequestIdRef.current === reqId) {
           setConversations(
-            (res.conversations || []).filter((c) => !deletedIdsRef.current.has(c.id)),
+            (res.conversations || []).filter(
+              (c) => !deletedIdsRef.current.has(c.id),
+            ),
           );
         }
       })
       .catch(() => {
         // Ignore unauthenticated or transient list errors on initial load
       });
+
+    // Hydrate current user, lab people, lab overview, and shared Reuse Basket
+    currentUser()
+      .then((u) => {
+        if (cancelled) return;
+        setMe(u);
+        const stored = readReuseBasket(u?.id || null);
+        setBasketItems(stored.items);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        const stored = readReuseBasket(null);
+        setBasketItems(stored.items);
+      });
+
+    api<{ people: LabPersonItem[] }>("lab/people")
+      .then((res) => {
+        if (!cancelled && Array.isArray(res.people)) {
+          setLabPeople(res.people);
+        }
+      })
+      .catch(() => {
+        // Fallback handled by chatTypesAndHelpers
+      });
+
+    api<LabOverview>("lab/overview")
+      .then((res) => {
+        if (!cancelled && res) {
+          setLabOverview(res);
+        }
+      })
+      .catch(() => {
+        // Ignore overview load error
+      });
+
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const basketKeySet = useMemo(() => {
+    const s = new Set<string>();
+    for (const item of basketItems) {
+      s.add(`${item.kind}:${item.id}`);
+    }
+    return s;
+  }, [basketItems]);
+
   async function selectConversation(id: string) {
     if (busy || loadingHistory || deletingId !== null) return;
     const reqId = ++historyRequestIdRef.current;
     setLoadingHistory(true);
+    setActiveEvidence(null);
     try {
       const detail = await api<ConversationDetail>(`conversations/${id}`);
       if (historyRequestIdRef.current !== reqId) return;
@@ -281,6 +182,7 @@ export default function ChatPage() {
     setConversationId(null);
     setTurns([]);
     setDraft("");
+    setActiveEvidence(null);
   }
 
   async function handleDeleteConversation(id: string) {
@@ -297,6 +199,7 @@ export default function ChatPage() {
         historyRequestIdRef.current += 1;
         activeSelectionRef.current = null;
         setTurns([]);
+        setActiveEvidence(null);
       }
       setConversationId((current) => (current === id ? null : current));
     } catch {
@@ -306,20 +209,110 @@ export default function ChatPage() {
     }
   }
 
+  async function handleCopyPersonGrantFormat(person: MatchedPersonCardData) {
+    let textToCopy = person.applicationText;
+    try {
+      await copyTextToClipboard(textToCopy);
+      setCopiedPersonId(person.id);
+      showTransientNotice(`已复制 ${person.name} 的申报书标准格式`);
+      setTimeout(() => {
+        setCopiedPersonId((cur) => (cur === person.id ? null : cur));
+      }, 2200);
+    } catch {
+      // Try backend batch formatter fallback if clipboard failed initially
+    }
+
+    // Also query backend format/batch when person has a UUID to ensure canonical format
+    if (/^[0-9a-f-]{36}$/i.test(person.id)) {
+      try {
+        const res = await formatLabBatch([
+          { kind: "person", entity: "person", id: person.id },
+        ]);
+        if (res.text && res.text.trim()) {
+          textToCopy = res.text.trim();
+          await copyTextToClipboard(textToCopy);
+        }
+      } catch {
+        // Keep local applicationText already copied
+      }
+    }
+  }
+
+  function handleTogglePersonBasket(person: MatchedPersonCardData) {
+    const { items, added } = togglePersonInReuseBasket(me?.id || null, {
+      id: person.id,
+      name: person.name,
+      roleSubtitle: person.roleSubtitle,
+    });
+    setBasketItems(items);
+    showTransientNotice(
+      added
+        ? `已将「${person.name}」加入写本子素材篮（共 ${items.length} 项）`
+        : `已从素材篮移除「${person.name}」`,
+    );
+  }
+
+  async function handleCopyEntireCanvas() {
+    if (turns.length === 0) return;
+    const text = turns
+      .map(
+        (turn, idx) =>
+          `### 探索 ${idx + 1}：${turn.question}\n${turn.refused ? "（知识库暂未记载该参数）" : turn.answer}`,
+      )
+      .join("\n\n");
+    try {
+      await copyTextToClipboard(text);
+      showTransientNotice("已复制当前画布研报全文");
+    } catch {
+      // Ignore copy failure
+    }
+  }
+
+  function handleSelectCitationFromProse(
+    turnId: string,
+    citeIndex: number,
+    citation?: Citation,
+  ) {
+    if (citation) {
+      setActiveEvidence({ turnId, citeIndex, citation });
+      return;
+    }
+    const turn = turns.find((item) => item.id === turnId);
+    if (!turn) return;
+    const sourceList =
+      turn.refused && turn.refusal?.neighbors
+        ? turn.refusal.neighbors
+        : turn.citations;
+    const found = sourceList.find((c, i) => (c.index ?? i + 1) === citeIndex);
+    if (found) {
+      setActiveEvidence({ turnId, citeIndex, citation: found });
+    }
+  }
+
   async function ask(question: string) {
     const text = question.trim();
     if (!text || busy || loadingHistory || deletingId !== null) return;
     historyRequestIdRef.current += 1;
-    const id = crypto.randomUUID();
+    const id = generateRequestId();
     const targetConversationId = activeSelectionRef.current;
     setDraft("");
     setBusy(true);
+    setActiveEvidence(null);
     setTurns((current) => [
       ...current,
-      { id, question: text, answer: "", pending: true, citations: [], phase: t.asking },
+      {
+        id,
+        question: text,
+        answer: "",
+        pending: true,
+        citations: [],
+        phase: t.asking,
+      },
     ]);
     try {
-      const payload: { message: string; conversation_id?: string } = { message: text };
+      const payload: { message: string; conversation_id?: string } = {
+        message: text,
+      };
       if (targetConversationId) {
         payload.conversation_id = targetConversationId;
       }
@@ -331,7 +324,9 @@ export default function ChatPage() {
       if (!response.ok || !response.body) {
         const message = response.status === 401 ? t.noSession : t.error;
         setTurns((current) =>
-          current.map((turn) => (turn.id === id ? { ...turn, pending: false, error: message } : turn)),
+          current.map((turn) =>
+            turn.id === id ? { ...turn, pending: false, error: message } : turn,
+          ),
         );
         return;
       }
@@ -348,9 +343,27 @@ export default function ChatPage() {
         setTurns((current) =>
           current.map((turn) => {
             if (turn.id !== id) return turn;
-            if (event.type === "token") return { ...turn, answer: turn.answer + (event.text || "") };
+            if (event.type === "token") {
+              return { ...turn, answer: turn.answer + (event.text || "") };
+            }
+            if (event.type === "retrieval") {
+              return {
+                ...turn,
+                retrieval: {
+                  mode: event.mode || "hybrid_rrf",
+                  coverage: Number(event.coverage || 0),
+                  elapsedMs: Number(event.elapsed_ms || 0),
+                  hits: event.hits || [],
+                  refused: event.refused,
+                },
+              };
+            }
             if (event.type === "citations") {
-              return { ...turn, citations: event.items || [], paperStatus: event.paper_status };
+              return {
+                ...turn,
+                citations: event.items || [],
+                paperStatus: event.paper_status,
+              };
             }
             if (event.type === "citation_check") {
               return {
@@ -363,12 +376,25 @@ export default function ChatPage() {
               };
             }
             if (event.type === "refusal") {
-              return { ...turn, refused: true, refusal: event, paperStatus: event.paper_status };
+              return {
+                ...turn,
+                refused: true,
+                refusal: event,
+                paperStatus: event.paper_status,
+              };
             }
-            if (event.type === "status") return { ...turn, phase: mapToolPhase(event.phase, t) };
-            if (event.type === "tool") return { ...turn, phase: mapToolPhase(event.name, t) };
+            if (event.type === "status") {
+              return { ...turn, phase: mapToolPhase(event.phase, t) };
+            }
+            if (event.type === "tool") {
+              return { ...turn, phase: mapToolPhase(event.name, t) };
+            }
             if (event.type === "error") {
-              return { ...turn, error: mapErrorCode(event.code, t), pending: false };
+              return {
+                ...turn,
+                error: mapErrorCode(event.code, t),
+                pending: false,
+              };
             }
             if (event.type === "done") {
               return {
@@ -389,194 +415,315 @@ export default function ChatPage() {
         const blocks = buffer.split("\n\n");
         buffer = blocks.pop() || "";
         for (const block of blocks) {
-          const dataLine = block.split("\n").find((line) => line.startsWith("data:"));
+          const dataLine = block
+            .split("\n")
+            .find((line) => line.startsWith("data:"));
           if (!dataLine) continue;
           apply(JSON.parse(dataLine.slice(5).trim()) as ChatEvent);
         }
       }
-      setTurns((current) => current.map((turn) => (turn.id === id ? { ...turn, pending: false } : turn)));
+      setTurns((current) =>
+        current.map((turn) =>
+          turn.id === id ? { ...turn, pending: false } : turn,
+        ),
+      );
       if (resolvedConvId) {
         await loadConversations();
       }
     } catch {
       setTurns((current) =>
-        current.map((turn) => (turn.id === id ? { ...turn, pending: false, error: t.error } : turn)),
+        current.map((turn) =>
+          turn.id === id ? { ...turn, pending: false, error: t.error } : turn,
+        ),
       );
     } finally {
       setBusy(false);
     }
   }
 
+  // Derive canvas header topic from the selected conversation or current question
+  const activeConvTitle = useMemo(() => {
+    if (conversationId) {
+      const found = conversations.find((c) => c.id === conversationId);
+      if (found?.title) return found.title;
+    }
+    const firstQuestion = turns
+      .find((item) => item.question.trim())
+      ?.question.trim();
+    if (firstQuestion) return firstQuestion;
+    return t.chat;
+  }, [conversationId, conversations, turns, t.chat]);
+
+  const linkedDocCount = useMemo(() => {
+    const docSet = new Set<string>();
+    for (const turn of turns) {
+      for (const c of turn.citations) {
+        if (c.document_id || c.title) {
+          docSet.add(c.document_id || c.title || "");
+        }
+      }
+    }
+    return docSet.size;
+  }, [turns]);
+
+  const verifiedMemberCount =
+    labOverview?.counts?.people ?? labPeople.length;
+
+  // Initial preview dossier cards for empty canvas state (only when real lab people exist)
+  const previewDossierPeople = useMemo(() => {
+    if (labPeople.length === 0) return [];
+    return labPeople.slice(0, 2).map(buildPersonCardData);
+  }, [labPeople]);
+
   return (
     <Shell>
-      <div className="mx-auto grid min-h-[70vh] w-full max-w-5xl gap-6 md:grid-cols-[240px_1fr]">
-        <aside className="flex flex-col gap-3 rounded-xl border border-border bg-card p-3">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs font-medium tracking-wide text-muted-foreground">
-              {t.conversationsTitle}
-            </h2>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={uiLocked}
-              onClick={startNewConversation}
-            >
-              {t.newConversation}
-            </Button>
-          </div>
-          {conversations.length === 0 ? (
-            <p className="py-4 text-xs text-muted-foreground">{t.noConversations}</p>
-          ) : (
-            <ul className="flex flex-col gap-1">
-              {conversations.map((conv) => {
-                const active = conv.id === conversationId;
-                return (
-                  <li
-                    key={conv.id}
-                    className={`flex items-center justify-between gap-1 rounded-lg px-2 py-1.5 text-sm ${
-                      active ? "bg-muted font-medium" : "hover:bg-muted/60"
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 truncate text-left"
-                      disabled={uiLocked}
-                      onClick={() => void selectConversation(conv.id)}
-                      title={conv.title}
-                    >
-                      {conv.title}
-                    </button>
-                    <button
-                      type="button"
-                      className="shrink-0 px-1.5 py-0.5 text-xs text-muted-foreground hover:text-destructive"
-                      disabled={uiLocked}
-                      onClick={() => void handleDeleteConversation(conv.id)}
-                      aria-label={t.deleteConversation}
-                    >
-                      {t.deleteConversation}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </aside>
+      <div className="grid min-h-[calc(100vh-7.5rem)] w-full grid-cols-1 gap-7 lg:grid-cols-[minmax(0,7fr)_minmax(340px,3fr)] lg:items-start">
+        {/* LEFT (~70%): Interactive Research Canvas */}
+        <section
+          aria-label="动态科研研报与资产画布"
+          className="flex min-w-0 flex-col gap-6 lg:pr-2"
+        >
+          {/* Canvas Top Topic & Export Bar */}
+          <header className="flex flex-col gap-3 border-b border-stone-200/85 pb-4 dark:border-stone-800">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-medium text-stone-500 dark:text-stone-400">
+                <span>📄 动态科研研报与资产画布</span>
+                <span>·</span>
+                <span className="font-mono text-[11px]">Research Canvas</span>
+              </div>
 
-        <div className="flex min-w-0 flex-col">
-          {turns.length === 0 ? (
-            <div className="rounded-xl border border-border bg-card px-5 py-8">
-              <h1 className="font-display text-3xl">{t.emptyTitle}</h1>
-              <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">{t.emptyBody}</p>
-              <p className="mt-6 text-xs tracking-wide text-muted-foreground">{t.suggestions}</p>
-              <div className="mt-2 flex flex-col gap-2">
-                {SUGGESTIONS.map((item) => (
+              <div className="flex flex-wrap items-center gap-2">
+                {turns.length > 0 ? (
                   <button
-                    key={item}
                     type="button"
-                    disabled={uiLocked}
-                    className="rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
-                    onClick={() => void ask(item)}
+                    onClick={() => void handleCopyEntireCanvas()}
+                    className="inline-flex min-h-[30px] cursor-pointer items-center gap-1.5 rounded-[8px] border border-stone-200/90 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 transition-colors hover:bg-stone-100/80 dark:border-stone-800 dark:bg-[#22221F] dark:text-stone-200"
                   >
-                    {item}
+                    <span>📋</span>
+                    <span>复制研报</span>
                   </button>
-                ))}
+                ) : null}
+
+                <Link
+                  href="/lab"
+                  className="inline-flex min-h-[30px] items-center gap-1.5 rounded-[8px] border border-stone-200/90 bg-white px-2.5 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/8 dark:border-stone-800 dark:bg-[#22221F] dark:text-emerald-300"
+                >
+                  <span>🧺 写本子素材篮</span>
+                  <span className="rounded bg-primary/10 px-1.5 py-0.2 font-mono text-[11px] font-semibold tabular-nums text-primary dark:bg-emerald-500/15 dark:text-emerald-300">
+                    {basketItems.length}
+                  </span>
+                </Link>
               </div>
             </div>
-          ) : (
-            <div className="grid gap-6">
-              {turns.map((turn) => {
-                const isModelDeclined = turn.refusal?.reason === "model_declined";
-                const usedSet =
-                  turn.citationCheck && turn.citationCheck.used.length > 0
-                    ? new Set(turn.citationCheck.used)
-                    : null;
-                const displayedCitations = usedSet
-                  ? turn.citations.filter((c, i) => usedSet.has(c.index ?? i + 1))
-                  : turn.citations;
 
-                return (
-                  <article key={turn.id} className="grid gap-3">
-                    <p className="text-sm font-medium">{turn.question}</p>
-                    {turn.refused && turn.refusal ? (
-                      <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
-                        <p className="font-medium text-destructive">
-                          {isModelDeclined ? t.modelDeclinedTitle : t.refusalTitle}
-                        </p>
-                        <p className="mt-1 text-sm">
-                          {t.score} {Number(turn.refusal.score || 0).toFixed(2)} · {t.threshold}{" "}
-                          {Number(turn.refusal.threshold || 0).toFixed(2)} · {t.coverage}{" "}
-                          {Number(turn.refusal.coverage || 0).toFixed(2)}
-                        </p>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          {isModelDeclined ? t.modelDeclinedBody : t.refusalBody}
-                        </p>
-                        <Citations
-                          items={turn.refusal.neighbors || []}
-                          label={isModelDeclined ? t.modelDeclinedBody : t.refusalBody}
-                          turnId={turn.id}
-                        />
-                      </div>
-                    ) : turn.refused ? (
-                      <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
-                        <p className="font-medium text-destructive">{t.refusalTitle}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">{turn.answer}</p>
-                      </div>
-                    ) : (
-                      <div className="rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10">
-                        {turn.pending && !turn.answer ? (
-                          <p className="text-sm text-muted-foreground">{turn.phase || t.asking}</p>
-                        ) : (
-                          <p className="whitespace-pre-wrap text-sm leading-7">
-                            {renderAnswerWithCitations(turn.answer, turn.id)}
-                          </p>
-                        )}
-                        {turn.citationCheck?.invalid && turn.citationCheck.invalid.length > 0 ? (
-                          <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                            {t.invalidCitationsNote}
-                            {turn.citationCheck.invalid.map((n) => `[${n}]`).join(", ")}
-                          </p>
-                        ) : null}
-                        {turn.citationCheck?.uncited ? (
-                          <p className="mt-2 text-xs text-muted-foreground">{t.uncitedNote}</p>
-                        ) : null}
-                        <Citations
-                          items={displayedCitations}
-                          label={turn.citationCheck?.uncited ? t.uncitedNote : t.citations}
-                          turnId={turn.id}
-                        />
-                      </div>
-                    )}
-                    {turn.paperStatus === "not_configured" ? (
-                      <p className="text-xs text-muted-foreground">{t.paperNote}</p>
-                    ) : null}
-                    {turn.error ? <p className="text-sm text-destructive">{turn.error}</p> : null}
-                  </article>
-                );
-              })}
+            <div className="space-y-1">
+              <h1 className="font-display text-2xl font-semibold tracking-tight text-stone-900 sm:text-[26px] dark:text-stone-100">
+                {activeConvTitle}
+              </h1>
+              <p className="flex flex-wrap items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
+                <span>
+                  状态: 已关联{" "}
+                  <strong className="font-mono font-semibold tabular-nums text-stone-700 dark:text-stone-200">
+                    {linkedDocCount}
+                  </strong>{" "}
+                  份核心文档 ·{" "}
+                  <strong className="font-mono font-semibold tabular-nums text-stone-700 dark:text-stone-200">
+                    {verifiedMemberCount}
+                  </strong>{" "}
+                  名核验成员
+                </span>
+                {canvasNotice ? (
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary dark:bg-emerald-500/15 dark:text-emerald-300"
+                  >
+                    ✓ {canvasNotice}
+                  </span>
+                ) : null}
+              </p>
+            </div>
+          </header>
+
+          {/* Main Canvas Stream or Initial Workbench State */}
+          {turns.length === 0 ? (
+            <div className="space-y-7">
+              {/* Editorial Orientation Note (Borderless Warm Paper Flow) */}
+              <div className="space-y-3">
+                <h2 className="font-display text-xl font-medium text-stone-800 dark:text-stone-200">
+                  {t.emptyTitle}
+                </h2>
+                <p className="max-w-[65ch] text-[15px] leading-[1.75] text-stone-600 dark:text-stone-400">
+                  {t.emptyBody}
+                </p>
+
+                <div className="pt-2">
+                  <p className="mb-2.5 text-xs font-semibold tracking-wide text-stone-500 dark:text-stone-400">
+                    {t.suggestions}（点击直接在画布生成结构化研报）
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {CANVAS_SUGGESTIONS.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        disabled={uiLocked}
+                        onClick={() => void ask(item)}
+                        className="group flex cursor-pointer items-center justify-between gap-2 rounded-[12px] border border-stone-200/90 bg-white px-3.5 py-2.5 text-left text-xs font-medium text-stone-700 shadow-[0_1px_2px_rgba(28,25,23,0.04)] transition-colors hover:border-primary/45 hover:text-stone-950 disabled:opacity-50 dark:border-stone-800 dark:bg-[#22221F] dark:text-stone-200 dark:hover:border-emerald-400/45"
+                      >
+                        <span className="line-clamp-2 leading-relaxed">
+                          {item}
+                        </span>
+                        <span className="shrink-0 font-mono text-stone-400 transition-transform group-hover:translate-x-0.5 group-hover:text-primary dark:group-hover:text-emerald-300">
+                          →
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live Preview of Core Lab Member Dossier Cards on Initial Canvas */}
+              {previewDossierPeople.length > 0 ? (
+                <section
+                  aria-label="课题组成员专长档案速览"
+                  className="overflow-hidden rounded-[14px] border border-stone-200/90 bg-white shadow-[0_1px_3px_rgba(28,25,23,0.05)] dark:border-stone-800 dark:bg-[#22221F]"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#F6F4EE]/80 px-4 py-2.5 dark:border-stone-800 dark:bg-stone-900/60">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-primary/10 text-xs text-primary dark:bg-emerald-500/15 dark:text-emerald-300">
+                        👥
+                      </span>
+                      <h3 className="text-xs font-semibold tracking-wide text-stone-700 dark:text-stone-200">
+                        课题组成员专长档案
+                      </h3>
+                      <span className="rounded-md bg-stone-200/70 px-1.5 py-0.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-400">
+                        自适应结构化卡片
+                      </span>
+                    </div>
+                    <Link
+                      href="/lab"
+                      className="text-[11px] font-medium text-primary hover:underline dark:text-emerald-300"
+                    >
+                      查看全部 {verifiedMemberCount} 名成员 ↗
+                    </Link>
+                  </div>
+
+                  <div className="divide-y divide-stone-200/70 dark:divide-stone-800/80">
+                    {previewDossierPeople.map((person) => {
+                      const isCopied = copiedPersonId === person.id;
+                      const inBasket = basketKeySet.has(`person:${person.id}`);
+                      return (
+                        <div
+                          key={person.id}
+                          className="flex flex-col gap-2.5 px-4 py-3.5 transition-colors hover:bg-stone-50/60 dark:hover:bg-stone-800/20"
+                        >
+                          <div className="flex flex-wrap items-baseline justify-between gap-2">
+                            <div className="flex flex-wrap items-baseline gap-2.5">
+                              <span className="font-display text-base font-semibold text-stone-900 dark:text-stone-100">
+                                {person.name}
+                              </span>
+                              <span className="text-xs font-medium text-stone-600 dark:text-stone-400">
+                                {person.roleSubtitle}
+                              </span>
+                            </div>
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-[11px] tabular-nums ${
+                                person.hasSignature
+                                  ? "bg-emerald-950/6 text-primary ring-1 ring-primary/20 dark:bg-emerald-500/10 dark:text-emerald-300"
+                                  : "bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400"
+                              }`}
+                            >
+                              {person.signatureLabel}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-col gap-1.5 text-xs text-stone-600 sm:flex-row sm:items-center sm:justify-between dark:text-stone-300">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-medium text-stone-500 dark:text-stone-400">
+                                研究专长:
+                              </span>
+                              <span className="font-medium text-stone-800 dark:text-stone-200">
+                                {person.specialtyText}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 pt-1 sm:pt-0">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleCopyPersonGrantFormat(person)
+                                }
+                                className={`inline-flex min-h-[32px] cursor-pointer items-center gap-1.5 rounded-[10px] border px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  isCopied
+                                    ? "border-primary/40 bg-primary/10 text-primary dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-300"
+                                    : "border-stone-200/90 bg-[#FAF9F6] text-stone-700 hover:border-stone-300 hover:bg-stone-100/80 dark:border-stone-700 dark:bg-stone-800/80 dark:text-stone-200"
+                                }`}
+                              >
+                                <span>{isCopied ? "✓" : "📋"}</span>
+                                <span>
+                                  {isCopied ? "已复制申报格式" : "复制申报格式"}
+                                </span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleTogglePersonBasket(person)}
+                                className={`inline-flex min-h-[32px] cursor-pointer items-center gap-1.5 rounded-[10px] border px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  inBasket
+                                    ? "border-primary bg-primary text-primary-foreground shadow-xs"
+                                    : "border-stone-200/90 bg-[#FAF9F6] text-stone-700 hover:border-stone-300 hover:bg-stone-100/80 dark:border-stone-700 dark:bg-stone-800/80 dark:text-stone-200"
+                                }`}
+                              >
+                                <span>{inBasket ? "✓" : "🧺"}</span>
+                                <span>
+                                  {inBasket ? "已加入素材篮" : "加入素材篮"}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          ) : (
+            <div className="space-y-7">
+              {turns.map((turn) => (
+                <SmartTurnBlock
+                  key={turn.id}
+                  turn={turn}
+                  labPeople={labPeople}
+                  copiedPersonId={copiedPersonId}
+                  basketKeySet={basketKeySet}
+                  activeEvidence={activeEvidence}
+                  onSelectCitation={handleSelectCitationFromProse}
+                  onCopyGrantFormat={(person) =>
+                    void handleCopyPersonGrantFormat(person)
+                  }
+                  onToggleBasket={handleTogglePersonBasket}
+                />
+              ))}
             </div>
           )}
-          <form
-            className="sticky bottom-0 mt-6 grid gap-2 bg-background/95 py-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void ask(draft);
-            }}
-          >
-            <Textarea
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={t.placeholder}
-              rows={3}
-            />
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-muted-foreground">{t.independentTurnNote}</p>
-              <Button type="submit" disabled={uiLocked || !draft.trim()}>
-                {busy ? t.asking : t.send}
-              </Button>
-            </div>
-          </form>
-        </div>
+        </section>
+
+        {/* RIGHT (~30%): Copilot Inspector Rail */}
+        <CopilotInspectorRail
+          conversations={conversations}
+          conversationId={conversationId}
+          turns={turns}
+          draft={draft}
+          busy={busy}
+          uiLocked={uiLocked}
+          activeEvidence={activeEvidence}
+          onDraftChange={setDraft}
+          onAsk={(q) => void ask(q)}
+          onSelectConversation={(id) => void selectConversation(id)}
+          onStartNewConversation={startNewConversation}
+          onDeleteConversation={(id) => void handleDeleteConversation(id)}
+          onSelectEvidence={setActiveEvidence}
+        />
       </div>
     </Shell>
   );

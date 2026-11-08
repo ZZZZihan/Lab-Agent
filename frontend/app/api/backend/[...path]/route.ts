@@ -1,7 +1,11 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-import { sessionCookieName, verifyOrigin } from "../../../../lib/security";
+import {
+  sessionCookieName,
+  sessionCookieOptions,
+  verifyOrigin,
+} from "../../../../lib/security";
 
 function apiBase() {
   return (process.env.API_INTERNAL_URL || "http://127.0.0.1:43124").replace(/\/$/, "");
@@ -66,6 +70,28 @@ async function forward(request: Request, path: string[]) {
   ]) {
     const val = upstream.headers.get(hdr);
     if (val) responseHeaders[hdr] = val;
+  }
+  if (path.join("/") === "auth/change-password" && upstream.ok) {
+    const raw = await upstream.text();
+    try {
+      const parsed = JSON.parse(raw) as {
+        access_token?: string;
+        expires_in?: number;
+      };
+      if (parsed.access_token) {
+        jar.set(
+          sessionCookieName(),
+          parsed.access_token,
+          sessionCookieOptions(parsed.expires_in || 28800),
+        );
+      }
+    } catch {
+      // ignore JSON parse errors
+    }
+    return new NextResponse(raw, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
   }
   return new NextResponse(upstream.status === 304 ? null : upstream.body, {
     status: upstream.status,

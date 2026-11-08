@@ -13,6 +13,14 @@ registerHooks({
         url: "data:text/javascript,export async function cookies() { return { get(name) { const v = globalThis.__TEST_COOKIES__?.get(name); return v ? { name, value: v } : undefined; }, set(name, value) { globalThis.__TEST_COOKIES__?.set(name, value); }, delete(name) { globalThis.__TEST_COOKIES__?.delete(name); } }; }",
       };
     }
+    if (specifier.startsWith("@/")) {
+      const sub = specifier.slice(2);
+      const target =
+        sub.endsWith(".ts") || sub.endsWith(".mjs") || sub.endsWith(".js")
+          ? new URL(`../${sub}`, import.meta.url).href
+          : new URL(`../${sub}.ts`, import.meta.url).href;
+      return nextResolve(target, context);
+    }
     const parentURL = context.parentURL || "";
     if (
       !parentURL.includes("/node_modules/") &&
@@ -41,6 +49,7 @@ const { proxy } = await import("../proxy.ts");
 const sessionRoute = await import("../app/api/session/route.ts");
 const backendRoute = await import("../app/api/backend/[...path]/route.ts");
 const apiModule = await import("../lib/api.ts");
+const chatHelpers = await import("../app/chat/components/chatTypesAndHelpers.ts");
 const { NextRequest } = await import("next/server.js");
 
 test("next.config.ts headers() sets CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy", async () => {
@@ -591,6 +600,30 @@ test("/api/backend/[...path] forwards signature security headers, ETag, and expo
     );
     const delUpstream = upstreamCalls.at(-1);
     assert.equal(new Headers(delUpstream.init.headers).get("If-Match"), '"sig-sha-256"');
+
+    // 6. POST /api/backend/auth/change-password rotates la_session cookie when access_token is returned
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          status: "ok",
+          access_token: "rotated-jwt-token",
+          expires_in: 28800,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const cpResp = await backendRoute.POST(
+      new Request("http://127.0.0.1:43123/api/backend/auth/change-password", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ current_password: "old", new_password: "new-password-123" }),
+      }),
+      { params: Promise.resolve({ path: ["auth", "change-password"] }) },
+    );
+    assert.equal(cpResp.status, 200);
+    assert.equal(globalThis.__TEST_COOKIES__.get("la_session"), "rotated-jwt-token");
   } finally {
     globalThis.fetch = prevFetch;
     globalThis.__TEST_COOKIES__ = prevCookies;
@@ -606,5 +639,82 @@ test("/api/backend/[...path] forwards signature security headers, ETag, and expo
     }
   }
 });
+
+test("generateRequestId falls back to crypto.getRandomValues when crypto.randomUUID is unavailable on HTTP LAN origins", () => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const normalId = apiModule.generateRequestId();
+  assert.match(normalId, uuidRegex);
+
+  const origDesc = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+  Object.defineProperty(globalThis.crypto, "randomUUID", {
+    value: undefined,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    const fallbackId = apiModule.generateRequestId();
+    assert.match(fallbackId, uuidRegex);
+    assert.notEqual(fallbackId, apiModule.generateRequestId());
+  } finally {
+    if (origDesc) {
+      Object.defineProperty(globalThis.crypto, "randomUUID", origDesc);
+    }
+  }
+});
+
+test("chatTypesAndHelpers never fabricates member profiles or unverified member cards", () => {
+  // 1. Empty labPeople must return [] rather than hard-coded fallback people
+  const turnWithNames = {
+    id: "t-1",
+    question: "课题组里郭建民和万振凯的研究专长分别是什么？",
+    answer: "郭建民负责人工智能，万振凯负责教育理论。",
+    pending: false,
+    citations: [{ title: "课题组资料库", excerpt: "郭建民、万振凯" }],
+  };
+  assert.deepEqual(chatHelpers.extractMatchedPeopleForTurn(turnWithNames, []), []);
+
+  // 2. Pending turn, turn without citations, or negated mention must not produce member cards
+  const realPeople = [
+    {
+      id: "2c8022da-1e4c-4eb9-98c8-7cf0389fd352",
+      name: "郭建民",
+      title: "副教授",
+      project_role: "applicant",
+      has_signature: false,
+      research_specialty: "人工智能",
+    },
+  ];
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      { ...turnWithNames, pending: true },
+      realPeople,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      { ...turnWithNames, citations: [] },
+      realPeople,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    chatHelpers.extractMatchedPeopleForTurn(
+      {
+        ...turnWithNames,
+        answer: "该纪要中未提及郭建民。",
+      },
+      realPeople,
+    ),
+    [],
+  );
+
+  // 3. Verified answer + citation match returns accurate structured person data without fabricated signature claim
+  const matched = chatHelpers.extractMatchedPeopleForTurn(turnWithNames, realPeople);
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].hasSignature, false);
+  assert.equal(matched[0].signatureLabel, "暂未绑定内嵌签名");
+});
+
 
 
