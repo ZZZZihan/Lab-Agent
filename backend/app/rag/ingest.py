@@ -541,7 +541,9 @@ def read_corpus_dir(corpus_dir: Path) -> list[tuple[dict[str, str], str]]:
     files = sorted(
         p
         for p in corpus_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+        if p.is_file()
+        and p.suffix.lower()
+        in {".md", ".markdown", ".txt", ".pdf", ".doc", ".docx"}
     )
     return [read_corpus_file(file) for file in files]
 

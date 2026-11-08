@@ -184,6 +184,7 @@ def _read_ole2_streams(
         )
     sector_size = 1 << sector_shift
     mini_sector_size = 1 << mini_sector_shift
+    max_file_sectors = (len(raw_bytes) - 512) // sector_size
     num_fat_sectors = struct.unpack_from("<I", raw_bytes, 0x2C)[0]
     first_dir_sector = struct.unpack_from("<I", raw_bytes, 0x30)[0]
     mini_cutoff = struct.unpack_from("<I", raw_bytes, 0x38)[0] or 4096
@@ -192,9 +193,30 @@ def _read_ole2_streams(
     first_difat_sector = struct.unpack_from("<I", raw_bytes, 0x44)[0]
     num_difat_sectors = struct.unpack_from("<I", raw_bytes, 0x48)[0]
 
+    if (
+        num_fat_sectors <= 0
+        or num_fat_sectors > max_file_sectors
+        or num_difat_sectors > max_file_sectors
+        or (num_minifat_sectors > max_file_sectors and first_minifat_sector < 0xFFFFFFFC)
+    ):
+        raise DocxValidationError(
+            415,
+            "import_unsupported_format",
+            "损坏的 .doc (OLE2) 扇区分配表",
+        )
+    if (
+        num_fat_sectors * sector_size > max_uncompressed_bytes
+        or num_minifat_sectors * sector_size > max_uncompressed_bytes
+    ):
+        raise DocxValidationError(
+            413,
+            "import_uncompressed_too_large",
+            "文档解压后大小超过安全上限",
+        )
+
     def _read_sector(sec_id: int) -> bytes:
         offset = (sec_id + 1) * sector_size
-        if offset < 0 or offset + sector_size > len(raw_bytes):
+        if sec_id < 0 or sec_id >= max_file_sectors or offset + sector_size > len(raw_bytes):
             raise DocxValidationError(
                 415,
                 "import_unsupported_format",
@@ -208,19 +230,51 @@ def _read_ole2_streams(
     difat_sec = first_difat_sector
     visited_difat: set[int] = set()
     entries_per_sector = sector_size // 4
-    for _ in range(min(num_difat_sectors, 4096)):
-        if difat_sec >= 0xFFFFFFFC or difat_sec in visited_difat:
-            break
+    for _ in range(min(num_difat_sectors, max_file_sectors, 4096)):
+        if difat_sec >= 0xFFFFFFFC:
+            raise DocxValidationError(
+                415,
+                "import_unsupported_format",
+                "损坏的 .doc (OLE2) DIFAT 扇区链",
+            )
+        if difat_sec in visited_difat:
+            raise DocxValidationError(
+                415,
+                "import_unsupported_format",
+                "损坏的 .doc (OLE2) DIFAT 重复扇区引用",
+            )
         visited_difat.add(difat_sec)
         sec_bytes = _read_sector(difat_sec)
         vals = struct.unpack_from(f"<{entries_per_sector}I", sec_bytes, 0)
         difat.extend(v for v in vals[:-1] if v < 0xFFFFFFFC)
         difat_sec = vals[-1]
+    if difat_sec < 0xFFFFFFFC:
+        raise DocxValidationError(
+            415,
+            "import_unsupported_format",
+            "损坏的 .doc (OLE2) DIFAT 扇区链未正常终止",
+        )
+
+    if len(difat) != num_fat_sectors:
+        raise DocxValidationError(
+            415,
+            "import_unsupported_format",
+            "损坏的 .doc (OLE2) FAT 扇区数量不一致",
+        )
 
     fat: list[int] = []
-    for fat_sec in difat[: max(num_fat_sectors, len(difat))]:
+    seen_fat_sectors: set[int] = set()
+    for fat_sec in difat[:num_fat_sectors]:
+        if fat_sec in seen_fat_sectors or fat_sec in visited_difat:
+            raise DocxValidationError(
+                415,
+                "import_unsupported_format",
+                "损坏的 .doc (OLE2) 重复 FAT 扇区引用",
+            )
+        seen_fat_sectors.add(fat_sec)
         sec_bytes = _read_sector(fat_sec)
         fat.extend(struct.unpack_from(f"<{entries_per_sector}I", sec_bytes, 0))
+    fat = fat[:max_file_sectors]
 
     def _read_chain(start_sec: int, exact_size: int | None = None) -> bytes:
         if start_sec >= 0xFFFFFFFC or exact_size == 0:
@@ -492,20 +546,42 @@ def _finalize_legacy_blocks_and_tables(
                 )
             )
 
-    # If the foundation anchors ([学术简历]/[前期成果]/[承担项目]) are split across paragraphs or 1-col rows,
+    # If the foundation anchors ([学术简历]/[前期成果]/[承担项目]) are split across paragraphs or rows/cells,
     # synthesize a consolidated 1x1 table cell so `_extract_t4_foundation` can parse them identically to .docx.
-    foundation_markers = ("[学术简历]", "[前期成果]", "[承担项目]", "［学术简历］")
-    has_consolidated_t4 = any(
-        sum(1 for m in foundation_markers if m in cell) >= 2
+    foundation_markers = (
+        "[学术简历]",
+        "[前期成果]",
+        "[承担项目]",
+        "[与本项目关系]",
+        "［学术简历］",
+        "［前期成果］",
+        "［承担项目］",
+        "［与本项目关系］",
+    )
+    all_lines: list[str] = [b.text for b in body_blocks if b.text]
+    combined_text = "\n".join(all_lines)
+    doc_marker_count = sum(1 for m in foundation_markers if m in combined_text)
+    has_single_cell_with_all = doc_marker_count > 0 and any(
+        sum(1 for m in foundation_markers if m in cell) >= doc_marker_count
+        and len(cell.strip()) > sum(len(m) for m in foundation_markers if m in cell) + 10
         for tbl in cleaned_tables
         for row in tbl
         for cell in row
     )
-    if not has_consolidated_t4:
-        all_lines: list[str] = [b.text for b in body_blocks if b.text]
-        combined_text = "\n".join(all_lines)
-        if any(m in combined_text for m in foundation_markers):
-            cleaned_tables.append([[combined_text]])
+    if doc_marker_count > 0 and not has_single_cell_with_all:
+        first_marker_idx = next(
+            (
+                idx
+                for idx, b in enumerate(body_blocks)
+                if any(m in b.text for m in foundation_markers)
+            ),
+            0,
+        )
+        foundation_lines = [
+            b.text for b in body_blocks[first_marker_idx:] if b.text
+        ]
+        consolidated_t4 = "\n".join(foundation_lines) if foundation_lines else combined_text
+        cleaned_tables.append([[consolidated_t4]])
 
     return ParsedLegacyDoc(
         tables=cleaned_tables,
@@ -610,6 +686,7 @@ def _parse_msdoc_ole2(
                 n_pieces = (len(plc_pcd) - 4) // 12
                 cps = struct.unpack_from(f"<{n_pieces + 1}I", plc_pcd, 0)
                 pcd_base = 4 * (n_pieces + 1)
+                total_piece_bytes = 0
                 for i in range(n_pieces):
                     cp_s, cp_e = cps[i], cps[i + 1]
                     if cp_e <= cp_s:
@@ -620,12 +697,30 @@ def _parse_msdoc_ole2(
                     if compressed:
                         fc_byte = (fc_val & 0x3FFFFFFF) // 2
                         byte_len = char_count
+                        if fc_byte < 0 or fc_byte + byte_len > len(word_doc):
+                            continue
+                        total_piece_bytes += byte_len
+                        if total_piece_bytes > max_uncompressed_bytes:
+                            raise DocxValidationError(
+                                413,
+                                "import_uncompressed_too_large",
+                                "文档解压后大小超过安全上限",
+                            )
                         raw_slice = word_doc[fc_byte : fc_byte + byte_len]
                         txt_slice = _decode_msdoc_compressed(raw_slice)
                         pieces.append((cp_s, cp_s + len(txt_slice), fc_byte, 1, txt_slice))
                     else:
                         fc_byte = fc_val & 0x3FFFFFFF
                         byte_len = char_count * 2
+                        if fc_byte < 0 or fc_byte + byte_len > len(word_doc):
+                            continue
+                        total_piece_bytes += byte_len
+                        if total_piece_bytes > max_uncompressed_bytes:
+                            raise DocxValidationError(
+                                413,
+                                "import_uncompressed_too_large",
+                                "文档解压后大小超过安全上限",
+                            )
                         raw_slice = word_doc[fc_byte : fc_byte + byte_len]
                         txt_slice = raw_slice.decode("utf-16-le", errors="replace")
                         pieces.append((cp_s, cp_s + len(txt_slice), fc_byte, 2, txt_slice))
@@ -1001,6 +1096,111 @@ def _parse_html_doc(
     return _finalize_legacy_blocks_and_tables(parser.tables, parser.raw_blocks)
 
 
+_RTF_CODEPAGE_MAP: dict[int, str] = {
+    437: "cp437",
+    850: "cp850",
+    852: "cp852",
+    866: "cp866",
+    874: "cp874",
+    932: "cp932",
+    936: "gb18030",
+    949: "cp949",
+    950: "cp950",
+    1250: "cp1250",
+    1251: "cp1251",
+    1252: "cp1252",
+    1253: "cp1253",
+    1254: "cp1254",
+    1255: "cp1255",
+    1256: "cp1256",
+    1257: "cp1257",
+    1258: "cp1258",
+    10000: "mac_roman",
+    54936: "gb18030",
+    65001: "utf-8",
+}
+
+_RTF_SKIP_DESTINATIONS: frozenset[str] = frozenset(
+    {
+        "fonttbl",
+        "colortbl",
+        "stylesheet",
+        "info",
+        "pict",
+        "object",
+        "header",
+        "footer",
+        "headerl",
+        "headerr",
+        "footerl",
+        "footerr",
+    }
+)
+
+
+def _strip_rtf_nonbody_groups(raw: str) -> str:
+    """Remove `{\\*...}` and header destination groups (`\\fonttbl`, `\\colortbl`, `\\stylesheet`, etc.) with nested braces."""
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    skip_depth = 0
+    while i < n:
+        ch = raw[i]
+        if ch == "\\" and i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
+            if skip_depth == 0:
+                out.append(raw[i : i + 2])
+            i += 2
+            continue
+        if ch == "{":
+            if skip_depth > 0:
+                skip_depth += 1
+                i += 1
+                continue
+            m_star = re.match(r"\{\s*\\\*\s*\\[a-zA-Z]+", raw[i : i + 40])
+            m_dest = re.match(r"\{\s*\\([a-zA-Z]+)(?![a-zA-Z])", raw[i : i + 40])
+            if m_star is not None or (
+                m_dest is not None and m_dest.group(1).lower() in _RTF_SKIP_DESTINATIONS
+            ):
+                skip_depth = 1
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "}":
+            if skip_depth > 0:
+                skip_depth -= 1
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if skip_depth == 0:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _resolve_rtf_encoding(raw_str: str) -> str | None:
+    cpg_match = re.search(r"\\ansicpg(\d+)(?![a-zA-Z0-9])", raw_str[:4096])
+    if cpg_match is not None:
+        cpg = int(cpg_match.group(1))
+        if cpg in _RTF_CODEPAGE_MAP:
+            return _RTF_CODEPAGE_MAP[cpg]
+        cand = f"cp{cpg}"
+        try:
+            "".encode(cand)
+            return cand
+        except LookupError:
+            pass
+    if re.search(r"\\mac(?![a-zA-Z])", raw_str[:1024]):
+        return "mac_roman"
+    if re.search(r"\\pca(?![a-zA-Z])", raw_str[:1024]):
+        return "cp850"
+    if re.search(r"\\pc(?![a-zA-Z])", raw_str[:1024]):
+        return "cp437"
+    return None
+
+
 def _parse_rtf_doc(
     raw_bytes: bytes,
     *,
@@ -1013,28 +1213,55 @@ def _parse_rtf_doc(
             "文档大小超过安全上限",
         )
     raw_str = raw_bytes.decode("latin-1", errors="ignore")
+    declared_enc = _resolve_rtf_encoding(raw_str)
+    s = _strip_rtf_nonbody_groups(raw_str)
 
-    # Decode hex escapes \'xx as gb18030
-    def _replace_hex_runs(m: re.Match[str]) -> str:
-        hex_pairs = re.findall(r"\\'([0-9a-fA-F]{2})", m.group(0))
-        b = bytes(int(h, 16) for h in hex_pairs)
-        return b.decode("gb18030", errors="replace")
+    # Protect escaped literal backslash and braces before control-word parsing
+    s = (
+        s.replace("\\\\", "\x00BS\x00")
+        .replace("\\{", "\x00LB\x00")
+        .replace("\\}", "\x00RB\x00")
+        .replace("\\~", "\u00a0")
+        .replace("\\-", "")
+        .replace("\\_", "-")
+    )
 
-    s = re.sub(r"(?:\\'[0-9a-fA-F]{2})+", _replace_hex_runs, raw_str)
-
-    # Decode Unicode escapes \uN?
+    # Decode Unicode escapes \uN (consuming optional space and single fallback '?' or \'xx)
     def _replace_u(m: re.Match[str]) -> str:
         code = int(m.group(1))
         if code < 0:
             code += 65536
-        return chr(code)
+        return chr(code) if 0 <= code <= 0x10FFFF else ""
 
-    s = re.sub(r"\\u(-?\d+)\??", _replace_u, s)
-    s = s.replace("\\cell", "\x07").replace("\\row", "\r\x07")
-    s = s.replace("\\par", "\r").replace("\\line", "\n")
-    s = re.sub(r"\{\\\*[^{}]*\}", "", s)
+    s = re.sub(r"\\u(-?\d+) ?(?:\?|\\'[0-9a-fA-F]{2})?", _replace_u, s)
+
+    # Decode hex escapes \'xx using the declared RTF code page (or auto-fallback gb18030 -> cp1252)
+    def _replace_hex_runs(m: re.Match[str]) -> str:
+        hex_pairs = re.findall(r"\\'([0-9a-fA-F]{2})", m.group(0))
+        b = bytes(int(h, 16) for h in hex_pairs)
+        if declared_enc is not None:
+            return b.decode(declared_enc, errors="replace")
+        try:
+            return b.decode("gb18030", errors="strict")
+        except UnicodeDecodeError:
+            return b.decode("cp1252", errors="replace")
+
+    s = re.sub(r"(?:\\'[0-9a-fA-F]{2})+", _replace_hex_runs, s)
+
+    # Enforce complete control-word boundaries (?![a-zA-Z]) so \pard and \cellx1000 are never partially matched
+    s = re.sub(r"\\(?:cell|nestcell)(?![a-zA-Z])-?\d* ?", "\x07", s)
+    s = re.sub(r"\\(?:row|nestrow)(?![a-zA-Z])-?\d* ?", "\r\x07", s)
+    s = re.sub(r"\\par(?![a-zA-Z])-?\d* ?", "\r", s)
+    s = re.sub(r"\\line(?![a-zA-Z])-?\d* ?", "\n", s)
+    s = re.sub(r"\\tab(?![a-zA-Z])-?\d* ?", "\t", s)
     s = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", s)
+    s = re.sub(r"\\[^a-zA-Z0-9\s]", "", s)
     s = s.replace("{", "").replace("}", "")
+    s = (
+        s.replace("\x00BS\x00", "\\")
+        .replace("\x00LB\x00", "{")
+        .replace("\x00RB\x00", "}")
+    )
 
     tables: list[list[list[str]]] = []
     raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []

@@ -152,9 +152,19 @@ def test_gb18030_text_decoded_and_unsupported_rejected() -> None:
     assert exc_bad.value.code == "bad_encoding"
 
 
-def test_doc_and_docx_upload_extraction() -> None:
+def test_doc_and_docx_upload_extraction(tmp_path) -> None:
+    import struct
+
     import docx
-    from app.importer.reader import build_ole2_doc_bytes
+    from app.importer.parser import _extract_t4_foundation
+    from app.importer.reader import (
+        DocxValidationError,
+        build_ole2_doc_bytes,
+        extract_table_grid,
+        iter_document_tables,
+        validate_and_load_docx,
+    )
+    from app.rag.ingest import read_corpus_dir
 
     # 1. Binary OLE2 .doc extraction
     ole2_bytes = build_ole2_doc_bytes(
@@ -179,10 +189,62 @@ def test_doc_and_docx_upload_extraction() -> None:
     tbl.rows[1].cells[1].text = "80%"
     buf = io.BytesIO()
     d.save(buf)
-    extracted_docx = extract_upload("sop.docx", buf.getvalue(), max_chars=300_000)
+    docx_bytes = buf.getvalue()
+    extracted_docx = extract_upload("sop.docx", docx_bytes, max_chars=300_000)
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
     assert "液位 | 80%" in extracted_docx.text
+
+    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \pard, and \cellx1000\cellx2000
+    rtf_bytes = (
+        b"{\\rtf1\\ansi\\ansicpg1252"
+        b"{\\fonttbl{\\f0 Arial;}}"
+        b"\\pard First paragraph\\par"
+        b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl caf\\'e9\\cell R\\u233?sum\\u233?\\cell\\row"
+        b"}"
+    )
+    rtf_doc = validate_and_load_docx("intl.doc", rtf_bytes)
+    assert [b.text for b in rtf_doc.body_blocks if b.kind == "paragraph"] == ["First paragraph"]
+    rtf_grids = [extract_table_grid(t) for t in iter_document_tables(rtf_doc)]
+    assert rtf_grids == [[["café", "Résumé"]]]
+
+    # 4. Crafted OLE2 .doc with duplicate FAT sector references in DIFAT is rejected
+    crafted_ole2 = bytearray(ole2_bytes)
+    struct.pack_into("<I", crafted_ole2, 0x2C, 2)  # declare 2 FAT sectors
+    first_fat_sec = struct.unpack_from("<I", crafted_ole2, 0x4C)[0]
+    struct.pack_into("<I", crafted_ole2, 0x50, first_fat_sec)  # duplicate FAT sector in DIFAT[1]
+    with pytest.raises(DocxValidationError) as exc_fat:
+        validate_and_load_docx("bomb.doc", bytes(crafted_ole2))
+    assert exc_fat.value.status == 415
+
+    # 5. Legacy .doc with foundation markers split across separate rows extracts all sections
+    split_foundation_doc = build_ole2_doc_bytes(
+        tables=[
+            [
+                ["[学术简历]"],
+                ["张三，天津工业大学教授，长期从事智能评测研究。"],
+                ["[前期成果]"],
+                ["（1）张三. 智能评测方法研究[J]. 计算机学报, 2025."],
+                ["[承担项目]"],
+                ["1. 国家自然科学基金面上项目，项目名称：智能评测关键技术，编号：62570001，2025-01至2028-12，50万元，在研，主持。"],
+            ]
+        ]
+    )
+    parsed_split = validate_and_load_docx("split-foundation.doc", split_foundation_doc)
+    split_grids = [extract_table_grid(t) for t in iter_document_tables(parsed_split)]
+    bio, achs, projs, _, _, t4_warns = _extract_t4_foundation(split_grids, as_of_date=None)
+    assert t4_warns == []
+    assert bio is not None and "智能评测研究" in bio
+    assert len(achs) == 1
+    assert len(projs) == 1
+
+    # 6. read_corpus_dir discovers .doc and .docx alongside .md
+    (tmp_path / "note.md").write_text("# Note\n\nMarkdown body.", encoding="utf-8")
+    (tmp_path / "legacy.doc").write_bytes(ole2_bytes)
+    (tmp_path / "modern.docx").write_bytes(docx_bytes)
+    corpus_items = read_corpus_dir(tmp_path)
+    loaded_keys = {meta["key"] for meta, _ in corpus_items}
+    assert loaded_keys == {"note", "legacy", "modern"}
 
 
 async def test_worker_processes_pending_and_retries_to_failed() -> None:
