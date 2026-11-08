@@ -2187,8 +2187,8 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
     )
     assert matched_conflicting_aff is None
 
-    # 6. Suffixed pinyin login (e.g. zhangsan2, matching T1_CERT_RE) that learned a T1 student ID
-    # must reject a homonym with a different T1 student ID.
+    # 6. Suffixed pinyin login (e.g. zhangsan2, matching T1_CERT_RE) that learns a T1 student ID
+    # must retain student_id across preview re-evaluations and reject a homonym with a different T1 student ID.
     u_suffixed = User(
         id=_uuid.uuid4(),
         login_name="zhangsan2",
@@ -2197,17 +2197,51 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
         password_hash="x",
         is_active=True,
     )
-    lp_suffixed_learned_t1 = LabPerson(
+    lp_suffixed_t2 = LabPerson(
         id=_uuid.uuid4(),
         user_id=u_suffixed.id,
         name="张三",
         affiliation="天津工业大学",
         entity_fingerprint=person_fp(
-            tier="T1",
-            login_name="2531108888",
+            tier="T2",
+            login_name="zhangsan2",
             name="张三",
             affiliation="天津工业大学",
         ),
+    )
+    inc_learn_t1 = [
+        {"name": "张三", "affiliation": "天津工业大学", "cert": "2531108888"}
+    ]
+    assign_people_identities(
+        inc_learn_t1,
+        existing_users=[u_suffixed],
+        existing_people=[lp_suffixed_t2],
+    )
+    assert inc_learn_t1[0]["login_name"] == "zhangsan2"
+    assert inc_learn_t1[0]["student_id"] == "2531108888"
+    # Simulate preview-update handler re-evaluating the roster item
+    inc_learn_t1[0]["cert"] = (
+        inc_learn_t1[0].get("student_id") or inc_learn_t1[0].get("login_name")
+    )
+    assign_people_identities(
+        inc_learn_t1,
+        existing_users=[u_suffixed],
+        existing_people=[lp_suffixed_t2],
+    )
+    assert inc_learn_t1[0]["student_id"] == "2531108888"
+    assert inc_learn_t1[0]["fingerprint"] == person_fp(
+        tier="T1",
+        login_name="2531108888",
+        name="张三",
+        affiliation="天津工业大学",
+    )
+
+    lp_suffixed_learned_t1 = LabPerson(
+        id=lp_suffixed_t2.id,
+        user_id=u_suffixed.id,
+        name="张三",
+        affiliation="天津工业大学",
+        entity_fingerprint=inc_learn_t1[0]["fingerprint"],
     )
     inc_conflicting_t1 = [
         {"name": "张三", "affiliation": "天津工业大学", "cert": "2531109999"}

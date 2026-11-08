@@ -417,7 +417,7 @@ async def update_import_preview(
         ]
         for p in ppl_list:
             if p.get("tier") == "T1" and not p.get("cert"):
-                p["cert"] = p.get("login_name")
+                p["cert"] = p.get("student_id") or p.get("login_name")
         assign_people_identities(
             ppl_list,
             existing_users=existing_users,

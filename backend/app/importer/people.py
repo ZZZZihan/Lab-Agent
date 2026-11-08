@@ -204,10 +204,15 @@ def assign_people_identities(
         person["name"] = name
         popped_cert = str(person.pop("cert", "") or "").strip()
         saved_student_id = str(person.pop("student_id", "") or "").strip()
+        prev_login = str(person.get("login_name") or "").strip()
         if (
             saved_student_id
             and T1_CERT_RE.match(saved_student_id.lower())
-            and (not popped_cert or not T1_CERT_RE.match(popped_cert.lower()))
+            and (
+                not popped_cert
+                or not T1_CERT_RE.match(popped_cert.lower())
+                or popped_cert == prev_login
+            )
         ):
             raw_cert = saved_student_id
         else:
