@@ -2187,6 +2187,40 @@ async def test_cross_tier_member_deduplication_when_second_proposal_omits_studen
     )
     assert matched_conflicting_aff is None
 
+    # 6. Suffixed pinyin login (e.g. zhangsan2, matching T1_CERT_RE) that learned a T1 student ID
+    # must reject a homonym with a different T1 student ID.
+    u_suffixed = User(
+        id=_uuid.uuid4(),
+        login_name="zhangsan2",
+        display_name="张三",
+        role="member",
+        password_hash="x",
+        is_active=True,
+    )
+    lp_suffixed_learned_t1 = LabPerson(
+        id=_uuid.uuid4(),
+        user_id=u_suffixed.id,
+        name="张三",
+        affiliation="天津工业大学",
+        entity_fingerprint=person_fp(
+            tier="T1",
+            login_name="2531108888",
+            name="张三",
+            affiliation="天津工业大学",
+        ),
+    )
+    inc_conflicting_t1 = [
+        {"name": "张三", "affiliation": "天津工业大学", "cert": "2531109999"}
+    ]
+    assign_people_identities(
+        inc_conflicting_t1,
+        existing_users=[u_suffixed],
+        existing_people=[lp_suffixed_learned_t1],
+    )
+    assert inc_conflicting_t1[0]["match"]["status"] == "new"  # type: ignore[index]
+    assert inc_conflicting_t1[0]["login_name"] == "2531109999"
+
+
 
 
 

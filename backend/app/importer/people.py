@@ -140,22 +140,6 @@ def assign_people_identities(
                 lp_by_fp[lp.entity_fingerprint] = lp
 
     def _lp_has_t1(lp: LabPerson) -> bool:
-        u = users_by_id.get(lp.user_id) if lp.user_id else None
-        login_cand = str(
-            (u.login_name if u and u.login_name else None)
-            or getattr(lp, "login_name", None)
-            or ""
-        ).strip().lower()
-        if login_cand and T1_CERT_RE.match(login_cand):
-            if lp.entity_fingerprint:
-                return lp.entity_fingerprint == person_fp(
-                    tier="T1",
-                    login_name=login_cand,
-                    name=lp.name,
-                    affiliation=lp.affiliation,
-                    email=lp.email,
-                )
-            return True
         if lp.entity_fingerprint:
             non_t1_fp = person_fp(
                 tier="T3" if lp.email else "T2",
@@ -165,7 +149,13 @@ def assign_people_identities(
                 email=lp.email,
             )
             return lp.entity_fingerprint != non_t1_fp
-        return False
+        u = users_by_id.get(lp.user_id) if lp.user_id else None
+        login_cand = str(
+            (u.login_name if u and u.login_name else None)
+            or getattr(lp, "login_name", None)
+            or ""
+        ).strip().lower()
+        return bool(login_cand and T1_CERT_RE.match(login_cand))
 
     incoming_name_counts: dict[str, int] = {}
     incoming_name_aff_counts: dict[tuple[str, str], int] = {}
