@@ -25,6 +25,7 @@ ZERO_WIDTH_RE = re.compile(r"[​-‏﻿]")
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0e-\x1f]")
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
@@ -1822,21 +1823,30 @@ def _tokenize_rtf_body(
                         ):
                             i += 4
                             skipped += 1
-                        elif (
-                            s[i] == "\\"
-                            and i + 1 < n
-                            and s[i + 1] in ("\\", "{", "}")
-                        ):
-                            i += 2
-                            skipped += 1
                         elif s[i] == "\\":
                             m_next_cw = re.match(
-                                r"\\[a-zA-Z]+-?\d* ?", s[i : i + 32]
+                                r"\\([a-zA-Z]+)(-?\d*) ?", s[i : i + 32]
                             )
                             if m_next_cw is not None:
-                                break
-                            i += 1
-                            skipped += 1
+                                if m_next_cw.group(1).lower() in (
+                                    "par",
+                                    "cell",
+                                    "nestcell",
+                                    "row",
+                                    "nestrow",
+                                    "trowd",
+                                    "u",
+                                    "uc",
+                                    "pard",
+                                    "intbl",
+                                    "cellx",
+                                ):
+                                    break
+                                i += m_next_cw.end()
+                                skipped += 1
+                            else:
+                                i += 2 if i + 1 < n else 1
+                                skipped += 1
                         else:
                             i += 1
                             skipped += 1
@@ -2232,7 +2242,7 @@ def extract_table_grid(table: Any) -> list[list[str]]:
                 continue
             seen_tc[tc_id] = tc_obj
             if tc_id not in tc_text_cache:
-                norm_val = normalize_cell_text(cell.text)
+                norm_val = normalize_cell_text(_extract_element_lines_text(tc_obj))
                 tc_text_cache[tc_id] = (tc_obj, norm_val)
                 cells.append(norm_val)
             else:
@@ -2247,10 +2257,15 @@ def extract_table_grid(table: Any) -> list[list[str]]:
 
 
 def _iter_body_elements(container: Any) -> list[Any]:
-    """Yield top-level `<w:p>` and `<w:tbl>` elements inside `<w:body>`, unwrapping `<w:sdtContent>`."""
+    """Yield top-level `<w:p>`, `<w:tbl>`, and `<m:oMathPara>`/`<m:oMath>` elements inside `<w:body>`, unwrapping `<w:sdtContent>`."""
     out: list[Any] = []
     for child in container:
-        if child.tag in (f"{{{W_NS}}}p", f"{{{W_NS}}}tbl"):
+        if child.tag in (
+            f"{{{W_NS}}}p",
+            f"{{{W_NS}}}tbl",
+            f"{{{M_NS}}}oMathPara",
+            f"{{{M_NS}}}oMath",
+        ):
             out.append(child)
         elif child.tag == f"{{{W_NS}}}sdt":
             sdt_content = child.find(f"{{{W_NS}}}sdtContent")
@@ -2271,17 +2286,17 @@ def iter_document_tables(doc: Any) -> list[Any]:
 
 
 def _extract_element_lines_text(elem: Any) -> str:
-    """Extract normalized text from `<w:p>` or `<w:tbl>`, preserving cell, paragraph, and `<w:br/>` boundaries."""
+    """Extract normalized text from `<w:p>`, `<m:oMathPara>`, or `<w:tbl>`, preserving cell, paragraph, equation (`<m:t>`), and `<w:br/>` boundaries."""
     paragraphs = (
         [elem]
-        if elem.tag == f"{{{W_NS}}}p"
+        if elem.tag in (f"{{{W_NS}}}p", f"{{{M_NS}}}oMathPara", f"{{{M_NS}}}oMath")
         else list(elem.iter(f"{{{W_NS}}}p"))
     )
     def _walk_p(node: Any, out: list[str]) -> None:
         local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
         if local_name == "Fallback":
             return
-        if node.tag == f"{{{W_NS}}}t":
+        if node.tag in (f"{{{W_NS}}}t", f"{{{M_NS}}}t"):
             out.append(node.text or "")
         elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
             out.append("\n")
@@ -2588,7 +2603,11 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
     def _extract_tc_text(tc_elem: Any) -> str:
         parts: list[str] = []
         for child in _iter_body_elements(tc_elem):
-            if child.tag == f"{{{W_NS}}}p":
+            if child.tag in (
+                f"{{{W_NS}}}p",
+                f"{{{M_NS}}}oMathPara",
+                f"{{{M_NS}}}oMath",
+            ):
                 p_txt = _extract_element_lines_text(child).strip()
                 if p_txt:
                     parts.append(p_txt)
@@ -2619,7 +2638,11 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
 
     out_chunks: list[str] = []
     for elem in _iter_body_elements(doc.element.body):
-        if elem.tag == f"{{{W_NS}}}p":
+        if elem.tag in (
+            f"{{{W_NS}}}p",
+            f"{{{M_NS}}}oMathPara",
+            f"{{{M_NS}}}oMath",
+        ):
             txt = _extract_element_lines_text(elem).strip()
             if not txt:
                 continue

@@ -179,16 +179,30 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     chunks = chunk_document(extracted_doc.text, extracted_doc.source_format)
     assert any(c.heading == "实验室管理制度" for c in chunks)
 
-    # 2. .docx extraction (including <w:tab/> preservation in paragraphs)
+    # 2. .docx extraction (including <w:tab/> preservation and <m:oMath>/<m:t> native equations)
+    from docx.oxml import parse_xml
+
     d = docx.Document()
     d.add_heading("设备巡检规程", level=2)
     p_tab = d.add_paragraph("每日上午九点检查液氮罐液位。")
-    p_tab.add_run("\tSample\tTemperature")
+    p_tab.add_run("\tSample\tTemperature ")
+    p_tab._p.append(
+        parse_xml(
+            '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+            "<m:r><m:t>E=mc^2</m:t></m:r></m:oMath>"
+        )
+    )
     tbl = d.add_table(rows=2, cols=2)
     tbl.rows[0].cells[0].text = "项目"
     tbl.rows[0].cells[1].text = "阈值"
     tbl.rows[1].cells[0].text = "液位"
     tbl.rows[1].cells[1].text = "80%"
+    tbl.rows[1].cells[1].paragraphs[0]._p.append(
+        parse_xml(
+            '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+            "<m:r><m:t>+ΔT</m:t></m:r></m:oMath>"
+        )
+    )
     inner_tbl = tbl.rows[1].cells[1].add_table(rows=1, cols=2)
     inner_tbl.rows[0].cells[0].text = "温度"
     inner_tbl.rows[0].cells[1].text = "-196C"
@@ -198,8 +212,13 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     extracted_docx = extract_upload("sop.docx", docx_bytes, max_chars=300_000)
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
-    assert "Sample Temperature" in extracted_docx.text
-    assert "液位 | 80% 温度 | -196C" in extracted_docx.text
+    assert "Sample Temperature E=mc^2" in extracted_docx.text
+    assert "液位 | 80%+ΔT 温度 | -196C" in extracted_docx.text
+    docx_grids = [
+        extract_table_grid(t)
+        for t in iter_document_tables(validate_and_load_docx("sop.docx", docx_bytes))
+    ]
+    assert docx_grids[0][1][1].startswith("80%+ΔT")
 
     # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \ucN fallback counts, literal braces/backslashes, surrogate pairs, and multi-row tables
     rtf_bytes = (
@@ -275,11 +294,12 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     )
     rtf_upr_ud = (
         b"{\\rtf1\\ansi {\\upr{??}{\\*\\ud \\u20013?\\u25991?}}\\par"
-        b"\\pard{\\*\\bkmkstart start}Important text{\\*\\bkmkend start}\\par}"
+        b"\\pard{\\*\\bkmkstart start}Important text{\\*\\bkmkend start}\\par"
+        b"\\pard \\u160\\~A\\u8212\\emdash B\\u8209\\-C\\par}"
     )
     assert (
         extract_upload("upr.doc", rtf_upr_ud, max_chars=300_000).text.strip()
-        == "中文\n\nImportant text"
+        == "中文\n\nImportant text\n\nA—B‐C"
     )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
