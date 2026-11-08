@@ -178,10 +178,11 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     chunks = chunk_document(extracted_doc.text, extracted_doc.source_format)
     assert any(c.heading == "实验室管理制度" for c in chunks)
 
-    # 2. .docx extraction
+    # 2. .docx extraction (including <w:tab/> preservation in paragraphs)
     d = docx.Document()
     d.add_heading("设备巡检规程", level=2)
-    d.add_paragraph("每日上午九点检查液氮罐液位。")
+    p_tab = d.add_paragraph("每日上午九点检查液氮罐液位。")
+    p_tab.add_run("\tSample\tTemperature")
     tbl = d.add_table(rows=2, cols=2)
     tbl.rows[0].cells[0].text = "项目"
     tbl.rows[0].cells[1].text = "阈值"
@@ -193,13 +194,15 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     extracted_docx = extract_upload("sop.docx", docx_bytes, max_chars=300_000)
     assert extracted_docx.source_format == "markdown"
     assert "每日上午九点检查液氮罐液位" in extracted_docx.text
+    assert "Sample Temperature" in extracted_docx.text
     assert "液位 | 80%" in extracted_docx.text
 
-    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, surrogate pairs, lone surrogates, and multi-row tables
+    # 3. RTF-backed .doc with \ansicpg1252 hex escapes, \ucN fallback counts, surrogate pairs, lone surrogates, and multi-row tables
     rtf_bytes = (
-        b"{\\rtf1\\ansi\\ansicpg1252"
+        b"{\\rtf1\\ansi\\ansicpg1252\\uc1"
         b"{\\fonttbl{\\f0 Arial;}}"
         b"\\pard First paragraph \\u-10179?\\u-8704? and lone \\u-10179?\\par"
+        b"\\pard {\\uc1 caf\\u233e} {\\uc0 caf\\u233?}\\par"
         b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl caf\\'e9\\cell R\\u233?sum\\u233?\\cell\\row"
         b"\\trowd\\cellx1000\\cellx2000\\pard\\intbl Alice\\cell alice@example.com\\cell\\row"
         b"\\pard Trailing paragraph\\par"
@@ -208,6 +211,7 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     rtf_doc = validate_and_load_docx("intl.doc", rtf_bytes)
     assert [b.text for b in rtf_doc.body_blocks if b.kind == "paragraph"] == [
         "First paragraph 😀 and lone �",
+        "café café?",
         "Trailing paragraph",
     ]
     rtf_grids = [extract_table_grid(t) for t in iter_document_tables(rtf_doc)]
@@ -215,15 +219,28 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     rtf_uploaded = extract_upload("intl.doc", rtf_bytes, max_chars=300_000)
     assert rtf_uploaded.text.encode("utf-8")
     assert "😀" in rtf_uploaded.text
+    assert "café café?" in rtf_uploaded.text
     assert "Alice | alice@example.com" in rtf_uploaded.text
 
-    # 3b. HTML-backed .doc declaring windows-1252 charset (even-length bytes must not be misdecoded as UTF-16)
+    # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, and UTF-16 BOM
     html_cp1252 = (
         '<html><head><meta charset="windows-1252"></head>'
         "<body><p>café résumé</p></body></html>"
     ).encode("cp1252")
     html_uploaded = extract_upload("cp1252.doc", html_cp1252, max_chars=300_000)
     assert "café résumé" in html_uploaded.text
+    for bom_enc in ("utf-8-sig", "utf-16"):
+        bom_html = "<html><body><p>Test text</p></body></html>".encode(bom_enc)
+        assert "Test text" in extract_upload("bom.doc", bom_html, max_chars=300_000).text
+
+    # 3d. Binary OLE2 .doc with supplementary character in main story followed by footnote story
+    fn_ole2 = bytearray(build_ole2_doc_bytes(paragraphs=["Main 😀", "FOOTNOTE"]))
+    # Declare ccpText = 8 UTF-16 code units ("Main 😀\r" = 5 + 2 + 1 = 8) in FIB rgLw[3] (offset 512 + 0x4C)
+    struct.pack_into("<I", fn_ole2, 512 + 0x4C, 8)
+    fn_extracted = extract_upload("footnote.doc", bytes(fn_ole2), max_chars=300_000)
+    assert fn_extracted.text.strip() == "Main 😀"
+    assert "FOOTNOTE" not in fn_extracted.text
+    assert "F" not in fn_extracted.text.replace("Main", "")
 
     # 3c. OLE2 .doc with an embedded ObjectPool child storage containing a nested WordDocument stream
     embedded_ole2 = bytearray(ole2_bytes)

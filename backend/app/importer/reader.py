@@ -143,28 +143,49 @@ def _strip_msdoc_fields(raw: str) -> str:
     return "".join(out)
 
 
-def _looks_like_legacy_doc_bytes(raw_bytes: bytes) -> bool:
+def _sniff_legacy_doc_kind(
+    raw_bytes: bytes,
+) -> Literal["ole2", "rtf", "xml", "html"] | None:
     if len(raw_bytes) >= 8 and raw_bytes[:8] == OLE2_MAGIC:
-        return True
-    head = raw_bytes[:2048].lstrip()
-    head_lower = head.lower()
-    if head_lower.startswith(b"{\\rtf"):
-        return True
-    if (
-        head_lower.startswith(b"<?xml")
-        or head_lower.startswith(b"<w:worddocument")
-        or head_lower.startswith(b"<pkg:package")
-    ) and (b"word" in head_lower or b"<w:" in head_lower):
-        return True
-    if (
-        head_lower.startswith(b"<!doctype html")
-        or head_lower.startswith(b"<html")
-        or head_lower.startswith(b"<meta")
-        or head_lower.startswith(b"<table")
-        or head_lower.startswith(b"<body")
+        return "ole2"
+    sample = raw_bytes[:4096]
+    if sample.startswith(b"\xef\xbb\xbf"):
+        head_str = sample[3:].decode("latin-1", errors="ignore")
+    elif sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        head_str = sample.decode("utf-16", errors="ignore")
+    elif (
+        b"\x00<" in sample[:128]
+        or b"<\x00" in sample[:128]
+        or b"{\x00" in sample[:128]
+        or b"\x00{" in sample[:128]
     ):
-        return True
-    return False
+        enc = (
+            "utf-16-le"
+            if (b"<\x00" in sample[:128] or b"{\x00" in sample[:128])
+            else "utf-16-be"
+        )
+        head_str = sample.decode(enc, errors="ignore")
+    else:
+        head_str = sample.decode("latin-1", errors="ignore")
+
+    head_lower = head_str.lstrip("﻿ \t\r\n").lower()
+    if head_lower.startswith("{\\rtf"):
+        return "rtf"
+    if (
+        head_lower.startswith("<?xml")
+        or head_lower.startswith("<w:worddocument")
+        or head_lower.startswith("<pkg:package")
+    ) and ("word" in head_lower or "<w:" in head_lower):
+        return "xml"
+    if head_lower.startswith(
+        ("<!doctype html", "<html", "<head", "<meta", "<table", "<body")
+    ):
+        return "html"
+    return None
+
+
+def _looks_like_legacy_doc_bytes(raw_bytes: bytes) -> bool:
+    return _sniff_legacy_doc_kind(raw_bytes) is not None
 
 
 def _read_ole2_streams(
@@ -773,16 +794,30 @@ def _parse_msdoc_ole2(
             "无法解析 .doc 文档文本流",
         )
 
+    char_fc_ends: list[int] = []
+    for _, _, fc_b, width, txt_slice in pieces:
+        if width == 1:
+            for k in range(len(txt_slice)):
+                char_fc_ends.append(fc_b + k + 1)
+        else:
+            cur_fc = fc_b
+            for ch in txt_slice:
+                cur_fc += 4 if ord(ch) > 0xFFFF else 2
+                char_fc_ends.append(cur_fc)
+
     full_text = "".join(p[4] for p in pieces)
     if ccp_text > 0:
-        main_text = full_text[:ccp_text]
+        u16_bytes = full_text.encode("utf-16-le", errors="surrogatepass")
+        if len(u16_bytes) > ccp_text * 2:
+            main_text = u16_bytes[: ccp_text * 2].decode("utf-16-le", errors="replace")
+        else:
+            main_text = full_text
     else:
         main_text = full_text
 
     def _cp_to_fc_end(cp_idx: int) -> int:
-        for cp_s, cp_e, fc_b, width, _ in pieces:
-            if cp_s <= cp_idx < cp_e:
-                return fc_b + (cp_idx - cp_s + 1) * width
+        if 0 <= cp_idx < len(char_fc_ends):
+            return char_fc_ends[cp_idx]
         return -1
 
     in_table_fc_ends, ttp_fc_ends = (
@@ -924,8 +959,15 @@ def _parse_word2003_xml_doc(
             "import_uncompressed_too_large",
             "文档大小超过安全上限",
         )
+    decoded_xml = _decode_html_doc_bytes(raw_bytes).lstrip("﻿")
+    lower_xml = decoded_xml.lower()
     lower_bytes = raw_bytes.lower()
-    if b"<!entity" in lower_bytes or b"<!doctype" in lower_bytes:
+    if (
+        b"<!entity" in lower_bytes
+        or b"<!doctype" in lower_bytes
+        or "<!entity" in lower_xml
+        or "<!doctype" in lower_xml
+    ):
         raise DocxValidationError(
             415,
             "import_unsupported_format",
@@ -933,12 +975,22 @@ def _parse_word2003_xml_doc(
         )
     try:
         root = ET.fromstring(raw_bytes)
-    except ET.ParseError as exc:
-        raise DocxValidationError(
-            422,
-            "import_parse_failed",
-            "无法解析 Word XML (.doc) 文档结构",
-        ) from exc
+    except ET.ParseError:
+        cleaned_xml = re.sub(
+            r"(<\?xml\b[^>]*?)\bencoding\s*=\s*[\"'][^\"']*[\"']",
+            r"\1",
+            decoded_xml,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        try:
+            root = ET.fromstring(cleaned_xml.encode("utf-8"))
+        except ET.ParseError as exc:
+            raise DocxValidationError(
+                422,
+                "import_parse_failed",
+                "无法解析 Word XML (.doc) 文档结构",
+            ) from exc
 
     def _local(tag: str) -> str:
         return tag.split("}")[-1] if "}" in tag else tag
@@ -954,6 +1006,8 @@ def _parse_word2003_xml_doc(
                 parts.append(node.text)
             elif ln in ("br", "cr"):
                 parts.append("\n")
+            elif ln in ("tab", "ptab"):
+                parts.append("\t")
             for ch in node:
                 _walk(ch)
 
@@ -1257,6 +1311,81 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
     return None
 
 
+def _decode_rtf_unicode_with_uc(s: str) -> str:
+    """Decode RTF `\\uN` escapes while honoring group-scoped `\\ucN` fallback counts."""
+    out: list[str] = []
+    uc = 1
+    uc_stack: list[int] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "{":
+            uc_stack.append(uc)
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "}":
+            if uc_stack:
+                uc = uc_stack.pop()
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            if i + 1 < n and s[i + 1] in ("\\", "{", "}"):
+                out.append(s[i : i + 2])
+                i += 2
+                continue
+            m_uc = re.match(r"\\uc(-?\d+)(?![0-9]) ?", s[i : i + 32])
+            if m_uc is not None:
+                uc = max(0, int(m_uc.group(1)))
+                i += m_uc.end()
+                continue
+            m_u = re.match(r"\\u(-?\d+)(?![0-9]) ?", s[i : i + 32])
+            if m_u is not None:
+                code = int(m_u.group(1))
+                if code < 0:
+                    code += 65536
+                if 0 <= code <= 0x10FFFF:
+                    out.append(chr(code))
+                i += m_u.end()
+                skipped = 0
+                while skipped < uc and i < n:
+                    if s[i] in ("{", "}"):
+                        break
+                    if (
+                        s[i] == "\\"
+                        and i + 3 < n
+                        and s[i + 1] == "'"
+                        and all(
+                            c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4]
+                        )
+                    ):
+                        i += 4
+                        skipped += 1
+                    elif s[i] == "\\" and i + 1 < n and s[i + 1] in ("\\", "{", "}"):
+                        i += 2
+                        skipped += 1
+                    elif s[i] == "\\":
+                        m_cw = re.match(r"\\[a-zA-Z]+-?\d* ?", s[i : i + 32])
+                        if m_cw is not None:
+                            break
+                        i += 1
+                        skipped += 1
+                    else:
+                        i += 1
+                        skipped += 1
+                continue
+            m_other = re.match(r"\\[a-zA-Z]+-?\d* ?", s[i : i + 64])
+            if m_other is not None:
+                out.append(m_other.group(0))
+                i += m_other.end()
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _parse_rtf_doc(
     raw_bytes: bytes,
     *,
@@ -1268,9 +1397,14 @@ def _parse_rtf_doc(
             "import_uncompressed_too_large",
             "文档大小超过安全上限",
         )
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        raw_bytes = raw_bytes[3:]
     raw_str = raw_bytes.decode("latin-1", errors="ignore")
     declared_enc = _resolve_rtf_encoding(raw_str)
     s = _strip_rtf_nonbody_groups(raw_str)
+    s = _decode_rtf_unicode_with_uc(s)
+    # Combine UTF-16 surrogate pairs (e.g. \u-10179?\u-8704? -> U+1F600) and replace lone surrogates
+    s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
     # Protect escaped literal backslash and braces before control-word parsing
     s = (
@@ -1281,17 +1415,6 @@ def _parse_rtf_doc(
         .replace("\\-", "")
         .replace("\\_", "-")
     )
-
-    # Decode Unicode escapes \uN (consuming optional space and single fallback '?' or \'xx)
-    def _replace_u(m: re.Match[str]) -> str:
-        code = int(m.group(1))
-        if code < 0:
-            code += 65536
-        return chr(code) if 0 <= code <= 0x10FFFF else ""
-
-    s = re.sub(r"\\u(-?\d+) ?(?:\?|\\'[0-9a-fA-F]{2})?", _replace_u, s)
-    # Combine UTF-16 surrogate pairs (e.g. \u-10179?\u-8704? -> U+1F600) and replace lone surrogates
-    s = s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
     # Decode hex escapes \'xx using the declared RTF code page (or auto-fallback gb18030 -> cp1252)
     def _replace_hex_runs(m: re.Match[str]) -> str:
@@ -1362,33 +1485,23 @@ def _parse_legacy_doc(
     max_uncompressed_mb: int = 50,
 ) -> ParsedLegacyDoc:
     max_uncompressed_bytes = max_uncompressed_mb * 1024 * 1024
-    if len(raw_bytes) >= 8 and raw_bytes[:8] == OLE2_MAGIC:
+    kind = _sniff_legacy_doc_kind(raw_bytes)
+    if kind == "ole2":
         return _parse_msdoc_ole2(
             raw_bytes,
             max_uncompressed_bytes=max_uncompressed_bytes,
         )
-    head = raw_bytes[:2048].lstrip().lower()
-    if head.startswith(b"{\\rtf"):
+    if kind == "rtf":
         return _parse_rtf_doc(
             raw_bytes,
             max_uncompressed_bytes=max_uncompressed_bytes,
         )
-    if (
-        head.startswith(b"<?xml")
-        or head.startswith(b"<w:worddocument")
-        or head.startswith(b"<pkg:package")
-    ) and (b"word" in head or b"<w:" in head):
+    if kind == "xml":
         return _parse_word2003_xml_doc(
             raw_bytes,
             max_uncompressed_bytes=max_uncompressed_bytes,
         )
-    if (
-        head.startswith(b"<!doctype html")
-        or head.startswith(b"<html")
-        or head.startswith(b"<meta")
-        or head.startswith(b"<table")
-        or head.startswith(b"<body")
-    ):
+    if kind == "html":
         return _parse_html_doc(
             raw_bytes,
             max_uncompressed_bytes=max_uncompressed_bytes,
@@ -1417,7 +1530,7 @@ def build_ole2_doc_bytes(
     if not body_text:
         body_text = "\r"
     text_utf16 = body_text.encode("utf-16-le")
-    ccp_text = len(body_text)
+    ccp_text = len(text_utf16) // 2
 
     # Build 1Table stream with a Clx Piece Table (1 uncompressed UTF-16LE piece starting at fc=1024)
     clx_bytes = (
@@ -1655,6 +1768,8 @@ def _extract_element_lines_text(elem: Any) -> str:
             out.append(node.text or "")
         elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
             out.append("\n")
+        elif node.tag in (f"{{{W_NS}}}tab", f"{{{W_NS}}}ptab"):
+            out.append("\t")
         for child in node:
             _walk_p(child, out)
 
