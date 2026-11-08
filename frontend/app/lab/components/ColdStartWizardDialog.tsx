@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  copyTextToClipboard,
   mapLabErrorCode,
 } from "@/lib/api";
 
@@ -493,7 +494,7 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                     onClick={async () => {
                       setWizardError("");
                       try {
-                        await navigator.clipboard.writeText(
+                        await copyTextToClipboard(
                           provisionResult.roster_text,
                         );
                         setRosterCopied(true);

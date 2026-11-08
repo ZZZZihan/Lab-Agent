@@ -1,3 +1,6 @@
+.agent-html/
+.claude/settings.local.json
+*.bak.md
 .env
 .env.*
 !.env.example

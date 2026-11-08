@@ -20,6 +20,7 @@ import { cn } from "cn";
 import {
   ApiError,
   api,
+  copyTextToClipboard,
   currentUser,
   deleteImportJob,
   executeImportMerge,
@@ -522,7 +523,7 @@ export default function AdminImportsPage() {
                 : p.match,
         };
       });
-      const updated = await updateImportPreview(importJob.job_id, {
+      const updated = await updateImportPreview(importJob.job_id || importJob.id, {
         as_of_time: provisionAsOf.trim() || null,
         people: updatedPeople,
       });
@@ -544,7 +545,7 @@ export default function AdminImportsPage() {
     setWizardNotice("");
     setReparsing(true);
     try {
-      const reparsed = await reparseImportJob(importJob.job_id, reparseMode);
+      const reparsed = await reparseImportJob(importJob.job_id || importJob.id, reparseMode);
       setImportJob(reparsed);
       setProvisionAsOf(reparsed.as_of_time || reparsed.preview?.as_of_time || "");
       setOverrides(buildInitialOverrides(reparsed));
@@ -586,7 +587,7 @@ export default function AdminImportsPage() {
         };
       });
       const res = await api<ProvisionResult>(
-        `admin/imports/${importJob.job_id}/provision`,
+        `admin/imports/${importJob.job_id || importJob.id}/provision`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -1604,7 +1605,7 @@ export default function AdminImportsPage() {
                     type="button"
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(
+                        await copyTextToClipboard(
                           rosterData.roster_text,
                         );
                         setRosterModalCopied(true);
@@ -2095,7 +2096,7 @@ export default function AdminImportsPage() {
                     onClick={async () => {
                       setWizardError("");
                       try {
-                        await navigator.clipboard.writeText(
+                        await copyTextToClipboard(
                           provisionResult.roster_text,
                         );
                         retainedUnsavedCredentialState = null;

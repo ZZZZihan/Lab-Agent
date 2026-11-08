@@ -221,7 +221,7 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
         .filter(([, skipped]) => skipped)
         .map(([sigId]) => sigId);
       const res = await api<ProvisionResult>(
-        `admin/imports/${importJob.job_id}/provision`,
+        `admin/imports/${importJob.job_id || importJob.id}/provision`,
         {
           method: "POST",
           body: JSON.stringify({

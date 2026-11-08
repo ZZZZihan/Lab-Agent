@@ -97,13 +97,23 @@ export function Shell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  const isChatCanvas = pathname.startsWith("/chat");
+  const containerMaxW = isChatCanvas ? "max-w-7xl" : "max-w-5xl";
+
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-border bg-card/80">
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-3 px-4 py-3">
+    <div className="min-h-screen bg-[#FAF9F6] text-stone-900 dark:bg-[#181816] dark:text-stone-100">
+      <header className="border-b border-stone-200/80 bg-[#FAF9F6]/90 backdrop-blur-xs dark:border-stone-800 dark:bg-[#181816]/90">
+        <div
+          className={`mx-auto flex w-full ${containerMaxW} flex-wrap items-center gap-3 px-4 py-3`}
+        >
           <Link href="/chat" className="mr-auto flex items-baseline gap-2">
-            <span className="font-display text-xl tracking-wide">{t.brand}</span>
-            <span className="text-xs text-muted-foreground">{t.lab}</span>
+            <span className="text-sm text-primary dark:text-emerald-400">✦</span>
+            <span className="font-display text-lg font-semibold tracking-wide">
+              {t.lab} · 科研智能工作台
+            </span>
+            <span className="hidden text-xs text-muted-foreground sm:inline">
+              {t.brand}
+            </span>
           </Link>
           <nav className="flex flex-wrap gap-1">
             {links.map((link) => (
@@ -126,9 +136,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </Button>
           {user ? (
             <div className="flex items-center gap-2 text-sm">
-              <span>
-                {user.display_name}
-                <span className="ml-1 text-muted-foreground">{user.role}</span>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-stone-200/80 bg-white/80 px-2.5 py-0.5 text-xs font-medium dark:border-stone-800 dark:bg-stone-900">
+                <span>👤 {user.display_name}</span>
+                <span className="text-muted-foreground">· {user.role}</span>
               </span>
               <Button
                 variant="ghost"
@@ -150,7 +160,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           role="alert"
           className="border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive font-medium"
         >
-          <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-2">
+          <div
+            className={`mx-auto flex w-full ${containerMaxW} flex-wrap items-center justify-between gap-2`}
+          >
             <span>
               {t.mustChangePasswordTitle}
               {user.must_change_password_by
@@ -172,10 +184,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
           role="alert"
           className="border-b border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-800 dark:text-amber-300"
         >
-          <div className="mx-auto w-full max-w-5xl">{t.uncalibratedBanner}</div>
+          <div className={`mx-auto w-full ${containerMaxW}`}>
+            {t.uncalibratedBanner}
+          </div>
         </div>
       ) : null}
-      <main className="mx-auto w-full max-w-5xl px-4 py-6">
+      <main className={`mx-auto w-full ${containerMaxW} px-4 py-6`}>
         {ready ? children : <p className="text-sm text-muted-foreground">{t.loading}</p>}
       </main>
       <Dialog open={pwOpen} onOpenChange={setPwOpen}>

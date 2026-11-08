@@ -6,6 +6,7 @@ import { Shell } from "@/components/shell";
 import {
   ApiError,
   api,
+  copyTextToClipboard,
   currentUser,
   getPersonDossier,
   mapLabErrorCode,
@@ -485,7 +486,7 @@ function useLabCoreState() {
   async function copyToClipboard(text: string, tag: string) {
     setError("");
     try {
-      await navigator.clipboard.writeText(text);
+      await copyTextToClipboard(text);
       setCopiedId(tag);
       setStatusBanner("已复制到剪贴板");
       setTimeout(() => {

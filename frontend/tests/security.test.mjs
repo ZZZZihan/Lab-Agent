@@ -591,6 +591,30 @@ test("/api/backend/[...path] forwards signature security headers, ETag, and expo
     );
     const delUpstream = upstreamCalls.at(-1);
     assert.equal(new Headers(delUpstream.init.headers).get("If-Match"), '"sig-sha-256"');
+
+    // 6. POST /api/backend/auth/change-password rotates la_session cookie when access_token is returned
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          status: "ok",
+          access_token: "rotated-jwt-token",
+          expires_in: 28800,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const cpResp = await backendRoute.POST(
+      new Request("http://127.0.0.1:43123/api/backend/auth/change-password", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ current_password: "old", new_password: "new-password-123" }),
+      }),
+      { params: Promise.resolve({ path: ["auth", "change-password"] }) },
+    );
+    assert.equal(cpResp.status, 200);
+    assert.equal(globalThis.__TEST_COOKIES__.get("la_session"), "rotated-jwt-token");
   } finally {
     globalThis.fetch = prevFetch;
     globalThis.__TEST_COOKIES__ = prevCookies;
@@ -603,6 +627,28 @@ test("/api/backend/[...path] forwards signature security headers, ETag, and expo
       delete process.env.INTERNAL_PROXY_SECRET;
     } else {
       process.env.INTERNAL_PROXY_SECRET = prevSecret;
+    }
+  }
+});
+
+test("generateRequestId falls back to crypto.getRandomValues when crypto.randomUUID is unavailable on HTTP LAN origins", () => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const normalId = apiModule.generateRequestId();
+  assert.match(normalId, uuidRegex);
+
+  const origDesc = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+  Object.defineProperty(globalThis.crypto, "randomUUID", {
+    value: undefined,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    const fallbackId = apiModule.generateRequestId();
+    assert.match(fallbackId, uuidRegex);
+    assert.notEqual(fallbackId, apiModule.generateRequestId());
+  } finally {
+    if (origDesc) {
+      Object.defineProperty(globalThis.crypto, "randomUUID", origDesc);
     }
   }
 });

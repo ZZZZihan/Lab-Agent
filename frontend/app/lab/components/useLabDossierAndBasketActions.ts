@@ -3,6 +3,7 @@
 
 import {
   ApiError,
+  copyTextToClipboard,
   deletePersonSignature,
   downloadSignaturesZip,
   exportSelectedLabAssets,
@@ -426,7 +427,7 @@ export function createDossierAndBasketActions(ctx: LabCoreAndFilterState) {
       );
       const finalText = res.text || buildLocalFallbackBatchText();
       try {
-        await navigator.clipboard.writeText(finalText);
+        await copyTextToClipboard(finalText);
       } catch {
         setClipboardFallbackText(finalText);
       }
@@ -479,7 +480,7 @@ export function createDossierAndBasketActions(ctx: LabCoreAndFilterState) {
             const retryText =
               retryRes.text || buildLocalFallbackBatchText(validItems);
             try {
-              await navigator.clipboard.writeText(retryText);
+              await copyTextToClipboard(retryText);
             } catch {
               setClipboardFallbackText(retryText);
             }

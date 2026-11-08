@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, api } from "@/lib/api";
+import { ApiError, api, copyTextToClipboard } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type PatToken = {
@@ -103,7 +103,7 @@ export default function SettingsPage() {
   async function handleCopy() {
     if (!newRawToken) return;
     try {
-      await navigator.clipboard.writeText(newRawToken);
+      await copyTextToClipboard(newRawToken);
       setCopied(true);
     } catch {
       setCopied(false);
