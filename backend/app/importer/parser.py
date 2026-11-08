@@ -298,7 +298,7 @@ def reparse_preview_payload(
         ]
         for p in people_list:
             if p.get("tier") == "T1" and not p.get("cert"):
-                p["cert"] = p.get("login_name")
+                p["cert"] = p.get("student_id") or p.get("login_name")
         raw_facs = preview.get("facilities")
         facilities_list = [
             copy.deepcopy(f)

@@ -8,7 +8,7 @@ import uuid
 
 from pypinyin import Style, lazy_pinyin
 
-from app.importer.fingerprint import person_fp
+from app.importer.fingerprint import norm, person_fp
 from app.importer.pii import is_pii_id_or_phone
 from app.models import LabPerson, User
 
@@ -128,13 +128,76 @@ def assign_people_identities(
         for u in users
         if u.login_name is not None and u.login_name.strip()
     }
+    all_existing_people = list(existing_people or [])
     by_fp: dict[str, User] = {}
-    for lp in existing_people or []:
-        if lp.user_id is not None and lp.user_id in users_by_id and lp.entity_fingerprint:
-            by_fp[lp.entity_fingerprint] = users_by_id[lp.user_id]
+    lp_by_fp: dict[str, LabPerson] = {}
+    lp_with_user: list[LabPerson] = []
+    for lp in all_existing_people:
+        if lp.user_id is not None and lp.user_id in users_by_id:
+            lp_with_user.append(lp)
+            if lp.entity_fingerprint:
+                by_fp[lp.entity_fingerprint] = users_by_id[lp.user_id]
+                lp_by_fp[lp.entity_fingerprint] = lp
+
+    def _lp_has_t1(lp: LabPerson) -> bool:
+        if lp.entity_fingerprint:
+            non_t1_fp = person_fp(
+                tier="T3" if lp.email else "T2",
+                login_name=None,
+                name=lp.name,
+                affiliation=lp.affiliation,
+                email=lp.email,
+            )
+            return lp.entity_fingerprint != non_t1_fp
+        u = users_by_id.get(lp.user_id) if lp.user_id else None
+        login_cand = str(
+            (u.login_name if u and u.login_name else None)
+            or getattr(lp, "login_name", None)
+            or ""
+        ).strip().lower()
+        return bool(login_cand and T1_CERT_RE.match(login_cand))
+
+    def _is_person_excluded(p: dict[str, object]) -> bool:
+        return (
+            p.get("exclude") is True
+            or p.get("excluded") is True
+            or p.get("include") is False
+            or p.get("imported") is False
+        )
+
+    incoming_name_counts: dict[str, int] = {}
+    incoming_name_aff_counts: dict[tuple[str, str], int] = {}
+    for p in people:
+        if _is_person_excluded(p):
+            continue
+        pn = norm(normalize_person_name(str(p.get("name") or "")))
+        pa = norm(str(p.get("affiliation") or "").strip())
+        if pn:
+            incoming_name_counts[pn] = incoming_name_counts.get(pn, 0) + 1
+            incoming_name_aff_counts[(pn, pa)] = (
+                incoming_name_aff_counts.get((pn, pa), 0) + 1
+            )
 
     used_logins: set[str] = set(RESERVED_LOGIN_NAMES) | set(by_login.keys())
     used_matched_user_ids: set[uuid.UUID] = set()
+
+    def _can_fallback_to_lp(
+        lp: LabPerson,
+        *,
+        inc_has_t1: bool,
+        inc_email: str | None,
+    ) -> bool:
+        if (
+            lp.user_id is None
+            or lp.user_id not in users_by_id
+            or lp.user_id in used_matched_user_ids
+        ):
+            return False
+        if inc_has_t1 and _lp_has_t1(lp):
+            return False
+        u = users_by_id.get(lp.user_id)
+        lp_em = clean_email(lp.email or (u.email if u else None))
+        return not (inc_email and lp_em and lp_em != inc_email)
 
     for idx, person in enumerate(people, start=1):
         person.setdefault("key", str(person.get("temp_id") or f"p{idx}"))
@@ -142,8 +205,21 @@ def assign_people_identities(
         person["role"] = "pi" if person.get("project_role") == "applicant" else "member"
         name = normalize_person_name(str(person.get("name") or ""))
         person["name"] = name
-        raw_cert = str(person.pop("cert", "") or person.get("student_id") or "")
-        person.pop("student_id", None)
+        popped_cert = str(person.pop("cert", "") or "").strip()
+        saved_student_id = str(person.pop("student_id", "") or "").strip()
+        prev_login = str(person.get("login_name") or "").strip()
+        if (
+            saved_student_id
+            and T1_CERT_RE.match(saved_student_id.lower())
+            and (
+                not popped_cert
+                or not T1_CERT_RE.match(popped_cert.lower())
+                or popped_cert == prev_login
+            )
+        ):
+            raw_cert = saved_student_id
+        else:
+            raw_cert = popped_cert or saved_student_id
         raw_email = str(person.get("email") or "") if person.get("email") else None
 
         tier, base_login, valid_email, item_warnings = decide_login_identity(
@@ -151,6 +227,8 @@ def assign_people_identities(
             cert=raw_cert,
             email=raw_email,
         )
+        if tier == "T1" and base_login:
+            person["student_id"] = base_login
         existing_warnings = [
             w
             for w in list(person.get("warnings") or [])  # type: ignore[call-overload]
@@ -171,11 +249,17 @@ def assign_people_identities(
             email=valid_email,
         )
 
+        is_excluded = _is_person_excluded(person)
         matched_user: User | None = None
+        matched_lp: LabPerson | None = None
         match_status = "new"
         if valid_email and valid_email in by_email:
             matched_user = by_email[valid_email]
             match_status = "existing"
+            matched_lp = next(
+                (lp for lp in lp_with_user if lp.user_id == matched_user.id),
+                None,
+            )
         elif (
             candidate_fp in by_fp
             and by_fp[candidate_fp].id not in used_matched_user_ids
@@ -187,24 +271,76 @@ def assign_people_identities(
         ):
             matched_user = by_fp[candidate_fp]
             match_status = "existing"
+            matched_lp = lp_by_fp.get(candidate_fp)
         elif tier == "T1" and base_login in by_login:
             candidate = by_login[base_login]
             if normalize_person_name(candidate.display_name) == name:
                 matched_user = candidate
                 match_status = "existing"
+                matched_lp = next(
+                    (lp for lp in lp_with_user if lp.user_id == candidate.id),
+                    None,
+                )
             else:
                 matched_user = candidate
                 match_status = "conflict"
                 if "LOGIN_CONFLICT" not in existing_warnings:
                     existing_warnings.append("LOGIN_CONFLICT")
+        elif not is_excluded:
+            norm_name = norm(name)
+            norm_aff = norm(affiliation)
+            inc_has_t1 = tier == "T1" and bool(base_login)
 
+            if norm_name and incoming_name_aff_counts.get((norm_name, norm_aff), 0) == 1:
+                same_name_aff = [
+                    lp
+                    for lp in all_existing_people
+                    if norm(normalize_person_name(lp.name)) == norm_name
+                    and norm(lp.affiliation) == norm_aff
+                ]
+                compat_aff = [
+                    lp
+                    for lp in same_name_aff
+                    if _can_fallback_to_lp(
+                        lp,
+                        inc_has_t1=inc_has_t1,
+                        inc_email=valid_email,
+                    )
+                ]
+                if len(compat_aff) == 1 and len(same_name_aff) == 1:
+                    matched_lp = compat_aff[0]
+                    matched_user = users_by_id[matched_lp.user_id]  # type: ignore[index]
+                    match_status = "existing"
+                elif not same_name_aff and incoming_name_counts.get(norm_name, 0) == 1:
+                    same_name_only = [
+                        lp
+                        for lp in all_existing_people
+                        if norm(normalize_person_name(lp.name)) == norm_name
+                    ]
+                    compat_name = [
+                        lp
+                        for lp in same_name_only
+                        if _can_fallback_to_lp(
+                            lp,
+                            inc_has_t1=inc_has_t1,
+                            inc_email=valid_email,
+                        )
+                        and (not norm_aff or not norm(lp.affiliation))
+                    ]
+                    if len(compat_name) == 1 and len(same_name_only) == 1:
+                        matched_lp = compat_name[0]
+                        matched_user = users_by_id[matched_lp.user_id]  # type: ignore[index]
+                        match_status = "existing"
+
+        target_used_logins = set(used_logins) if is_excluded else used_logins
         if match_status == "existing" and matched_user is not None:
-            used_matched_user_ids.add(matched_user.id)
+            if not is_excluded:
+                used_matched_user_ids.add(matched_user.id)
             if matched_user.login_name:
                 allocated = matched_user.login_name
-                used_logins.add(allocated.lower())
+                target_used_logins.add(allocated.lower())
             else:
-                allocated = _allocate_unique_login(base_login, used_logins, existing_warnings)
+                allocated = _allocate_unique_login(base_login, target_used_logins, existing_warnings)
             person["login_name"] = allocated
             person["match"] = {"status": "existing", "user_id": str(matched_user.id)}
         elif match_status == "conflict" and matched_user is not None:
@@ -215,20 +351,32 @@ def assign_people_identities(
                 person["login_name"] = base_login
             elif tier == "T1":
                 person["login_name"] = base_login
-                used_logins.add(base_login)
+                target_used_logins.add(base_login)
             else:
-                allocated = _allocate_unique_login(base_login, used_logins, existing_warnings)
+                allocated = _allocate_unique_login(base_login, target_used_logins, existing_warnings)
                 person["login_name"] = allocated
             person["match"] = {"status": "new"}
 
         person["warnings"] = existing_warnings
-        person["fingerprint"] = person_fp(
-            tier=tier,
-            login_name=str(person.get("login_name") or ""),
-            name=name,
-            affiliation=affiliation,
-            email=valid_email,
-        )
+        if (
+            match_status == "existing"
+            and matched_lp is not None
+            and matched_lp.entity_fingerprint
+            and not (tier == "T1" and base_login and not _lp_has_t1(matched_lp))
+        ):
+            person["fingerprint"] = matched_lp.entity_fingerprint
+        else:
+            person["fingerprint"] = person_fp(
+                tier=tier,
+                login_name=(
+                    base_login
+                    if (tier == "T1" and base_login)
+                    else str(person.get("login_name") or "")
+                ),
+                name=name,
+                affiliation=affiliation,
+                email=valid_email,
+            )
 
 
 def _allocate_unique_login(

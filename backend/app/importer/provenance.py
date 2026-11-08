@@ -23,6 +23,7 @@ from app.importer.fingerprint import (
     project_fp,
 )
 from app.importer.people import (
+    T1_CERT_RE,
     assign_people_identities,
     clean_email,
     normalize_person_name,
@@ -718,12 +719,13 @@ def _extract_person_incoming(
 ) -> tuple[str, str, dict[str, object]]:
     pname = normalize_person_name(str(person_dict.get("name") or ""))
     p_email = clean_email(str(person_dict.get("email") or ""))
+    p_sid = str(person_dict.get("student_id") or "").strip().lower() or None
     p_login = str(person_dict.get("login_name") or "").strip().lower() or None
     p_tier = str(person_dict.get("tier") or "T2")
     p_aff = str(person_dict.get("affiliation") or "").strip() or None
     fp_val = str(person_dict.get("fingerprint") or "") or person_fp(
         tier=p_tier,
-        login_name=p_login,
+        login_name=p_sid if (p_tier == "T1" and p_sid) else p_login,
         name=pname,
         affiliation=p_aff,
         email=p_email,
@@ -898,7 +900,7 @@ def _assign_people_preserving_explicit_links(
     saved_matches: list[dict[str, Any] | None] = []
     for p in ppl_list:
         if p.get("tier") == "T1" and not p.get("cert"):
-            p["cert"] = p.get("login_name")
+            p["cert"] = p.get("student_id") or p.get("login_name")
         rm = p.get("match")
         if (
             isinstance(rm, dict)
@@ -913,9 +915,40 @@ def _assign_people_preserving_explicit_links(
         existing_users=existing_users,
         existing_people=existing_people,
     )
+    lp_by_uid = {lp.user_id: lp for lp in existing_people if lp.user_id is not None}
     for p, sm in zip(ppl_list, saved_matches, strict=False):
         if sm is not None:
             p["match"] = sm
+            try:
+                uid = uuid.UUID(str(sm["user_id"]))
+                target_lp = lp_by_uid.get(uid)
+                p_tier_ov = str(p.get("tier") or "T2")
+                p_sid_ov = str(p.get("student_id") or "").strip().lower()
+                if target_lp is not None and target_lp.entity_fingerprint:
+                    target_non_t1_fp = person_fp(
+                        tier="T3" if target_lp.email else "T2",
+                        login_name=None,
+                        name=target_lp.name,
+                        affiliation=target_lp.affiliation,
+                        email=target_lp.email,
+                    )
+                    if (
+                        p_tier_ov == "T1"
+                        and p_sid_ov
+                        and T1_CERT_RE.match(p_sid_ov)
+                        and target_lp.entity_fingerprint == target_non_t1_fp
+                    ):
+                        p["fingerprint"] = person_fp(
+                            tier="T1",
+                            login_name=p_sid_ov,
+                            name=target_lp.name,
+                            affiliation=target_lp.affiliation,
+                            email=target_lp.email,
+                        )
+                    else:
+                        p["fingerprint"] = target_lp.entity_fingerprint
+            except ValueError:
+                pass
             w_list = p.get("warnings")
             if isinstance(w_list, list):
                 p["warnings"] = [
@@ -970,7 +1003,11 @@ def _match_existing_person(
             fp_val != inc_non_t1_fp
         )
 
-        def _can_fallback_to_person(p: LabPerson) -> bool:
+        def _can_fallback_to_person(
+            p: LabPerson,
+            *,
+            allow_affiliation_change: bool = True,
+        ) -> bool:
             p_non_t1_fp = person_fp(
                 tier="T3" if p.email else "T2",
                 login_name=None,
@@ -979,7 +1016,15 @@ def _match_existing_person(
                 email=p.email,
             )
             ex_has_t1 = p.entity_fingerprint != p_non_t1_fp
-            if inc_has_t1 and (ex_has_t1 or p.user_id is not None):
+            if inc_has_t1 and ex_has_t1:
+                return False
+            p_aff = norm(p.affiliation or "")
+            if (
+                (not allow_affiliation_change or inc_has_t1 or ex_has_t1)
+                and norm_aff
+                and p_aff
+                and norm_aff != p_aff
+            ):
                 return False
             if (
                 inc_email
@@ -989,22 +1034,38 @@ def _match_existing_person(
                 return False
             return True
 
-        same_name_aff = [
+        all_same_name_aff = [
             p
             for p in existing_people
             if norm(p.name) == norm_name
             and norm(p.affiliation or "") == norm_aff
-            and _can_fallback_to_person(p)
         ]
-        if len(same_name_aff) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
+        same_name_aff = [
+            p for p in all_same_name_aff if _can_fallback_to_person(p)
+        ]
+        if (
+            len(same_name_aff) == 1
+            and len(all_same_name_aff) == 1
+            and incoming_name_counts.get(norm_name, 0) == 1
+        ):
             return same_name_aff[0]
 
+        all_same_name = [
+            p for p in existing_people if norm(p.name) == norm_name
+        ]
         same_name = [
             p
-            for p in existing_people
-            if norm(p.name) == norm_name and _can_fallback_to_person(p)
+            for p in all_same_name
+            if _can_fallback_to_person(
+                p,
+                allow_affiliation_change=not (inc_has_t1 or p.user_id is not None),
+            )
         ]
-        if len(same_name) == 1 and incoming_name_counts.get(norm_name, 0) == 1:
+        if (
+            len(same_name) == 1
+            and len(all_same_name) == 1
+            and incoming_name_counts.get(norm_name, 0) == 1
+        ):
             return same_name[0]
 
     return None
@@ -2311,7 +2372,6 @@ async def execute_merge(
             )
             if (
                 inc_has_t1
-                and matched_p.user_id is None
                 and matched_p.entity_fingerprint == ex_non_t1_fp
                 and matched_p.entity_fingerprint != fp_val
                 and fp_val not in used_person_fps
