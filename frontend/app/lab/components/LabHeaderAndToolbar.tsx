@@ -50,13 +50,7 @@ export function LabHeaderAndToolbar({ ctx }: { ctx: LabPageContext }) {
     reindexing,
     basketMissingIds,
     setBasketMissingIds,
-    setWizardOpen,
-    setWizardStep,
-    setUploadFile,
-    setWizardError,
-    setImportJob,
-    setProvisionResult,
-    setHasSavedCredentials,
+    openColdStartWizard,
     t,
     currentTabBasketCandidates,
     currentTabListLength,
@@ -119,24 +113,31 @@ export function LabHeaderAndToolbar({ ctx }: { ctx: LabPageContext }) {
                 >
                   {t.importsNav}
                 </Link>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setWizardError("");
-                    setWizardStep(1);
-                    setUploadFile(null);
-                    setImportJob(null);
-                    setProvisionResult(null);
-                    setHasSavedCredentials(false);
-                    setWizardOpen(true);
-                  }}
-                >
+                <Button size="sm" onClick={openColdStartWizard}>
                   {t.importProposalBtn}
                 </Button>
               </>
             ) : null}
           </div>
         </div>
+
+        {me?.role === "admin" && overview?.counts.people === 0 ? (
+          <div className="flex flex-col justify-between gap-4 rounded-xl border border-[var(--accent-warm)]/50 bg-[var(--accent-warm)]/10 p-4 sm:flex-row sm:items-center">
+            <div className="space-y-1">
+              <h2 className="font-display text-[15px] font-semibold text-foreground">
+                {t.coldStartCardTitle}
+              </h2>
+              <p className="text-[13px] leading-relaxed text-muted-foreground">
+                {t.coldStartCardBody}
+              </p>
+            </div>
+            <div className="shrink-0">
+              <Button size="sm" onClick={openColdStartWizard}>
+                {t.coldStartCardCta}
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         {error ? (
           <div

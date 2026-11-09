@@ -267,6 +267,60 @@ const copy = {
     selectOnlyOngoingProjectsBtn: "仅选在研项目",
     selectOnlyRecentAchievementsBtn: "仅选近5年成果",
     addAllToBasketBtn: "全选加入素材篮",
+    bootstrapTitle: "首次启动：创建课题组管理员账号",
+    bootstrapSubtitle:
+      "当前系统尚无管理员账号。完成初始化后将直接进入课题组资料库引导多本子冷启动。",
+    bootstrapDisplayNameLabel: "真实姓名",
+    bootstrapDisplayNameHint:
+      "请与申报书中项目负责人/成员姓名保持一致，便于自动关联本人科研档案与电子签名",
+    bootstrapEmailLabel: "管理员邮箱",
+    bootstrapStaffNoLabel: "工号 / 教工号（选填，6~12 位字母或数字）",
+    bootstrapStaffNoHint:
+      "填写后作为登录名，并在导入申报书时与 T1 证件号自动对齐关联",
+    bootstrapPasswordLabel: "登录密码",
+    bootstrapPasswordHint: "至少 12 位且包含至少 3 类字符（大小写字母、数字、特殊符号）",
+    bootstrapSetupTokenLabel: "系统初始化令牌 (Setup Token)",
+    bootstrapSetupTokenHint: "请输入服务端配置的 LAB_BOOTSTRAP_TOKEN 初始化密钥",
+    bootstrapSubmitBtn: "创建管理员并开始课题组冷启动",
+    bootstrapSubmitting: "正在初始化管理员账号…",
+    action_bootstrap_admin: "初始化首个管理员",
+    action_import_batch_resolve: "多本子联合消歧预览",
+    action_import_batch_provision: "多本子批量冷启动开号",
+    coldStartCardTitle: "欢迎使用课题组资料库：上传 2~3 份项目申报书一键完成全组冷启动",
+    coldStartCardBody:
+      "建议一次上传 2~3 份近年项目申报书（.doc / .docx，优先选择成员表包含学号/工号、个人简历、电子签名及近五年成果最全的本子）。系统将自动跨本子互补提取学号生成 T1 登录名、去重合并团队成员/项目/成果/设备，并一键生成全组通知名单。",
+    coldStartCardCta: "上传 2~3 份申报书开始冷启动",
+    wizardStep1Title: "步骤 1 / 4：上传 2~3 份项目申报书 (.doc / .docx) 联合解析",
+    wizardStep1Desc:
+      "支持同时选择 1~5 份申报书（单文件上限 20 MB）。系统将在内存中物理剥离全部身份证号与手机号，并跨本子提取学工号与电子签名。",
+    wizardStep1Guidance:
+      "建议一次上传 2~3 份近年项目申报书（优先选择成员表包含学号/工号、个人简历、电子签名及近五年成果最全的本子）。系统将自动跨本子提取学号补全登录名、合并去重并生成全组账号。",
+    wizardStep1SingleFileTip:
+      "提示：当前仅选择了 1 份申报书。建议同时上传 2~3 份申报书以提升学号覆盖率与简历成果完整度（单份本子也可正常继续）。",
+    wizardStep2Title: "步骤 2 / 4：核对跨本子学号补全与账号预览",
+    wizardStep2Desc:
+      "核对跨本子身份对齐质量、三级登录标识（T1 学工号 / T2 姓名全拼 / T3 姓名全拼+邮箱）及电子签名。",
+    wizardStep3Title: "步骤 3 / 4：一键开号完成 · 复制全组群发名单",
+    wizardStep3Desc:
+      "全组去重账号与基准资料库已落盘，并已同步写入 RAG 知识库。",
+    wizardStep4Title: "步骤 4 / 4：跨本子成果与简历互补合并",
+    wizardStep4Desc:
+      "按本子基准时间 (as_of_time) 自动互补合并其余申报书的新增项目、前期成果与空白简历字段。",
+    qualityPanelTitle: "跨本子联合身份对齐与学号覆盖质量",
+    qualityPeopleTotal: "跨本子去重总人数",
+    qualityT1Coverage: "T1 学工号覆盖率",
+    qualityInjectedStudentIds: "跨本子自动补全学工号",
+    qualityInjectedEmails: "跨本子自动补全邮箱",
+    qualityHomonymWarning: "同名成员碰撞提醒",
+    qualitySameAsOfWarning: "相同基准日期 (as_of_time) 提醒",
+    selfCandidateLabel: "关联为我本人（管理员）",
+    selfCandidateCheckbox:
+      "检测到申报书中的「{name}」与您的管理员姓名一致，是否直接关联为您本人的科研档案与电子签名？",
+    siblingStudentIdBadge: "跨本子补全学工号",
+    siblingEmailBadge: "跨本子补全邮箱",
+    continueToStep4MergeBtn: "继续下一步：执行跨本子成果与简历互补合并",
+    step4MergeProgressLabel: "跨本子互补合并进度",
+    step4MergeDoneSummary: "已完成全部跨本子成果与简历互补合并，资料库已刷新。",
   },
   en: {
     brand: "Lab Agent",
@@ -538,6 +592,63 @@ const copy = {
     selectOnlyOngoingProjectsBtn: "Select Ongoing Projects",
     selectOnlyRecentAchievementsBtn: "Select Last 5-Year Achievements",
     addAllToBasketBtn: "Select All & Add to Basket",
+    bootstrapTitle: "First-Run Setup: Create Lab Administrator Account",
+    bootstrapSubtitle:
+      "No administrator account exists yet. After setup, you will be guided to cold-start your lab assets from grant proposals.",
+    bootstrapDisplayNameLabel: "Full Name",
+    bootstrapDisplayNameHint:
+      "Match your name in grant proposals so your profile and electronic signature link automatically",
+    bootstrapEmailLabel: "Administrator Email",
+    bootstrapStaffNoLabel: "Staff / Faculty ID (Optional, 6–12 alphanumeric chars)",
+    bootstrapStaffNoHint:
+      "Used as your login name and auto-links with T1 IDs in proposals",
+    bootstrapPasswordLabel: "Password",
+    bootstrapPasswordHint:
+      "At least 12 characters across 3+ character classes (uppercase, lowercase, digits, symbols)",
+    bootstrapSetupTokenLabel: "Setup Token",
+    bootstrapSetupTokenHint: "Enter the server-configured LAB_BOOTSTRAP_TOKEN",
+    bootstrapSubmitBtn: "Create Admin & Start Cold-Start",
+    bootstrapSubmitting: "Initializing administrator account…",
+    action_bootstrap_admin: "Bootstrap first admin",
+    action_import_batch_resolve: "Batch import identity resolution",
+    action_import_batch_provision: "Batch import provisioning",
+    coldStartCardTitle:
+      "Welcome to Lab Assets: Upload 2–3 Grant Proposals for One-Click Cold-Start",
+    coldStartCardBody:
+      "We recommend uploading 2–3 recent project proposals (.doc / .docx) that include student/staff IDs, member bios, electronic signatures, and recent achievements. The system will cross-supplement student IDs for T1 login names, deduplicate members/projects/achievements/facilities, and generate your lab roster.",
+    coldStartCardCta: "Upload 2–3 Proposals to Cold-Start",
+    wizardStep1Title: "Step 1 / 4: Upload 2–3 Grant Proposals (.doc / .docx)",
+    wizardStep1Desc:
+      "Select 1–5 proposals (max 20 MB each). National IDs and phone numbers are scrubbed in memory while student/staff IDs and electronic signatures are extracted across proposals.",
+    wizardStep1Guidance:
+      "We recommend uploading 2–3 recent grant proposals (preferring those with student/staff IDs, bios, signatures, and 5-year achievements). The system will cross-supplement student IDs, deduplicate records, and provision lab accounts.",
+    wizardStep1SingleFileTip:
+      "Tip: Only 1 proposal is selected. Uploading 2–3 proposals improves student ID coverage and bio/achievement completeness (you may still continue with 1 file).",
+    wizardStep2Title: "Step 2 / 4: Review Cross-Proposal Student IDs & Account Preview",
+    wizardStep2Desc:
+      "Review cross-proposal identity alignment quality, T1/T2/T3 login names, and extracted signatures.",
+    wizardStep3Title: "Step 3 / 4: Accounts Provisioned · Copy Lab Roster",
+    wizardStep3Desc:
+      "Deduplicated lab accounts and base assets have been saved and synced to the RAG knowledge base.",
+    wizardStep4Title: "Step 4 / 4: Cross-Proposal Achievement & Bio Merge",
+    wizardStep4Desc:
+      "Automatically merge complementary projects, achievements, and blank bio fields across proposals by as_of_time.",
+    qualityPanelTitle: "Cross-Proposal Identity Alignment & Student ID Coverage",
+    qualityPeopleTotal: "Unique Members",
+    qualityT1Coverage: "T1 Student/Staff ID Coverage",
+    qualityInjectedStudentIds: "Cross-Supplemented Student IDs",
+    qualityInjectedEmails: "Cross-Supplemented Emails",
+    qualityHomonymWarning: "Homonym Collision Warning",
+    qualitySameAsOfWarning: "Same Proposal Date (as_of_time) Notice",
+    selfCandidateLabel: "This is me (Admin)",
+    selfCandidateCheckbox:
+      "Detected \"{name}\" in proposals matching your admin name. Link directly to your personal profile and electronic signature?",
+    siblingStudentIdBadge: "Student ID from sibling proposal",
+    siblingEmailBadge: "Email from sibling proposal",
+    continueToStep4MergeBtn: "Next: Merge Complementary Achievements & Bios",
+    step4MergeProgressLabel: "Cross-Proposal Merge Progress",
+    step4MergeDoneSummary:
+      "All cross-proposal achievements and bios have been merged and lab assets refreshed.",
   },
 } as const;
 

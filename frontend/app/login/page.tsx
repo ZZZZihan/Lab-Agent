@@ -1,14 +1,21 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, login } from "@/lib/api";
+import {
+  ApiError,
+  getBootstrapStatus,
+  login,
+  type BootstrapStatusResponse,
+} from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+
+import { BootstrapAdminForm } from "./BootstrapAdminForm";
 
 const DEMOS = [
   ["admin@lab.local", "沈昭", "admin", "LabAgent-Demo-2026-Admin"],
@@ -25,6 +32,32 @@ export default function LoginPage() {
   const [password, setPassword] = useState(showHints ? "LabAgent-Demo-2026-Member" : "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const submittingRef = useRef(false);
+  const [bootstrapStatus, setBootstrapStatus] =
+    useState<BootstrapStatusResponse | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBootstrapStatus()
+      .then((res) => {
+        if (!cancelled) {
+          setBootstrapStatus(res);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBootstrapStatus({
+            needs_bootstrap: false,
+            setup_token_required: false,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const needsBootstrap = bootstrapStatus?.needs_bootstrap === true;
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col justify-center px-4 py-10">
@@ -38,64 +71,79 @@ export default function LoginPage() {
           {t.language}
         </Button>
       </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>{t.login}</CardTitle>
-          <CardDescription>{t.tagline}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form
-            className="grid gap-3"
-            onSubmit={async (event) => {
-              event.preventDefault();
-              setPending(true);
-              setError("");
-              try {
-                await login(identifier, password);
-                router.replace("/chat");
-              } catch (err) {
-                if (err instanceof ApiError) {
-                  if (err.code === "ambiguous_name") {
-                    setError(t.ambiguousNameError || err.message);
-                  } else if (err.code === "initial_password_expired") {
-                    setError(t.initialPasswordExpiredError || err.message);
+      {needsBootstrap ? (
+        <BootstrapAdminForm
+          setupTokenRequired={Boolean(bootstrapStatus?.setup_token_required)}
+          onBootstrapClosed={() =>
+            setBootstrapStatus({
+              needs_bootstrap: false,
+              setup_token_required: false,
+            })
+          }
+        />
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>{t.login}</CardTitle>
+            <CardDescription>{t.tagline}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form
+              className="grid gap-3"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (submittingRef.current || pending) return;
+                submittingRef.current = true;
+                setPending(true);
+                setError("");
+                try {
+                  await login(identifier, password);
+                  router.replace("/chat");
+                } catch (err) {
+                  if (err instanceof ApiError) {
+                    if (err.code === "ambiguous_name") {
+                      setError(t.ambiguousNameError || err.message);
+                    } else if (err.code === "initial_password_expired") {
+                      setError(t.initialPasswordExpiredError || err.message);
+                    } else {
+                      setError(err.message);
+                    }
                   } else {
-                    setError(err.message);
+                    setError(t.loginError);
                   }
-                } else {
-                  setError(t.loginError);
+                } finally {
+                  submittingRef.current = false;
+                  setPending(false);
                 }
-              } finally {
-                setPending(false);
-              }
-            }}
-          >
-            <Label htmlFor="identifier">{t.loginIdentifier}</Label>
-            <Input
-              id="identifier"
-              type="text"
-              autoComplete="username"
-              placeholder={t.loginIdentifierHint}
-              value={identifier}
-              onChange={(event) => setIdentifier(event.target.value)}
-              required
-            />
-            <Label htmlFor="password">{t.password}</Label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
-            <Button type="submit" disabled={pending}>
-              {pending ? t.signingIn : t.login}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-      {showHints ? (
+              }}
+            >
+              <Label htmlFor="identifier">{t.loginIdentifier}</Label>
+              <Input
+                id="identifier"
+                type="text"
+                autoComplete="username"
+                placeholder={t.loginIdentifierHint}
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                required
+              />
+              <Label htmlFor="password">{t.password}</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+              {error ? <p className="text-sm text-destructive">{error}</p> : null}
+              <Button type="submit" disabled={pending}>
+                {pending ? t.signingIn : t.login}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+      {showHints && !needsBootstrap ? (
         <div className="mt-4 rounded-xl border border-border bg-card p-4 text-sm">
           <p className="font-medium">{t.demoTitle}</p>
           <p className="mt-1 text-muted-foreground">{t.demoNote}</p>
