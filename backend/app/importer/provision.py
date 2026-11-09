@@ -372,11 +372,17 @@ async def provision_import_job(
                 if isinstance(cur_match, dict) and cur_match.get("status") == "conflict":
                     person["match"] = {"status": "new"}
             if not is_own_existing_login:
+                fp_tier = (
+                    "T1"
+                    if "BATCH_NAME_COLLISION" in warn_list
+                    else str(person.get("tier") or "T2")
+                )
                 person["fingerprint"] = person_fp(
-                    tier=str(person.get("tier") or "T2"),
+                    tier=fp_tier,
                     login_name=custom_login,
                     name=normalize_person_name(str(person.get("name") or "")),
                     affiliation=str(person.get("affiliation") or "").strip() or None,
+                    email=str(person.get("email") or "").strip().lower() or None,
                 )
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
@@ -387,12 +393,29 @@ async def provision_import_job(
         raw_match = person.get("match")
         match_info: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         match_status = str(match_info.get("status") or "new")
+        has_explicit_collision_decision = bool(
+            ov
+            and (
+                ov.link_user_id is not None
+                or (ov.login_name is not None and ov.login_name.strip())
+            )
+        )
 
         if match_status == "conflict" or "LOGIN_CONFLICT" in p_warnings:
             raise ProvisionError(
                 422,
                 "login_conflict_unresolved",
                 f"人员 {pkey} 存在学工号冲突，请排除或修改登录名",
+            )
+        if (
+            "BATCH_NAME_COLLISION" in p_warnings
+            and str(person.get("tier") or "T2") == "T2"
+            and not has_explicit_collision_decision
+        ):
+            raise ProvisionError(
+                422,
+                "login_conflict_unresolved",
+                f"人员 {pkey} 存在同名碰撞且缺少学工号或邮箱，请排除、关联已有账号或修改登录名",
             )
         if match_status == "new":
             login_candidate = str(person.get("login_name") or "").strip().lower()

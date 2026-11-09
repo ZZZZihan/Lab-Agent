@@ -10,6 +10,7 @@ from typing import Any
 
 from app.importer.fingerprint import norm
 from app.importer.people import (
+    RESERVED_LOGIN_NAMES,
     T1_CERT_RE,
     assign_people_identities,
     clean_email,
@@ -462,10 +463,9 @@ def resolve_batch_identities(
             (cid, cl, cluster_sid, cluster_sid_source, cluster_email, cluster_email_source)
         )
 
-    # Step 4: Run assign_people_identities on each job and update job.preview
+    # Step 4: Run assign_people_identities on each job and coordinate cross-cluster logins
     for job in jobs:
         ppl_list = job_people_lists[job.id]
-        preview = job_previews[job.id]
         for p in ppl_list:
             w_list = [str(w) for w in (p.get("warnings") or [])]
             if p.get("student_id") or (
@@ -479,7 +479,63 @@ def resolve_batch_identities(
             existing_users=users,
             existing_people=people_db,
         )
-        job.preview = {**preview, "people": ppl_list}
+
+    batch_used_logins: set[str] = set(RESERVED_LOGIN_NAMES) | {
+        u.login_name.lower()
+        for u in users
+        if u.login_name is not None and u.login_name.strip()
+    }
+    for _cid, cl, cluster_sid, _sid_src, _cl_em, _em_src in cluster_meta_list:
+        if cluster_sid:
+            batch_used_logins.add(cluster_sid.lower())
+        for occ in cl:
+            rm = occ.person.get("match")
+            if isinstance(rm, dict) and rm.get("status") == "existing":
+                existing_login = str(occ.person.get("login_name") or "").strip().lower()
+                if existing_login:
+                    batch_used_logins.add(existing_login)
+
+    for _cid, cl, cluster_sid, _sid_src, _cl_em, _em_src in cluster_meta_list:
+        if cluster_sid:
+            continue
+        has_existing_or_conflict = any(
+            isinstance(occ.person.get("match"), dict)
+            and occ.person["match"].get("status") in ("existing", "conflict")
+            for occ in cl
+        )
+        if has_existing_or_conflict:
+            continue
+        first_p = cl[0].person
+        first_warnings = [str(w) for w in (first_p.get("warnings") or [])]
+        if "LOGIN_NAME_REQUIRED" in first_warnings:
+            continue
+        base_cand = name_to_pinyin(cl[0].name) or str(first_p.get("login_name") or "").strip().lower()
+        if not base_cand:
+            continue
+        if base_cand not in batch_used_logins:
+            allocated = base_cand
+            batch_used_logins.add(allocated)
+            was_suffixed = False
+        else:
+            suffix = 2
+            while f"{base_cand}{suffix}" in batch_used_logins:
+                suffix += 1
+            allocated = f"{base_cand}{suffix}"
+            batch_used_logins.add(allocated)
+            was_suffixed = True
+        for occ in cl:
+            occ.person["login_name"] = allocated
+            occ_w = [
+                str(w)
+                for w in (occ.person.get("warnings") or [])
+                if str(w) != "LOGIN_NAME_SUFFIXED"
+            ]
+            if was_suffixed and "LOGIN_NAME_SUFFIXED" not in occ_w:
+                occ_w.append("LOGIN_NAME_SUFFIXED")
+            occ.person["warnings"] = occ_w
+
+    for job in jobs:
+        job.preview = {**job_previews[job.id], "people": job_people_lists[job.id]}
 
     # Step 5: Build cluster descriptors and quality metrics
     clusters_out: list[dict[str, Any]] = []

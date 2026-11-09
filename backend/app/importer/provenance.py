@@ -902,12 +902,15 @@ def _assign_people_preserving_explicit_links(
         if p.get("tier") == "T1" and not p.get("cert"):
             p["cert"] = p.get("student_id") or p.get("login_name")
         rm = p.get("match")
+        prov_uid = p.get("provisioned_user_id")
         if (
             isinstance(rm, dict)
-            and rm.get("status") == "existing"
+            and rm.get("status") in ("existing", "new")
             and rm.get("user_id")
         ):
             saved_matches.append(dict(rm))
+        elif prov_uid:
+            saved_matches.append({"status": "existing", "user_id": str(prov_uid)})
         else:
             saved_matches.append(None)
     assign_people_identities(
@@ -978,11 +981,30 @@ def _match_existing_person(
         except ValueError:
             pass
 
+    p_warnings = [
+        str(w)
+        for w in (person_dict.get("warnings") or [])
+        if isinstance(w, str)
+    ]
+    has_batch_collision = "BATCH_NAME_COLLISION" in p_warnings
+    p_email = fields.get("email")
+    inc_email = p_email if isinstance(p_email, str) and p_email else None
+    inc_non_t1_fp = person_fp(
+        tier="T3" if inc_email else "T2",
+        login_name=None,
+        name=pname,
+        affiliation=str(fields.get("affiliation") or "") or None,
+        email=inc_email,
+    )
+
     by_fp = {p.entity_fingerprint: p for p in existing_people}
-    if fp_val in by_fp:
+    if fp_val in by_fp and not (
+        has_batch_collision
+        and str(person_dict.get("tier") or "T2") == "T2"
+        and fp_val == inc_non_t1_fp
+    ):
         return by_fp[fp_val]
 
-    p_email = fields.get("email")
     if isinstance(p_email, str) and p_email:
         for p in existing_people:
             if p.email and p.email.strip().lower() == p_email.lower():
@@ -990,15 +1012,7 @@ def _match_existing_person(
 
     norm_name = norm(pname)
     norm_aff = norm(str(fields.get("affiliation") or ""))
-    if norm_name:
-        inc_email = p_email if isinstance(p_email, str) and p_email else None
-        inc_non_t1_fp = person_fp(
-            tier="T3" if inc_email else "T2",
-            login_name=None,
-            name=pname,
-            affiliation=str(fields.get("affiliation") or "") or None,
-            email=inc_email,
-        )
+    if norm_name and not has_batch_collision:
         inc_has_t1 = (str(person_dict.get("tier") or "") == "T1") or (
             fp_val != inc_non_t1_fp
         )

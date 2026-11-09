@@ -413,3 +413,42 @@ async def test_bootstrap_validation_and_identity_conflicts(client: AsyncClient) 
     )
     assert staff_taken_res.status_code == 409
     assert staff_taken_res.json()["error"]["code"] == "identity_taken"
+
+
+async def test_bootstrap_rate_limit_uses_per_ip_bucket_not_shared_account(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rate limiting on bootstrap endpoints must be per-client IP, not a shared global account bucket."""
+    import fakeredis.aioredis
+    from app.config import get_settings
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        await session.execute(delete(User).where(User.role == "admin"))
+        await session.commit()
+
+    settings = get_settings()
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(app.state.limiter, "redis", fake_redis)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "internal_proxy_secret", SecretStr("proxy-secret-test"))
+    monkeypatch.setattr(settings, "login_account_rate_limit", 2)
+    monkeypatch.setattr(settings, "login_ip_rate_limit", 5)
+
+    try:
+        # 12 requests across 4 distinct client IPs (3 each <= ip limit 5, total 12 > account limit 2)
+        for idx in range(12):
+            ip_addr = f"203.0.113.{(idx % 4) + 10}"
+            res = await client.get(
+                "/api/v1/auth/bootstrap-status",
+                headers={
+                    "x-internal-proxy-secret": "proxy-secret-test",
+                    "x-client-ip": ip_addr,
+                },
+            )
+            assert res.status_code == 200, res.text
+            assert res.json()["needs_bootstrap"] is True
+    finally:
+        await fake_redis.aclose()
+

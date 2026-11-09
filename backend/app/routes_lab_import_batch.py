@@ -358,6 +358,8 @@ async def batch_provision_imports(
     sorted_jobs = [entry[2] for entry in sorted_entries]
 
     cluster_by_job_person: dict[tuple[uuid.UUID, str], str] = {}
+    cluster_members_by_cid: dict[str, list[tuple[uuid.UUID, str]]] = {}
+    cluster_custom_login_by_cid: dict[str, str | None] = {}
     for cl in resolved["clusters"]:
         cid = str(cl.get("cluster_id") or "")
         if not cid:
@@ -402,8 +404,14 @@ async def batch_provision_imports(
                 "login_name_invalid",
                 f"同一人员聚类 ({cid}) 在不同本子中设置了冲突的自定义登录名",
             )
-        if len(cluster_custom_logins) == 1:
-            shared_login = next(iter(cluster_custom_logins))
+        shared_login = (
+            next(iter(cluster_custom_logins))
+            if len(cluster_custom_logins) == 1
+            else None
+        )
+        cluster_members_by_cid[cid] = cluster_members_keys
+        cluster_custom_login_by_cid[cid] = shared_login
+        if shared_login is not None:
             for m_jid, m_key in cluster_members_keys:
                 m_cfg = items_by_job_id[m_jid]
                 m_ov = next(
@@ -416,6 +424,51 @@ async def batch_provision_imports(
                     m_cfg.people.append(
                         PersonOverride(key=m_key, login_name=shared_login)
                     )
+
+    jobs_by_id = {j.id: j for j in jobs}
+    for cl in resolved["clusters"]:
+        cid = str(cl.get("cluster_id") or "")
+        if not cid or str(cl.get("tier") or "T2") != "T2":
+            continue
+        custom_login = cluster_custom_login_by_cid.get(cid)
+        if not custom_login:
+            continue
+        cl_norm_name = norm(normalize_person_name(str(cl.get("name") or "")))
+        if not cl_norm_name:
+            continue
+        target_cl = next(
+            (
+                other
+                for other in resolved["clusters"]
+                if str(other.get("cluster_id") or "") not in ("", cid)
+                and norm(normalize_person_name(str(other.get("name") or ""))) == cl_norm_name
+                and (
+                    (
+                        cluster_custom_login_by_cid.get(str(other.get("cluster_id") or ""))
+                        or str(other.get("login_name") or "").strip().lower()
+                    )
+                    == custom_login
+                    or str(other.get("student_id") or "").strip().lower() == custom_login
+                )
+            ),
+            None,
+        )
+        if target_cl is not None:
+            target_cid = str(target_cl["cluster_id"])
+            target_sid = str(target_cl.get("student_id") or "").strip().lower() or None
+            for m_jid, m_key in cluster_members_by_cid.get(cid, []):
+                cluster_by_job_person[(m_jid, m_key)] = target_cid
+                if target_sid and m_jid in jobs_by_id:
+                    j_obj = jobs_by_id[m_jid]
+                    j_prev = dict(j_obj.preview or {})
+                    j_ppl = j_prev.get("people")
+                    if isinstance(j_ppl, list):
+                        for p in j_ppl:
+                            if isinstance(p, dict) and str(p.get("key") or p.get("temp_id") or "").strip() == m_key:
+                                p["student_id"] = target_sid
+                                p["cert"] = target_sid
+                                p["tier"] = "T1"
+                        j_obj.preview = j_prev
 
     cluster_resolved_user_id: dict[str, uuid.UUID] = {}
     job_results: list[dict[str, Any]] = []

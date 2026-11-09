@@ -91,15 +91,19 @@ async def bootstrap_status(
 ) -> dict[str, object]:
     settings = _settings(request)
     ip = _client_ip(request)
-    limited_bucket = await request.app.state.limiter.check_login(ip, "bootstrap-status")
-    if limited_bucket is not None:
+    allowed = await request.app.state.limiter.allow(
+        f"bootstrap:status:ip:{ip or 'unknown'}",
+        settings.login_ip_rate_limit,
+        settings.login_ip_rate_window_seconds,
+    )
+    if not allowed:
         await write_audit(
             settings=settings,
             actor_id=None,
             action="login_rate_limited",
             request_id=getattr(request.state, "request_id", None),
             ip=ip,
-            detail={"bucket": limited_bucket},
+            detail={"bucket": "ip"},
         )
         raise APIError(429, "rate_limited", "请求过于频繁，请稍后再试")
 
@@ -130,15 +134,19 @@ async def bootstrap_admin(
 ) -> dict[str, object]:
     settings = _settings(request)
     ip = _client_ip(request)
-    limited_bucket = await request.app.state.limiter.check_login(ip, "bootstrap")
-    if limited_bucket is not None:
+    allowed = await request.app.state.limiter.allow(
+        f"bootstrap:admin:ip:{ip or 'unknown'}",
+        settings.login_ip_rate_limit,
+        settings.login_ip_rate_window_seconds,
+    )
+    if not allowed:
         await write_audit(
             settings=settings,
             actor_id=None,
             action="login_rate_limited",
             request_id=getattr(request.state, "request_id", None),
             ip=ip,
-            detail={"bucket": limited_bucket},
+            detail={"bucket": "ip"},
         )
         raise APIError(429, "rate_limited", "请求过于频繁，请稍后再试")
 
