@@ -758,6 +758,11 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                 <Link
                   href="/admin/imports"
                   className="underline hover:text-foreground"
+                  onClick={(e) => {
+                    if (!tryCloseWizard()) {
+                      e.preventDefault();
+                    }
+                  }}
                 >
                   前往导入管理查看详情
                 </Link>
@@ -964,6 +969,11 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                 className={cn(
                   buttonVariants({ variant: "outline", size: "default" }),
                 )}
+                onClick={(e) => {
+                  if (!tryCloseWizard()) {
+                    e.preventDefault();
+                  }
+                }}
               >
                 {t.importsNav}
               </Link>

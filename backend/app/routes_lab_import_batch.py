@@ -456,18 +456,22 @@ async def batch_provision_imports(
         if target_cl is not None:
             target_cid = str(target_cl["cluster_id"])
             target_sid = str(target_cl.get("student_id") or "").strip().lower() or None
+            target_aff = str(target_cl.get("affiliation") or "").strip() or None
             for m_jid, m_key in cluster_members_by_cid.get(cid, []):
                 cluster_by_job_person[(m_jid, m_key)] = target_cid
-                if target_sid and m_jid in jobs_by_id:
+                if (target_sid or target_aff) and m_jid in jobs_by_id:
                     j_obj = jobs_by_id[m_jid]
                     j_prev = dict(j_obj.preview or {})
                     j_ppl = j_prev.get("people")
                     if isinstance(j_ppl, list):
                         for p in j_ppl:
                             if isinstance(p, dict) and str(p.get("key") or p.get("temp_id") or "").strip() == m_key:
-                                p["student_id"] = target_sid
-                                p["cert"] = target_sid
-                                p["tier"] = "T1"
+                                if target_sid:
+                                    p["student_id"] = target_sid
+                                    p["cert"] = target_sid
+                                    p["tier"] = "T1"
+                                if target_aff and not str(p.get("affiliation") or "").strip():
+                                    p["affiliation"] = target_aff
                         j_obj.preview = j_prev
 
     cluster_resolved_user_id: dict[str, uuid.UUID] = {}

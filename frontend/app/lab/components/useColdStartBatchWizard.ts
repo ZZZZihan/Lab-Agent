@@ -372,8 +372,8 @@ export function useColdStartBatchWizard({
     }
   }
 
-  function tryCloseWizard() {
-    if (parsing || provisioning || step4Running) return;
+  function tryCloseWizard(): boolean {
+    if (parsing || provisioning || step4Running) return false;
     if (
       (wizardStep === 3 || wizardStep === 4) &&
       provisionResult &&
@@ -381,11 +381,12 @@ export function useColdStartBatchWizard({
       !hasSavedCredentials
     ) {
       const confirmed = window.confirm(t.credentialLeaveConfirm);
-      if (!confirmed) return;
+      if (!confirmed) return false;
     }
     markColdStartDismissed();
     setWizardOpen(false);
     setProvisionResult(null);
+    return true;
   }
 
   function handleFilesSelected(fileList: FileList | File[] | null) {

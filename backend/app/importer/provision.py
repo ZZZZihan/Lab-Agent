@@ -410,6 +410,7 @@ async def provision_import_job(
         if (
             "BATCH_NAME_COLLISION" in p_warnings
             and str(person.get("tier") or "T2") == "T2"
+            and bool(person.get("collision_ambiguous", True))
             and not has_explicit_collision_decision
         ):
             raise ProvisionError(

@@ -54,6 +54,7 @@ def _reset_sibling_injections(p: dict[str, Any]) -> None:
     """Strip any previously injected sibling fields and collision warnings so `resolve` is idempotent."""
     p.pop("cluster_id", None)
     p.pop("provisioned_user_id", None)
+    p.pop("collision_ambiguous", None)
     raw_warnings = p.get("warnings")
     warnings = [
         str(w)
@@ -395,6 +396,15 @@ def resolve_batch_identities(
         if not did_merge:
             merged_clusters.append(cl)
 
+    clusters_by_norm_name: dict[str, list[list[_Occurrence]]] = {}
+    for cl in merged_clusters:
+        clusters_by_norm_name.setdefault(cl[0].norm_name, []).append(cl)
+    for _n_name, cls_for_name in clusters_by_norm_name.items():
+        if len(cls_for_name) > 1:
+            for cl in cls_for_name:
+                for occ in cl:
+                    _mark_collision(occ)
+
     # Step 3: Cross-job sibling injection of student_id and email
     injected_student_ids = 0
     injected_emails = 0
@@ -462,6 +472,44 @@ def resolve_batch_identities(
         cluster_meta_list.append(
             (cid, cl, cluster_sid, cluster_sid_source, cluster_email, cluster_email_source)
         )
+
+    meta_by_norm_name: dict[
+        str,
+        list[tuple[str, list[_Occurrence], str | None, str | None, str | None, str | None]],
+    ] = {}
+    for meta in cluster_meta_list:
+        meta_by_norm_name.setdefault(meta[1][0].norm_name, []).append(meta)
+    for _n_name, metas_for_name in meta_by_norm_name.items():
+        if len(metas_for_name) <= 1:
+            continue
+        for cid, cl, cluster_sid, _sid_src, cluster_email, _em_src in metas_for_name:
+            if cluster_sid or cluster_email:
+                is_ambiguous = False
+            else:
+                cl_affs = {o.norm_aff for o in cl if o.norm_aff}
+                if len(cl_affs) != 1:
+                    is_ambiguous = True
+                else:
+                    cl_aff = next(iter(cl_affs))
+                    is_ambiguous = False
+                    for (
+                        other_cid,
+                        other_cl,
+                        other_sid,
+                        _os_src,
+                        other_em,
+                        _oe_src,
+                    ) in metas_for_name:
+                        if other_cid == cid:
+                            continue
+                        other_affs = {o.norm_aff for o in other_cl if o.norm_aff}
+                        if cl_aff in other_affs or (
+                            not other_affs and (other_sid or other_em)
+                        ):
+                            is_ambiguous = True
+                            break
+            for occ in cl:
+                occ.person["collision_ambiguous"] = is_ambiguous
 
     # Step 4: Run assign_people_identities on each job and coordinate cross-cluster logins
     for job in jobs:
