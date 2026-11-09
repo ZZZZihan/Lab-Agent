@@ -666,10 +666,10 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified member 
   // 1. Empty labPeople must return [] rather than hard-coded fallback people
   const turnWithNames = {
     id: "t-1",
-    question: "课题组里郭建民和万振凯的研究专长分别是什么？",
-    answer: "郭建民负责人工智能，万振凯负责教育理论。",
+    question: "课题组里陈予安和陆星河的研究专长分别是什么？",
+    answer: "陈予安负责低温超导与异构计算，陆星河负责可信检索与科学智能。",
     pending: false,
-    citations: [{ title: "课题组资料库", excerpt: "郭建民、万振凯" }],
+    citations: [{ title: "课题组资料库", excerpt: "陈予安、陆星河" }],
   };
   assert.deepEqual(chatHelpers.extractMatchedPeopleForTurn(turnWithNames, []), []);
 
@@ -677,11 +677,11 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified member 
   const realPeople = [
     {
       id: "2c8022da-1e4c-4eb9-98c8-7cf0389fd352",
-      name: "郭建民",
+      name: "陈予安",
       title: "副教授",
       project_role: "applicant",
       has_signature: false,
-      research_specialty: "人工智能",
+      research_specialty: "低温超导与异构计算",
     },
   ];
   assert.deepEqual(
@@ -702,7 +702,7 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified member 
     chatHelpers.extractMatchedPeopleForTurn(
       {
         ...turnWithNames,
-        answer: "该纪要中未提及郭建民。",
+        answer: "该纪要中未提及陈予安。",
       },
       realPeople,
     ),

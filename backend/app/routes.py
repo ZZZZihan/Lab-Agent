@@ -388,7 +388,7 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
                 raise APIError(
                     401,
                     "ambiguous_name",
-                    "存在重名账号，请使用登录名（如 wanzhenkai2）或学工号登录",
+                    "存在重名账号，请使用登录名（如 zhangsan2）或学工号登录",
                 )
             if len(exact_matches) == 1:
                 user = exact_matches[0]
@@ -421,7 +421,7 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
                         raise APIError(
                             401,
                             "ambiguous_name",
-                            "存在重名账号，请使用登录名（如 wanzhenkai2）或学工号登录",
+                            "存在重名账号，请使用登录名（如 zhangsan2）或学工号登录",
                         )
                     if len(family) == 1:
                         user = family[0]

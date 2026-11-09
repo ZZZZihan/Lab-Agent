@@ -49,9 +49,9 @@ def normalize_person_name(raw: str | None) -> str:
 
     1. Unicode NFKC
     2. Strip leading/trailing whitespace
-    3. Strip trailing parentheticals or asterisk markers (e.g. '郭建民（负责人）', '万振凯*', '徐国伟(通讯作者)')
+    3. Strip trailing parentheticals or asterisk markers (e.g. '陈予安（负责人）', '陆星河*', '沈昭(通讯作者)')
     4. Unify middle dots (· / • / ． -> ·)
-    5. Remove all whitespace and zero-width characters (handles '万 振 凯', '郭　建民')
+    5. Remove all whitespace and zero-width characters (handles '陈 予 安', '陆　星河')
     """
     if not raw:
         return ""

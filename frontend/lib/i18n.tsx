@@ -177,7 +177,7 @@ const copy = {
     action_token_create: "创建访问令牌",
     action_token_revoke: "吊销访问令牌",
     loginIdentifier: "账号（学工号 / 姓名拼音 / 中文姓名 / 邮箱）",
-    loginIdentifierPlaceholder: "例如：2431101262、wanzhenkai、万振凯 或 个人邮箱",
+    loginIdentifierPlaceholder: "例如：20260108、chenyuan、陈予安 或 个人邮箱",
     loginIdentifierHint: "支持输入中文姓名、学工号、姓名全拼或邮箱",
     ambiguousNameError: "存在同名成员，请使用分配的登录名（拼音/学工号）或邮箱登录",
     initialPasswordExpiredError: "初始口令已超过有效期，请联系管理员重置口令",
@@ -444,7 +444,7 @@ const copy = {
     action_token_create: "Token created",
     action_token_revoke: "Token revoked",
     loginIdentifier: "Account (Student/Staff ID / Pinyin / Name / Email)",
-    loginIdentifierPlaceholder: "e.g. 2431101262, wanzhenkai, or your email",
+    loginIdentifierPlaceholder: "e.g. 20260108, chenyuan, or your email",
     loginIdentifierHint: "Enter Chinese name, Student/Staff ID, Pinyin login name, or Email",
     ambiguousNameError:
       "Multiple members share this name. Please sign in with your assigned login name or email.",
