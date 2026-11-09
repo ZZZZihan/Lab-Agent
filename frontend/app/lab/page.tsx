@@ -15,15 +15,12 @@ import {
   type BasketState,
   type DossierAchievementItem,
   type DossierProjectItem,
-  type ImportJobResponse,
-  type ImportPreviewSignatureItem,
   type LabAchievementItem,
   type LabFacilityItem,
   type LabOverview,
   type LabPersonItem,
   type LabProjectItem,
   type PersonDossierResponse,
-  type ProvisionResult,
   type User,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
@@ -34,8 +31,6 @@ import {
   basketKey,
   getBasketStorageKey,
   parseBasketStorage,
-  PersonOverrideState,
-  DEFAULT_INITIAL_PASSWORD,
 } from "./components/labTypesAndHelpers";
 import { ColdStartWizardDialog } from "./components/ColdStartWizardDialog";
 import { EntityEditDialog } from "./components/EntityEditDialog";
@@ -43,6 +38,7 @@ import { LabAssetTabLists } from "./components/LabAssetTabLists";
 import { LabHeaderAndToolbar } from "./components/LabHeaderAndToolbar";
 import { PersonDossierDialog } from "./components/PersonDossierDialog";
 import { ReuseBasketBar } from "./components/ReuseBasketBar";
+import { useColdStartBatchWizard } from "./components/useColdStartBatchWizard";
 import { createDossierAndBasketActions } from "./components/useLabDossierAndBasketActions";
 import { useLabFiltersAndSelection } from "./components/useLabFiltersAndSelection";
 import { createWizardAndEditActions } from "./components/useLabWizardAndEditActions";
@@ -148,32 +144,6 @@ function useLabCoreState() {
     null,
   );
   const editSessionSeqRef = useRef(0);
-
-  // Admin 3-Step Import Wizard state
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardStep, setWizardStep] = useState<1 | 2 | 3>(1);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadAsOf, setUploadAsOf] = useState("");
-  const [parsing, setParsing] = useState(false);
-  const [wizardError, setWizardError] = useState("");
-
-  const [importJob, setImportJob] = useState<ImportJobResponse | null>(null);
-  const [provisionAsOf, setProvisionAsOf] = useState("");
-  const [initialPassword, setInitialPassword] = useState(
-    DEFAULT_INITIAL_PASSWORD,
-  );
-  const [includePassword, setIncludePassword] = useState(true);
-  const [overrides, setOverrides] = useState<
-    Record<string, PersonOverrideState>
-  >({});
-  const [skipSignatureIds, setSkipSignatureIds] = useState<
-    Record<string, boolean>
-  >({});
-  const [provisioning, setProvisioning] = useState(false);
-  const [provisionResult, setProvisionResult] =
-    useState<ProvisionResult | null>(null);
-  const [rosterCopied, setRosterCopied] = useState(false);
-  const [hasSavedCredentials, setHasSavedCredentials] = useState(false);
 
   function hydrateBasketFromStorage(userId: string) {
     if (typeof window === "undefined") return;
@@ -447,41 +417,12 @@ function useLabCoreState() {
     };
   }, [t.error]);
 
-  // Spec §8.3.3 beforeunload guard when Step 3 has plaintext credentials in memory
-  const hasUnsavedPlaintextRoster = Boolean(
-    wizardOpen &&
-      wizardStep === 3 &&
-      provisionResult &&
-      includePassword &&
-      !hasSavedCredentials,
-  );
-
-  useEffect(() => {
-    if (!hasUnsavedPlaintextRoster) return;
-    function handleBeforeUnload(e: BeforeUnloadEvent) {
-      e.preventDefault();
-      e.returnValue = t.credentialLeaveConfirm;
-      return t.credentialLeaveConfirm;
-    }
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-    };
-  }, [hasUnsavedPlaintextRoster, t.credentialLeaveConfirm]);
-
-  function tryCloseWizard() {
-    if (
-      wizardStep === 3 &&
-      provisionResult &&
-      includePassword &&
-      !hasSavedCredentials
-    ) {
-      const confirmed = window.confirm(t.credentialLeaveConfirm);
-      if (!confirmed) return;
-    }
-    setWizardOpen(false);
-    setProvisionResult(null);
-  }
+  const batchWizard = useColdStartBatchWizard({
+    me,
+    overview,
+    t,
+    loadAll,
+  });
 
   async function copyToClipboard(text: string, tag: string) {
     setError("");
@@ -559,46 +500,6 @@ function useLabCoreState() {
   const dossierAchievements: DossierAchievementItem[] =
     dossier?.achievements || dossier?.outputs || [];
 
-  const previewSignatures = useMemo<ImportPreviewSignatureItem[]>(() => {
-    const rawSigs = importJob?.preview?.signatures;
-    if (!rawSigs) return [];
-    const list = Array.isArray(rawSigs) ? rawSigs : rawSigs.items || [];
-    const jobWarnings = importJob?.preview?.warnings || [];
-    return list.map((sig, idx) => {
-      const sigKey =
-        sig.person_temp_id ||
-        sig.person_key ||
-        sig.sig_id ||
-        sig.person_ref ||
-        sig.person_name ||
-        `sig-${idx + 1}`;
-      const status = sig.status || "bound";
-      const matchedWarnCodes = jobWarnings
-        .filter(
-          (w) =>
-            (w.person_temp_id && w.person_temp_id === sigKey) ||
-            (Array.isArray(w.person_temp_ids) &&
-              w.person_temp_ids.includes(sigKey)) ||
-            (sig.person_name &&
-              ((w.person_name && w.person_name === sig.person_name) ||
-                (Array.isArray(w.person_names) &&
-                  w.person_names.includes(sig.person_name)))),
-        )
-        .map((w) => w.code);
-      const combinedWarnings = Array.from(
-        new Set([...(sig.warnings || []), ...matchedWarnCodes]),
-      );
-      return {
-        ...sig,
-        sig_id: sigKey,
-        person_temp_id: sig.person_temp_id || sigKey,
-        status,
-        warnings: combinedWarnings,
-      };
-    });
-  }, [importJob]);
-
-
   return {
     me, setMe, overview, setOverview,
     people, setPeople, projects, setProjects,
@@ -627,21 +528,14 @@ function useLabCoreState() {
     editType, setEditType, editItem, setEditItem,
     editForm, setEditForm, editSaving, setEditSaving,
     editError, setEditError, restoringFieldKey, setRestoringFieldKey,
-    wizardOpen, setWizardOpen, wizardStep, setWizardStep,
-    uploadFile, setUploadFile, uploadAsOf, setUploadAsOf,
-    parsing, setParsing, wizardError, setWizardError,
-    importJob, setImportJob, provisionAsOf, setProvisionAsOf,
-    initialPassword, setInitialPassword, includePassword, setIncludePassword,
-    overrides, setOverrides, skipSignatureIds, setSkipSignatureIds,
-    provisioning, setProvisioning, provisionResult, setProvisionResult,
-    rosterCopied, setRosterCopied, hasSavedCredentials, setHasSavedCredentials,
     t, lastClickedIndexRef, dossierAbortRef, dossierReqSeqRef,
-    dossierSessionRef, sigFileInputRef, editSessionSeqRef, hasUnsavedPlaintextRoster,
+    dossierSessionRef, sigFileInputRef, editSessionSeqRef,
     basketKeySet, myAllowedNames, dossierHasSig, dossierSigSha,
     dossierSigMime, dossierSigSource, dossierSigUpdatedAt, dossierCanEditSig,
-    dossierProjects, dossierAchievements, previewSignatures, hydrateBasketFromStorage,
+    dossierProjects, dossierAchievements, hydrateBasketFromStorage,
     persistBasketToStorage, fetchDossierById, closePersonDossier, loadAll,
-    tryCloseWizard, copyToClipboard,
+    copyToClipboard,
+    ...batchWizard,
   };
 }
 

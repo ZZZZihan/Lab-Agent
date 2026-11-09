@@ -250,18 +250,76 @@ def assign_people_identities(
         )
 
         is_excluded = _is_person_excluded(person)
+        has_batch_collision = "BATCH_NAME_COLLISION" in existing_warnings
         matched_user: User | None = None
         matched_lp: LabPerson | None = None
         match_status = "new"
         if valid_email and valid_email in by_email:
-            matched_user = by_email[valid_email]
-            match_status = "existing"
-            matched_lp = next(
-                (lp for lp in lp_with_user if lp.user_id == matched_user.id),
+            candidate = by_email[valid_email]
+            cand_lp = next(
+                (lp for lp in lp_with_user if lp.user_id == candidate.id),
                 None,
             )
+            cand_login = (candidate.login_name or "").strip().lower()
+            cand_base_py = name_to_pinyin(candidate.display_name)
+            cand_is_suffixed_py = bool(
+                cand_base_py
+                and cand_login
+                and re.match(rf"^{re.escape(cand_base_py)}\d+$", cand_login)
+            )
+            cand_has_t1 = (cand_lp is not None and _lp_has_t1(cand_lp)) or (
+                bool(cand_login)
+                and bool(T1_CERT_RE.match(cand_login))
+                and not cand_is_suffixed_py
+            )
+            has_t1_disagreement = bool(
+                tier == "T1"
+                and base_login
+                and (
+                    (
+                        cand_has_t1
+                        and (
+                            (cand_login and cand_login != base_login)
+                            or (
+                                cand_lp is not None
+                                and _lp_has_t1(cand_lp)
+                                and cand_lp.entity_fingerprint != candidate_fp
+                            )
+                        )
+                    )
+                    or (
+                        base_login in by_login
+                        and by_login[base_login].id != candidate.id
+                    )
+                )
+            )
+            if (
+                has_t1_disagreement
+                or candidate.id in used_matched_user_ids
+                or (
+                    has_batch_collision
+                    and (
+                        bool(person.get("collision_ambiguous"))
+                        or (
+                            tier == "T1"
+                            and base_login
+                            and cand_login
+                            and cand_login != base_login
+                        )
+                    )
+                )
+            ):
+                matched_user = candidate
+                match_status = "conflict"
+                if "LOGIN_CONFLICT" not in existing_warnings:
+                    existing_warnings.append("LOGIN_CONFLICT")
+            else:
+                matched_user = candidate
+                match_status = "existing"
+                matched_lp = cand_lp
         elif (
             candidate_fp in by_fp
+            and not (has_batch_collision and tier == "T2")
             and by_fp[candidate_fp].id not in used_matched_user_ids
             and not (
                 valid_email
@@ -274,7 +332,18 @@ def assign_people_identities(
             matched_lp = lp_by_fp.get(candidate_fp)
         elif tier == "T1" and base_login in by_login:
             candidate = by_login[base_login]
-            if normalize_person_name(candidate.display_name) == name:
+            cand_email = (candidate.email or "").strip().lower()
+            has_email_disagreement = bool(
+                valid_email and cand_email and cand_email != valid_email.lower()
+            )
+            if (
+                normalize_person_name(candidate.display_name) == name
+                and candidate.id not in used_matched_user_ids
+                and not (
+                    has_batch_collision
+                    and (has_email_disagreement or bool(person.get("collision_ambiguous")))
+                )
+            ):
                 matched_user = candidate
                 match_status = "existing"
                 matched_lp = next(
@@ -286,7 +355,7 @@ def assign_people_identities(
                 match_status = "conflict"
                 if "LOGIN_CONFLICT" not in existing_warnings:
                     existing_warnings.append("LOGIN_CONFLICT")
-        elif not is_excluded:
+        elif not is_excluded and not has_batch_collision:
             norm_name = norm(name)
             norm_aff = norm(affiliation)
             inc_has_t1 = tier == "T1" and bool(base_login)

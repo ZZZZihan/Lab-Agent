@@ -7,6 +7,10 @@
 - 作者：首席架构师
 - 读者：实施 agent（Gemini CLI）、仓库作者
 - 适用分支：基于 `spec/next-phase`（基线提交 `52fc697`）
+- 关联子规范索引：
+  - `docs/specs/proposal-coldstart-spec-v2.md`（申请书冷启动与账号分发 Spec v2.0）
+  - `docs/specs/proposal-coldstart-spec-v2.2-dossier-basket.md`（电子签名抽取、个人全息档案袋与写本子素材篮 Spec v2.2）
+  - `docs/specs/proposal-coldstart-spec-v2.3-bootstrap-batch.md`（首任管理员引导注册与多本子批量冷启动导入 Spec v2.3）
 
 本文是唯一的实施依据。任务按 PR 顺序排列，每个任务写明要改的文件、接口、配置、迁移、测试和验收标准。实施 agent 应**严格按顺序**推进，一个 PR 对应一个任务（个别标注可合并的除外），不要跨任务顺手改别的东西。
 

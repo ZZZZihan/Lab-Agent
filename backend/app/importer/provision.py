@@ -201,6 +201,7 @@ async def provision_import_job(
     body: ProvisionRequest,
     settings: Settings,
     embedder: Embedder,
+    sync_rag: bool = True,
 ) -> dict[str, object]:
     """Execute account provisioning, lab asset persistence, and RAG profile indexing."""
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
@@ -256,9 +257,10 @@ async def provision_import_job(
             or p.get("excluded") is True
             or p.get("include") is False
             or p.get("imported") is False
+            or p.get("override_mode") == "exclude"
         ):
             p["exclude"] = True
-        if p.get("tier") == "T1":
+        if p.get("tier") == "T1" or p.get("student_id"):
             p["cert"] = p.get("student_id") or p.get("login_name")
     assign_people_identities(
         raw_people,
@@ -278,6 +280,7 @@ async def provision_import_job(
             or person.get("excluded") is True
             or person.get("include") is False
             or person.get("imported") is False
+            or person.get("override_mode") == "exclude"
         ):
             person["exclude"] = True
             continue
@@ -343,7 +346,24 @@ async def provision_import_job(
             custom_login = ov.login_name.strip().lower()
             if not is_valid_login_name(custom_login):
                 raise ProvisionError(422, "login_name_invalid", f"登录名格式不合法 ({pkey})")
-            if custom_login in used_login_names:
+            cur_match_obj = person.get("match")
+            cur_matched_uid: uuid.UUID | None = None
+            if (
+                isinstance(cur_match_obj, dict)
+                and cur_match_obj.get("status") == "existing"
+                and cur_match_obj.get("user_id")
+            ):
+                try:
+                    cur_matched_uid = uuid.UUID(str(cur_match_obj["user_id"]))
+                except ValueError:
+                    cur_matched_uid = None
+            cur_matched_user = users_by_id.get(cur_matched_uid) if cur_matched_uid else None
+            is_own_existing_login = (
+                cur_matched_user is not None
+                and cur_matched_user.login_name is not None
+                and cur_matched_user.login_name.lower() == custom_login
+            )
+            if custom_login in used_login_names and not is_own_existing_login:
                 raise ProvisionError(409, "login_name_taken", f"登录名已被占用: {custom_login}")
             person["login_name"] = custom_login
             used_login_names.add(custom_login)
@@ -351,12 +371,19 @@ async def provision_import_job(
                 cur_match = person.get("match")
                 if isinstance(cur_match, dict) and cur_match.get("status") == "conflict":
                     person["match"] = {"status": "new"}
-            person["fingerprint"] = person_fp(
-                tier=str(person.get("tier") or "T2"),
-                login_name=custom_login,
-                name=normalize_person_name(str(person.get("name") or "")),
-                affiliation=str(person.get("affiliation") or "").strip() or None,
-            )
+            if not is_own_existing_login:
+                fp_tier = (
+                    "T1"
+                    if "BATCH_NAME_COLLISION" in warn_list
+                    else str(person.get("tier") or "T2")
+                )
+                person["fingerprint"] = person_fp(
+                    tier=fp_tier,
+                    login_name=custom_login,
+                    name=normalize_person_name(str(person.get("name") or "")),
+                    affiliation=str(person.get("affiliation") or "").strip() or None,
+                    email=str(person.get("email") or "").strip().lower() or None,
+                )
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
             ]
@@ -366,12 +393,48 @@ async def provision_import_job(
         raw_match = person.get("match")
         match_info: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         match_status = str(match_info.get("status") or "new")
+        has_explicit_collision_decision = bool(
+            ov
+            and (
+                ov.link_user_id is not None
+                or (ov.login_name is not None and ov.login_name.strip())
+            )
+        )
+        if (
+            bool(person.get("collision_resolved_in_batch"))
+            and not (ov and ov.link_user_id is not None)
+            and match_status == "conflict"
+        ):
+            cand_login_res = str(person.get("login_name") or "").strip().lower()
+            if cand_login_res and cand_login_res not in used_login_names:
+                person["match"] = {"status": "new"}
+                match_info = {"status": "new"}
+                match_status = "new"
+                warn_list = [w for w in warn_list if w != "LOGIN_CONFLICT"]
+                person["warnings"] = warn_list
+                p_warnings = [str(w) for w in warn_list]
 
         if match_status == "conflict" or "LOGIN_CONFLICT" in p_warnings:
             raise ProvisionError(
                 422,
                 "login_conflict_unresolved",
                 f"人员 {pkey} 存在学工号冲突，请排除或修改登录名",
+            )
+        if (
+            "BATCH_NAME_COLLISION" in p_warnings
+            and bool(
+                person.get(
+                    "collision_ambiguous",
+                    str(person.get("tier") or "T2") == "T2",
+                )
+            )
+            and not has_explicit_collision_decision
+            and not bool(person.get("collision_resolved_in_batch"))
+        ):
+            raise ProvisionError(
+                422,
+                "login_conflict_unresolved",
+                f"人员 {pkey} 存在同名碰撞且缺少学工号或邮箱，请排除、关联已有账号或修改登录名",
             )
         if match_status == "new":
             login_candidate = str(person.get("login_name") or "").strip().lower()
@@ -424,6 +487,11 @@ async def provision_import_job(
 
     existing_person_fps = set(existing_people_by_fp.keys())
     existing_person_user_ids = set(existing_people_by_uid.keys())
+    used_user_emails: set[str] = {
+        u.email.strip().lower()
+        for u in existing_users
+        if u.email is not None and u.email.strip()
+    }
     existing_ach_fps = set(await session.scalars(select(LabAchievement.entity_fingerprint)))
     existing_proj_fps = set(await session.scalars(select(LabProject.entity_fingerprint)))
     existing_fac_fps = set(await session.scalars(select(LabFacility.entity_fingerprint)))
@@ -473,6 +541,7 @@ async def provision_import_job(
                 users_linked += 1
                 existing_roster_items.append(
                     {
+                        "user_id": str(user_id),
                         "name": pname,
                         "login_name": existing_user.login_name or existing_user.email or "",
                         "has_email": existing_user.email is not None,
@@ -483,8 +552,15 @@ async def provision_import_job(
                 )
             else:
                 # Hardcode role="member" — never auto-assign admin!
+                user_email = (
+                    None
+                    if (p_email and p_email.lower() in used_user_emails)
+                    else p_email
+                )
+                if user_email:
+                    used_user_emails.add(user_email.lower())
                 new_user = User(
-                    email=p_email,
+                    email=user_email,
                     login_name=p_login,
                     display_name=pname,
                     password_hash=pw_hash,
@@ -496,17 +572,24 @@ async def provision_import_job(
                 await session.flush()
                 user_id = new_user.id
                 users_created += 1
+                person["match"] = {
+                    **match_info,
+                    "status": "new",
+                    "user_id": str(user_id),
+                }
                 new_roster_items.append(
                     {
+                        "user_id": str(user_id),
                         "name": pname,
                         "login_name": p_login,
-                        "has_email": p_email is not None,
+                        "has_email": user_email is not None,
                         "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
                         "affiliation": p_aff,
                         "account_status": "new",
                     }
                 )
 
+            person["provisioned_user_id"] = str(user_id)
             pkey = str(person.get("temp_id") or person.get("key") or "")
             fp_val = str(person.get("fingerprint") or "") or person_fp(
                 tier=p_tier,
@@ -939,12 +1022,15 @@ async def provision_import_job(
     job.provisioned_at = now_utc
     job.provisioned_by = actor_id
 
-    doc_key, rag_doc = await sync_lab_profile_rag(
-        session,
-        embedder=embedder,
-        actor_id=actor_id,
-        job=job,
-    )
+    doc_key: str | None = None
+    rag_doc: Document | None = None
+    if sync_rag:
+        doc_key, rag_doc = await sync_lab_profile_rag(
+            session,
+            embedder=embedder,
+            actor_id=actor_id,
+            job=job,
+        )
 
     stats_payload: dict[str, object] = {
         "users_created": users_created,
@@ -1281,7 +1367,12 @@ async def build_job_roster(
         raw_people: list[dict[str, Any]] = [
             dict(p)
             for p in (raw_people_list if isinstance(raw_people_list, list) else [])
-            if isinstance(p, dict) and not p.get("exclude")
+            if isinstance(p, dict)
+            and not p.get("exclude")
+            and not p.get("excluded")
+            and p.get("include") is not False
+            and p.get("imported") is not False
+            and p.get("override_mode") != "exclude"
         ]
 
         users = list(await session.scalars(select(User)))

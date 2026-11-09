@@ -230,6 +230,39 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export type BootstrapStatusResponse = {
+  needs_bootstrap: boolean;
+  setup_token_required: boolean;
+  oidc_mode?: boolean;
+};
+
+export type BootstrapAdminPayload = {
+  display_name: string;
+  email: string;
+  staff_no?: string;
+  password: string;
+  setup_token?: string;
+};
+
+export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
+  const response = await fetch("/api/bootstrap-status", { cache: "no-store" });
+  if (!response.ok) throw await parseError(response);
+  return (await response.json()) as BootstrapStatusResponse;
+}
+
+export async function bootstrapAdmin(
+  payload: BootstrapAdminPayload,
+): Promise<User> {
+  const response = await fetch("/api/session/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await parseError(response);
+  const body = (await response.json()) as { user: User };
+  return body.user;
+}
+
 export async function currentUser(): Promise<User | null> {
   const response = await fetch("/api/session", { cache: "no-store" });
   if (response.status === 401) return null;
@@ -386,6 +419,7 @@ export type ImportPreviewPerson = {
   project_role: string;
   tier: "T1" | "T2" | "T3" | string;
   login_name: string;
+  student_id?: string | null;
   email?: string | null;
   title?: string | null;
   admin_duty?: string | null;
@@ -393,6 +427,11 @@ export type ImportPreviewPerson = {
   research_specialty?: string | null;
   degree?: string | null;
   affiliation?: string | null;
+  cluster_id?: string;
+  injected_student_id?: boolean;
+  injected_email?: boolean;
+  student_id_source_job_id?: string | null;
+  email_source_job_id?: string | null;
   match?: { status: "new" | "existing" | "conflict" | string; user_id?: string };
   warnings?: string[];
   exclude?: boolean;
@@ -655,6 +694,182 @@ export type RevertMergeResponse = {
   job_status: string;
   rag_doc_key?: string;
 };
+
+export type BatchResolveJobItem = {
+  id?: string;
+  job_id: string;
+  original_filename: string;
+  as_of_time?: string | null;
+  status?: string;
+  role_in_batch?: "base" | "merge" | string;
+  stats?: ImportJobStats;
+  preview: ImportJobResponse["preview"];
+};
+
+export type BatchIdentityCluster = {
+  cluster_id: string;
+  name: string;
+  tier: "T1" | "T2" | "T3" | string;
+  login_name: string;
+  student_id?: string | null;
+  email?: string | null;
+  project_role?: string;
+  affiliation?: string | null;
+  title?: string | null;
+  injected_student_id?: boolean;
+  injected_email?: boolean;
+  student_id_source_job_id?: string | null;
+  email_source_job_id?: string | null;
+  source_job_ids?: string[];
+  members?: Array<{
+    job_id: string;
+    key?: string;
+    person_key?: string;
+    tier?: string;
+    login_name?: string;
+  }>;
+  occurrences?: Array<{
+    job_id: string;
+    key: string;
+    tier?: string;
+    login_name?: string;
+  }>;
+  match?: {
+    status: "new" | "existing" | "conflict" | string;
+    user_id?: string | null;
+  };
+  warnings?: string[];
+};
+
+export type BatchIdentityQuality = {
+  people_total: number;
+  t1_covered: number;
+  t2_count?: number;
+  t3_count?: number;
+  injected_student_ids: number;
+  injected_emails: number;
+  name_collisions: Array<
+    | string
+    | {
+        name: string;
+        count?: number;
+        login_names?: string[];
+        job_ids?: string[];
+      }
+  >;
+  same_as_of_jobs: Array<
+    | string
+    | string[]
+    | {
+        as_of_time?: string;
+        job_ids?: string[];
+        filenames?: string[];
+      }
+  >;
+};
+
+export type BatchSelfCandidate = {
+  cluster_id: string;
+  name: string;
+  login_name?: string;
+  tier?: string;
+  email?: string | null;
+  user_id?: string;
+  matched_by?: "staff_no" | "email" | "display_name" | string;
+  job_ids?: string[];
+  person_keys?: Array<{ job_id: string; key: string }>;
+};
+
+export type BatchResolveResponse = {
+  jobs: BatchResolveJobItem[];
+  clusters?: BatchIdentityCluster[];
+  identity_clusters?: BatchIdentityCluster[];
+  quality: BatchIdentityQuality;
+  identity_quality?: BatchIdentityQuality;
+  self_candidate?: BatchSelfCandidate | null;
+  base_job_id?: string | null;
+  merge_queue?: string[];
+  warnings?: string[];
+};
+
+export type BatchJobProvisionInput = {
+  job_id: string;
+  as_of_time?: string;
+  people?: Array<{
+    key: string;
+    exclude?: boolean;
+    login_name?: string;
+    link_user_id?: string;
+  }>;
+  skip_signature_ids?: string[];
+};
+
+export type BatchProvisionRequestPayload = {
+  jobs: BatchJobProvisionInput[];
+  initial_password?: string;
+  include_password?: boolean;
+  link_self_cluster_id?: string | null;
+};
+
+export type BatchProvisionJobResult = {
+  job_id: string;
+  original_filename?: string;
+  status: string;
+  as_of_time?: string | null;
+  role_in_batch?: "base" | "merge" | string;
+  users_created?: number;
+  users_linked?: number;
+  people_inserted?: number;
+  projects_inserted?: number;
+  achievements_inserted?: number;
+  facilities_inserted?: number;
+  stats?: ProvisionResult["stats"];
+};
+
+export type BatchProvisionResponse = {
+  base_job_id?: string;
+  job_id?: string;
+  status?: string;
+  as_of_time?: string;
+  deadline?: string | null;
+  initial_password?: string | null;
+  rag_document_id?: string | null;
+  rag_doc_key: string;
+  jobs?: BatchProvisionJobResult[];
+  merge_queue: string[];
+  stats: {
+    users_created: number;
+    users_linked: number;
+    people_inserted: number;
+    people_skipped: number;
+    achievements_inserted: number;
+    achievements_skipped: number;
+    projects_inserted: number;
+    projects_skipped: number;
+    facilities_inserted: number;
+    facilities_skipped: number;
+  };
+  roster_text: string;
+  roster_csv: string;
+};
+
+export async function resolveImportBatch(
+  jobIds: string[],
+): Promise<BatchResolveResponse> {
+  return api<BatchResolveResponse>("admin/imports/batch/resolve", {
+    method: "POST",
+    body: JSON.stringify({ job_ids: jobIds }),
+  });
+}
+
+export async function provisionImportBatch(
+  payload: BatchProvisionRequestPayload,
+): Promise<BatchProvisionResponse> {
+  return api<BatchProvisionResponse>("admin/imports/batch/provision", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
 
 export async function listImportJobs(): Promise<ImportJobSummary[]> {
   const res = await api<{ imports: ImportJobSummary[] }>("admin/imports");
@@ -993,6 +1208,19 @@ const LAB_ERROR_MESSAGES: Record<string, string> = {
   SIG_MISSING_PART: "文档内引用的签名图片部件缺失",
   SIG_IMPORT_QUOTA: "超出单次导入签名图片配额上限",
   SIG_PERSON_AMBIGUOUS: "存在同名成员，签名已跳过自动覆盖",
+  STUDENT_ID_FROM_SIBLING: "跨本子补全学工号",
+  EMAIL_FROM_SIBLING: "跨本子补全邮箱",
+  BATCH_NAME_COLLISION: "批次内存在同名成员碰撞，请核对登录名",
+  bootstrap_closed: "系统已完成初始化，请直接登录",
+  BOOTSTRAP_CLOSED: "系统已完成初始化，请直接登录",
+  setup_token_invalid: "初始化令牌无效或不正确",
+  SETUP_TOKEN_INVALID: "初始化令牌无效或不正确",
+  staff_no_invalid: "工号/教工号格式不正确（需为 6~12 位字母或数字）",
+  STAFF_NO_INVALID: "工号/教工号格式不正确（需为 6~12 位字母或数字）",
+  initial_password_required: "存在需要新建账号的成员，请提供全组统一初始口令",
+  INITIAL_PASSWORD_REQUIRED: "存在需要新建账号的成员，请提供全组统一初始口令",
+  batch_size_invalid: "单次批量导入仅支持 1~5 份申报书",
+  BATCH_SIZE_INVALID: "单次批量导入仅支持 1~5 份申报书",
 };
 
 export function mapLabErrorCode(
@@ -1000,7 +1228,9 @@ export function mapLabErrorCode(
   fallbackMessage?: string,
 ): string {
   if (!code) return fallbackMessage || "操作失败，请稍后重试";
-  const upper = code.trim().toUpperCase();
+  const trimmed = code.trim();
+  if (LAB_ERROR_MESSAGES[trimmed]) return LAB_ERROR_MESSAGES[trimmed];
+  const upper = trimmed.toUpperCase();
   if (LAB_ERROR_MESSAGES[upper]) return LAB_ERROR_MESSAGES[upper];
   if (fallbackMessage && fallbackMessage !== code && fallbackMessage !== "request_failed") {
     return fallbackMessage;

@@ -5,17 +5,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   ApiError,
-  api,
   reindexLabAssets,
   restoreImportedField,
-   updateLabEntity,
+  updateLabEntity,
   type FieldProvenanceSummary,
-  type ImportJobResponse,
   type LabAchievementItem,
   type LabFacilityItem,
   type LabPersonItem,
   type LabProjectItem,
-  type ProvisionResult,
 } from "@/lib/api";
 
 import {
@@ -23,8 +20,6 @@ import {
   EDITABLE_FIELDS,
   FIELD_LABEL_MAP,
   formatProvValue,
-  PersonOverrideState,
-  MAX_UPLOAD_BYTES,
   triggerBlobDownload,
 } from "./labTypesAndHelpers";
 import type { LabCoreAndFilterState } from "../page";
@@ -36,7 +31,9 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     setStatusBanner,
     expandedProvId,
     setExpandedProvId,
+    exportingFormat,
     setExportingFormat,
+    reindexing,
     setReindexing,
     editModalOpen,
     setEditModalOpen,
@@ -51,33 +48,18 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     setEditError,
     restoringFieldKey,
     setRestoringFieldKey,
-    setWizardStep,
-    uploadFile,
-    setUploadFile,
-    uploadAsOf,
-    setParsing,
-    setWizardError,
-    importJob,
-    setImportJob,
-    provisionAsOf,
-    setProvisionAsOf,
-    initialPassword,
-    includePassword,
-    overrides,
-    setOverrides,
-    skipSignatureIds,
-    setSkipSignatureIds,
-    setProvisioning,
-    provisionResult,
-    setProvisionResult,
-    setHasSavedCredentials,
     t,
     editSessionSeqRef,
     myAllowedNames,
     loadAll,
+    handleFileChange,
+    handleParseUpload,
+    handleProvision,
+    handleDownloadCsv,
   } = ctx;
 
   async function handleExportAll(format: "md" | "docx") {
+    if (exportingFormat !== null) return;
     setError("");
     setStatusBanner("");
     setExportingFormat(format);
@@ -114,6 +96,7 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
   }
 
   async function handleReindex() {
+    if (reindexing) return;
     setError("");
     setStatusBanner("");
     setReindexing(true);
@@ -125,137 +108,6 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     } finally {
       setReindexing(false);
     }
-  }
-
-  function handleFileChange(file: File | null) {
-    setWizardError("");
-    if (!file) {
-      setUploadFile(null);
-      return;
-    }
-    const lower = file.name.toLowerCase();
-    if (
-      (!lower.endsWith(".docx") && !lower.endsWith(".doc")) ||
-      lower.endsWith(".docm")
-    ) {
-      setWizardError(
-        "仅支持上传 .doc 或 .docx 格式的申报书文件（不支持含宏的 .docm）",
-      );
-      setUploadFile(null);
-      return;
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setWizardError("文件大小超过 20 MB 上限");
-      setUploadFile(null);
-      return;
-    }
-    setUploadFile(file);
-  }
-
-  async function handleParseUpload(e: React.FormEvent) {
-    e.preventDefault();
-    if (!uploadFile) {
-      setWizardError("请先选择一个 .doc 或 .docx 申报书文件");
-      return;
-    }
-    const lowerName = uploadFile.name.toLowerCase();
-    if (!lowerName.endsWith(".docx") && !lowerName.endsWith(".doc")) {
-      setWizardError("仅支持上传 .doc 或 .docx 格式的申报书文件");
-      return;
-    }
-    if (uploadFile.size > MAX_UPLOAD_BYTES) {
-      setWizardError("文件大小超过 20 MB 上限");
-      return;
-    }
-    setWizardError("");
-    setParsing(true);
-    try {
-      const form = new FormData();
-      form.append("file", uploadFile);
-      if (uploadAsOf.trim()) {
-        form.append("as_of_time", uploadAsOf.trim());
-      }
-      const parsed = await api<ImportJobResponse>("admin/imports/proposal", {
-        method: "POST",
-        body: form,
-      });
-      setImportJob(parsed);
-      setProvisionAsOf(parsed.as_of_time || parsed.preview?.as_of_time || "");
-      const initOv: Record<string, PersonOverrideState> = {};
-      for (const p of parsed.preview?.people || []) {
-        initOv[p.key] = {
-          exclude: false,
-          login_name: p.login_name || "",
-        };
-      }
-      setOverrides(initOv);
-      setSkipSignatureIds({});
-      setWizardStep(2);
-    } catch (err) {
-      setWizardError(err instanceof ApiError ? err.message : t.error);
-    } finally {
-      setParsing(false);
-    }
-  }
-
-  async function handleProvision() {
-    if (!importJob) return;
-    if (!provisionAsOf.trim()) {
-      setWizardError("请填写本子基准日期 (as_of_time)");
-      return;
-    }
-    setWizardError("");
-    setProvisioning(true);
-    try {
-      const peoplePayload = (importJob.preview?.people || []).map((p) => {
-        const ov = overrides[p.key];
-        return {
-          key: p.key,
-          exclude: Boolean(ov?.exclude),
-          ...(ov?.login_name && ov.login_name !== p.login_name
-            ? { login_name: ov.login_name.trim() }
-            : {}),
-        };
-      });
-      const skippedSigs = Object.entries(skipSignatureIds)
-        .filter(([, skipped]) => skipped)
-        .map(([sigId]) => sigId);
-      const res = await api<ProvisionResult>(
-        `admin/imports/${importJob.job_id || importJob.id}/provision`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            as_of_time: provisionAsOf.trim() || undefined,
-            initial_password: initialPassword.trim() || undefined,
-            include_password: includePassword,
-            people: peoplePayload,
-            ...(skippedSigs.length > 0
-              ? { skip_signature_ids: skippedSigs }
-              : {}),
-          }),
-        },
-      );
-      setProvisionResult(res);
-      setHasSavedCredentials(false);
-      setWizardStep(3);
-      await loadAll();
-    } catch (err) {
-      setWizardError(err instanceof ApiError ? err.message : t.error);
-    } finally {
-      setProvisioning(false);
-    }
-  }
-
-  function handleDownloadCsv() {
-    if (!provisionResult) return;
-    const blob = new Blob([provisionResult.roster_csv], {
-      type: "text/csv;charset=utf-8;",
-    });
-    triggerBlobDownload(
-      blob,
-      `labagent-accounts-${provisionResult.as_of_time}.csv`,
-    );
-    setHasSavedCredentials(true);
   }
 
 
