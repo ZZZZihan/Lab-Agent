@@ -201,6 +201,7 @@ async def provision_import_job(
     body: ProvisionRequest,
     settings: Settings,
     embedder: Embedder,
+    sync_rag: bool = True,
 ) -> dict[str, object]:
     """Execute account provisioning, lab asset persistence, and RAG profile indexing."""
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
@@ -256,9 +257,10 @@ async def provision_import_job(
             or p.get("excluded") is True
             or p.get("include") is False
             or p.get("imported") is False
+            or p.get("override_mode") == "exclude"
         ):
             p["exclude"] = True
-        if p.get("tier") == "T1":
+        if p.get("tier") == "T1" or p.get("student_id"):
             p["cert"] = p.get("student_id") or p.get("login_name")
     assign_people_identities(
         raw_people,
@@ -278,6 +280,7 @@ async def provision_import_job(
             or person.get("excluded") is True
             or person.get("include") is False
             or person.get("imported") is False
+            or person.get("override_mode") == "exclude"
         ):
             person["exclude"] = True
             continue
@@ -473,6 +476,7 @@ async def provision_import_job(
                 users_linked += 1
                 existing_roster_items.append(
                     {
+                        "user_id": str(user_id),
                         "name": pname,
                         "login_name": existing_user.login_name or existing_user.email or "",
                         "has_email": existing_user.email is not None,
@@ -498,6 +502,7 @@ async def provision_import_job(
                 users_created += 1
                 new_roster_items.append(
                     {
+                        "user_id": str(user_id),
                         "name": pname,
                         "login_name": p_login,
                         "has_email": p_email is not None,
@@ -939,12 +944,15 @@ async def provision_import_job(
     job.provisioned_at = now_utc
     job.provisioned_by = actor_id
 
-    doc_key, rag_doc = await sync_lab_profile_rag(
-        session,
-        embedder=embedder,
-        actor_id=actor_id,
-        job=job,
-    )
+    doc_key: str | None = None
+    rag_doc: Document | None = None
+    if sync_rag:
+        doc_key, rag_doc = await sync_lab_profile_rag(
+            session,
+            embedder=embedder,
+            actor_id=actor_id,
+            job=job,
+        )
 
     stats_payload: dict[str, object] = {
         "users_created": users_created,
@@ -1281,7 +1289,12 @@ async def build_job_roster(
         raw_people: list[dict[str, Any]] = [
             dict(p)
             for p in (raw_people_list if isinstance(raw_people_list, list) else [])
-            if isinstance(p, dict) and not p.get("exclude")
+            if isinstance(p, dict)
+            and not p.get("exclude")
+            and not p.get("excluded")
+            and p.get("include") is not False
+            and p.get("imported") is not False
+            and p.get("override_mode") != "exclude"
         ]
 
         users = list(await session.scalars(select(User)))

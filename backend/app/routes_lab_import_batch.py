@@ -1,0 +1,467 @@
+"""Batch cold-start identity resolution and multi-proposal transactional provisioning routes."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Any
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.audit import write_audit
+from app.auth import Actor
+from app.db import get_session
+from app.importer.batch_identity import resolve_batch_identities
+from app.importer.pii import PIILeakError, assert_no_pii
+from app.importer.provision import (
+    PersonOverride,
+    ProvisionError,
+    ProvisionRequest,
+    _parse_iso_date,
+    provision_import_job,
+    render_roster_csv,
+    render_roster_text,
+    sync_lab_profile_rag,
+)
+from app.models import ImportJob, LabPerson, User
+from app.routes import APIError, _actor, _client_ip, _embedder, _settings
+from app.routes_admin import _require_admin
+from app.routes_lab_schemas import _serialize_import_job
+
+router = APIRouter()
+
+
+class BatchResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class BatchJobProvisionItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: uuid.UUID
+    as_of_time: date | None = None
+    people: list[PersonOverride] = Field(default_factory=list)
+    exclude_keys: list[str] = Field(default_factory=list)
+    skip_signature_ids: list[str] = Field(default_factory=list)
+
+
+class BatchProvisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_ids: list[uuid.UUID] = Field(default_factory=list)
+    initial_password: str | None = None
+    include_password: bool = True
+    link_self_cluster_id: str | None = None
+    jobs: list[BatchJobProvisionItem] = Field(default_factory=list)
+
+
+@router.post("/admin/imports/batch/resolve")
+async def batch_resolve_imports(
+    body: BatchResolveRequest,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_batch_resolve",
+        resource_type="import_job",
+    )
+    dedup_ids = list(dict.fromkeys(body.job_ids))
+    if not dedup_ids or len(dedup_ids) > 5 or len(body.job_ids) > 5:
+        raise APIError(
+            422,
+            "batch_size_invalid",
+            "单次批量冷启动仅支持 1~5 份申报书",
+        )
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    jobs: list[ImportJob] = []
+    for jid in dedup_ids:
+        job = await session.scalar(
+            select(ImportJob).where(ImportJob.id == jid).with_for_update()
+        )
+        if job is None:
+            raise APIError(404, "not_found", f"导入任务不存在: {jid}")
+        if job.status != "parsed":
+            raise APIError(
+                409,
+                "import_not_parsed",
+                f"导入任务 {jid} 当前状态不可解析身份 ({job.status})",
+            )
+        jobs.append(job)
+
+    existing_users = list(await session.scalars(select(User)))
+    existing_people = list(await session.scalars(select(LabPerson)))
+    actor_user = next((u for u in existing_users if u.id == actor.id), None)
+
+    resolved = resolve_batch_identities(
+        jobs,
+        existing_users=existing_users,
+        existing_people=existing_people,
+        actor_user=actor_user,
+    )
+
+    serialized_jobs: list[dict[str, object]] = []
+    for job in jobs:
+        try:
+            assert_no_pii(job.preview or {})
+        except PIILeakError as exc:
+            await session.rollback()
+            raise APIError(422, "pii_detected", str(exc)) from exc
+        serialized_jobs.append(_serialize_import_job(job, include_preview=True))
+
+    await session.flush()
+    await session.commit()
+
+    q = resolved["quality"]
+    await write_audit(
+        settings=_settings(request),
+        actor_id=actor.id,
+        action="import_batch_resolve",
+        resource_type="import_job",
+        resource_id=str(jobs[0].id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "job_ids": [str(j.id) for j in jobs],
+            "clusters": len(resolved["clusters"]),
+            "people_total": int(q["people_total"]),
+            "t1_covered": int(q["t1_covered"]),
+            "injected_student_ids": int(q["injected_student_ids"]),
+            "injected_emails": int(q["injected_emails"]),
+        },
+    )
+    return {
+        "jobs": serialized_jobs,
+        "clusters": resolved["clusters"],
+        "quality": resolved["quality"],
+        "self_candidate": resolved["self_candidate"],
+    }
+
+
+@router.post("/admin/imports/batch/provision")
+async def batch_provision_imports(
+    body: BatchProvisionRequest,
+    request: Request,
+    actor: Annotated[Actor, Depends(_actor)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, object]:
+    await _require_admin(
+        request,
+        actor,
+        operation="import_batch_provision",
+        resource_type="import_job",
+    )
+    raw_ids: list[uuid.UUID] = list(body.job_ids)
+    for item in body.jobs:
+        if item.job_id not in raw_ids:
+            raw_ids.append(item.job_id)
+    target_job_ids = list(dict.fromkeys(raw_ids))
+    if (
+        not target_job_ids
+        or len(target_job_ids) > 5
+        or len(body.job_ids) > 5
+        or len(body.jobs) > 5
+    ):
+        raise APIError(
+            422,
+            "batch_size_invalid",
+            "单次批量冷启动仅支持 1~5 份申报书",
+        )
+
+    settings = _settings(request)
+    embedder = _embedder(request)
+    oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
+    if settings.app_env == "prod" and not oidc_mode:
+        if (
+            not body.initial_password
+            or not body.initial_password.strip()
+            or body.initial_password.strip() == settings.import_default_password
+        ):
+            raise APIError(
+                422,
+                "initial_password_required",
+                "生产环境下批量开号必须填写自定义初始口令，禁止使用默认公开口令",
+            )
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
+    jobs: list[ImportJob] = []
+    for jid in target_job_ids:
+        job = await session.scalar(
+            select(ImportJob).where(ImportJob.id == jid).with_for_update()
+        )
+        if job is None:
+            raise APIError(404, "not_found", f"导入任务不存在: {jid}")
+        if job.status == "provisioned":
+            raise APIError(
+                409, "import_already_provisioned", f"导入任务 {jid} 已完成开号"
+            )
+        if job.status != "parsed":
+            raise APIError(
+                409,
+                "import_not_parsed",
+                f"导入任务 {jid} 当前状态不可开号 ({job.status})",
+            )
+        jobs.append(job)
+
+    items_by_job_id: dict[uuid.UUID, BatchJobProvisionItem] = {
+        item.job_id: BatchJobProvisionItem(
+            job_id=item.job_id,
+            as_of_time=item.as_of_time,
+            people=[
+                PersonOverride(
+                    key=ov.key,
+                    exclude=ov.exclude,
+                    login_name=ov.login_name,
+                    link_user_id=ov.link_user_id,
+                )
+                for ov in item.people
+            ],
+            exclude_keys=list(item.exclude_keys),
+            skip_signature_ids=list(item.skip_signature_ids),
+        )
+        for item in body.jobs
+    }
+    for jid in target_job_ids:
+        if jid not in items_by_job_id:
+            items_by_job_id[jid] = BatchJobProvisionItem(job_id=jid)
+
+    exclude_keys_by_job: dict[uuid.UUID, set[str]] = {}
+    for jid, item in items_by_job_id.items():
+        ex_set = {str(k).strip() for k in item.exclude_keys if str(k).strip()}
+        for ov in item.people:
+            if ov.exclude and ov.key.strip():
+                ex_set.add(ov.key.strip())
+        exclude_keys_by_job[jid] = ex_set
+
+    existing_users = list(await session.scalars(select(User)))
+    existing_people = list(await session.scalars(select(LabPerson)))
+    actor_user = next((u for u in existing_users if u.id == actor.id), None)
+
+    resolved = resolve_batch_identities(
+        jobs,
+        existing_users=existing_users,
+        existing_people=existing_people,
+        actor_user=actor_user,
+        exclude_keys_by_job=exclude_keys_by_job,
+    )
+
+    if body.link_self_cluster_id and body.link_self_cluster_id.strip():
+        target_cid = body.link_self_cluster_id.strip()
+        matched_cluster = next(
+            (
+                c
+                for c in resolved["clusters"]
+                if str(c.get("cluster_id") or "") == target_cid
+            ),
+            None,
+        )
+        if matched_cluster is None:
+            await session.rollback()
+            raise APIError(
+                422,
+                "link_self_cluster_invalid",
+                f"指定的本人关联聚类不存在: {target_cid}",
+            )
+        for member in matched_cluster.get("members", []):
+            if not isinstance(member, dict):
+                continue
+            m_jid = uuid.UUID(str(member["job_id"]))
+            m_key = str(
+                member.get("key")
+                or member.get("person_key")
+                or member.get("temp_id")
+                or ""
+            ).strip()
+            if not m_key:
+                continue
+            item_cfg = items_by_job_id[m_jid]
+            if m_key in exclude_keys_by_job.get(m_jid, set()):
+                continue
+            existing_ov = next(
+                (ov for ov in item_cfg.people if ov.key == m_key), None
+            )
+            if existing_ov is not None:
+                if not existing_ov.exclude and existing_ov.link_user_id is None:
+                    existing_ov.link_user_id = actor.id
+            else:
+                item_cfg.people.append(
+                    PersonOverride(key=m_key, link_user_id=actor.id)
+                )
+
+    indexed_jobs: list[tuple[int, date, ImportJob]] = []
+    for orig_idx, job in enumerate(jobs):
+        item_cfg = items_by_job_id[job.id]
+        preview = dict(job.preview or {})
+        parsed_preview_date = _parse_iso_date(preview.get("as_of_time"))
+        resolved_as_of = item_cfg.as_of_time or job.as_of_time or parsed_preview_date
+        if resolved_as_of is None:
+            job_fname = job.original_filename
+            job_id_str = str(job.id)
+            await session.rollback()
+            raise APIError(
+                422,
+                "as_of_time_required",
+                f"请提供本子 {job_fname} ({job_id_str}) 的基准日期 as_of_time",
+            )
+        indexed_jobs.append((orig_idx, resolved_as_of, job))
+
+    sorted_entries = sorted(indexed_jobs, key=lambda x: (x[1], x[0]))
+    sorted_jobs = [entry[2] for entry in sorted_entries]
+
+    job_results: list[dict[str, Any]] = []
+    for _, resolved_as_of, job in sorted_entries:
+        job_id_val = job.id
+        job_fname = job.original_filename
+        item_cfg = items_by_job_id[job_id_val]
+        single_req = ProvisionRequest(
+            as_of_time=resolved_as_of,
+            initial_password=body.initial_password,
+            include_password=body.include_password,
+            people=item_cfg.people,
+            skip_signature_ids=item_cfg.skip_signature_ids,
+            exclude_keys=item_cfg.exclude_keys,
+        )
+        try:
+            res = await provision_import_job(
+                session,
+                job_id=job_id_val,
+                actor_id=actor.id,
+                body=single_req,
+                settings=settings,
+                embedder=embedder,
+                sync_rag=False,
+            )
+        except ProvisionError as exc:
+            await session.rollback()
+            raise APIError(
+                exc.status,
+                exc.code,
+                f"[{job_fname} ({job_id_val})] {exc.message}",
+            ) from exc
+        job_results.append(
+            {
+                **res,
+                "id": str(job_id_val),
+                "original_filename": job_fname,
+            }
+        )
+
+    doc_key, rag_doc = await sync_lab_profile_rag(
+        session,
+        embedder=embedder,
+        actor_id=actor.id,
+        job=sorted_jobs[-1],
+    )
+    rag_doc_id_str = str(rag_doc.id) if rag_doc is not None else None
+    for job in sorted_jobs:
+        if rag_doc is not None:
+            job.rag_document_id = rag_doc.id
+        st = dict(job.stats or {})
+        st["rag_doc_key"] = doc_key
+        job.stats = st
+
+    for jr in job_results:
+        jr["rag_document_id"] = rag_doc_id_str
+        jr["rag_doc_key"] = doc_key
+        if isinstance(jr.get("stats"), dict):
+            jr["stats"]["rag_doc_key"] = doc_key
+
+    # Deduplicate combined roster across all jobs in the batch by user_id
+    created_user_ids: set[str] = set()
+    seen_existing_user_ids: set[str] = set()
+    combined_new_accounts: list[dict[str, object]] = []
+    combined_existing_accounts: list[dict[str, object]] = []
+
+    for jr in job_results:
+        raw_stats = jr.get("stats")
+        stats_dict = raw_stats if isinstance(raw_stats, dict) else {}
+        roster_rows = stats_dict.get("roster_rows")
+        for row in (roster_rows if isinstance(roster_rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            uid = str(row.get("user_id") or row.get("login_name") or row.get("name") or "")
+            acc_status = str(row.get("account_status") or "new")
+            if acc_status == "new":
+                if uid not in created_user_ids:
+                    created_user_ids.add(uid)
+                    combined_new_accounts.append(row)
+            else:
+                if uid in created_user_ids or uid in seen_existing_user_ids:
+                    continue
+                seen_existing_user_ids.add(uid)
+                combined_existing_accounts.append(row)
+
+    initial_password = (
+        body.initial_password.strip()
+        if body.initial_password and body.initial_password.strip()
+        else settings.import_default_password
+    )
+    now_utc = datetime.now(UTC)
+    deadline_utc = now_utc + timedelta(days=max(1, settings.initial_password_ttl_days))
+    try:
+        tz = ZoneInfo(settings.display_tz)
+    except Exception:
+        tz = ZoneInfo("Asia/Shanghai")
+    deadline_display = deadline_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
+    roster_text = render_roster_text(
+        base_url=settings.public_base_url,
+        initial_password=None if oidc_mode else initial_password,
+        include_password=body.include_password,
+        deadline_str=deadline_display,
+        new_accounts=combined_new_accounts,
+        existing_accounts=combined_existing_accounts,
+        oidc_mode=oidc_mode,
+    )
+    roster_csv = render_roster_csv(
+        initial_password=None if oidc_mode else initial_password,
+        include_password=body.include_password,
+        deadline_str=deadline_display,
+        new_accounts=combined_new_accounts,
+        existing_accounts=combined_existing_accounts,
+        oidc_mode=oidc_mode,
+    )
+
+    merge_queue = [str(j.id) for j in sorted_jobs[1:]]
+
+    await session.flush()
+    await session.commit()
+
+    await write_audit(
+        settings=settings,
+        actor_id=actor.id,
+        action="import_batch_provision",
+        resource_type="import_job",
+        resource_id=str(sorted_jobs[-1].id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "job_ids": [str(j.id) for j in sorted_jobs],
+            "users_created": len(combined_new_accounts),
+            "users_linked": len(combined_existing_accounts),
+            "merge_queue": merge_queue,
+            "include_password": bool(body.include_password),
+        },
+    )
+
+    return {
+        "jobs": job_results,
+        "roster_text": roster_text,
+        "roster_csv": roster_csv,
+        "deadline": None if oidc_mode else deadline_utc.isoformat(),
+        "initial_password": (
+            None if (oidc_mode or not body.include_password) else initial_password
+        ),
+        "rag_document_id": rag_doc_id_str,
+        "rag_doc_key": doc_key,
+        "merge_queue": merge_queue,
+    }

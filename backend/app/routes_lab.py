@@ -41,6 +41,7 @@ from app.routes import APIError, _actor, _client_ip, _embedder, _settings, _user
 from app.routes_lab_basket import router as basket_router
 from app.routes_lab_dossier import router as dossier_router
 from app.routes_lab_entities import router as entities_router
+from app.routes_lab_import_batch import router as import_batch_router
 from app.routes_lab_imports import router as imports_router
 from app.routes_lab_schemas import (
     ProjectBody,
@@ -56,6 +57,7 @@ from app.routes_lab_schemas import (
 )
 
 router = APIRouter(prefix="/api/v1")
+router.include_router(import_batch_router)
 router.include_router(imports_router)
 
 
