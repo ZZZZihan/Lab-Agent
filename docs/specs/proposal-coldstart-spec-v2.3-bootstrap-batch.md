@@ -141,17 +141,15 @@ Spec v2 §10.4 规定：对于**已经落库**的 `LabPerson` 与 `User` 记录�
 #### 3.2.2 统一身份分配算法
 
 1. **输入校验**：
-   - `job_ids` 去重后数量须为 `1..20`，为空返回 `422 batch_empty`，超限返回 `422 batch_too_large`。
-   - 所有 `job_id` 必须存在且 `status == "parsed"`，否则返回 `404 not_found` 或 `409 import_not_parsed`。
-2. **时序排序**：
-   - 每份任务的生效基准时间 `effective_as_of = as_of_overrides.get(job.id) or job.as_of_time or parse_iso(job.preview.get("as_of_time"))`。
-   - 按 `(effective_as_of is None, effective_as_of ASC, job.created_at ASC, str(job.id) ASC)` 排序（已确定日期的按从旧到新排在前面，缺失日期的排在末尾并标记 `AS_OF_TIME_MISSING`）。
-3. **跨本子互补与联合分配**：
-   - 按 §3.2.1 聚合無歧义同人信息，向缺失 `student_id` / `email` 的兄弟预览条目补充字段；
-   - 按排序后的本子顺序，维护批次级共享的已占用集合與映射表，使同一人在批次内所有本子中获得**完全一致**的 `(tier, login_name, email, fingerprint, match)`；
-   - 不同本子中的**不同人**（例如不同单位的同名者 `王磊`）在跨本子分配拼音登录名时共享 `used_logins` 集合，后出现的自动追加数字后缀（`wanglei` → `wanglei2`）并标记 `LOGIN_NAME_SUFFIXED`，杜绝跨本子开号时的唯一约束冲突。
-4. **响应结构（200）**：
-   - 返回排序后的 `jobs` 列表（含每份本子的 `job_id`、`original_filename`、`as_of_time`、`as_of_time_missing`、各实体计数、阻断项统计）、跨本子去重后的 `people_roster_preview`（展示每名成员来源于哪几份本子、最终拟用 `login_name`、`tier`、`match`、`warnings`）以及汇总 `summary`（`total_jobs`、`ready_to_provision`、`blocking_reasons`）。
+   - `job_ids` 去重后数量须为 `1..5`（`min_length=1, max_length=5`），超出范围或存在重复 ID 返回 `422 batch_size_invalid`。
+   - 所有 `job_id` 必须存在且 `status == "parsed"`，否则返回 `404 not_found` 或 `409 import_already_provisioned`。
+2. **跨本子互补与联合分配（`resolve_batch_identities`）**：
+   - 先调用 `_reset_sibling_injections` 清理上次运行注入的 `STUDENT_ID_FROM_SIBLING`、`EMAIL_FROM_SIBLING`、`BATCH_NAME_COLLISION` 与 `cluster_id`，保证多次调用完全幂等；
+   - 按 §3.2.1 聚合无歧义同人聚类（`c1`, `c2`, ...），向缺失 `student_id` / `email` 的兄弟预览条目补充字段并打上 `STUDENT_ID_FROM_SIBLING` / `EMAIL_FROM_SIBLING` 标记；若检测到同名但学工号或邮箱冲突，拒绝合并并打上 `BATCH_NAME_COLLISION` 警告；
+   - 按本子顺序维护跨本子共享的 `used_logins` 与 `existing_by_student_id` / `existing_by_email` 映射，使同一人在批次内所有本子中获得完全一致的 `(cluster_id, tier, login_name, email, fingerprint, match)`，而不同本子中的同名异人自动追加数字后缀（`wanglei` → `wanglei2`）并标记 `LOGIN_NAME_SUFFIXED`；
+   - 若当前操作管理员尚未关联任何 `LabPerson`（`user_id == actor.id`），且批次中恰好存在唯一一个归一化姓名与 `actor.display_name` 一致、无重名冲突且未绑定其他用户的聚类，返回 `self_candidate` 供前端一键勾选关联。
+3. **响应结构（200）**：
+   - 返回 `jobs`（含更新后 `preview.people` 的各本子详情）、`clusters`（跨本子人员聚类及来源明细）、`quality`（`people_total`、`t1_covered`、`injected_student_ids`、`injected_emails`、`name_collisions`、`same_as_of_jobs`）以及可选的 `self_candidate`。
 
 ### 3.3 单事务时序批量开号（`POST /api/v1/admin/imports/batch/provision`）
 
@@ -159,24 +157,32 @@ Spec v2 §10.4 规定：对于**已经落库**的 `LabPerson` 与 `User` 记录�
 
 ```json
 {
-  "job_ids": ["uuid-1", "uuid-2"],
-  "as_of_overrides": {
-    "uuid-1": "2022-03-15",
-    "uuid-2": "2024-03-18"
-  },
-  "initial_password": null,
-  "include_password": true,
-  "people_overrides": [
+  "jobs": [
     {
-      "key": "p1",
-      "job_id": null,
-      "exclude": false,
-      "login_name": "guojianmin",
-      "link_user_id": null
+      "job_id": "uuid-1",
+      "as_of_time": "2022-03-15",
+      "people": [
+        {
+          "key": "p1",
+          "exclude": false,
+          "login_name": "guojianmin",
+          "link_user_id": null
+        }
+      ],
+      "skip_signature_ids": [],
+      "exclude_keys": []
+    },
+    {
+      "job_id": "uuid-2",
+      "as_of_time": "2024-03-18",
+      "people": [],
+      "skip_signature_ids": [],
+      "exclude_keys": []
     }
   ],
-  "exclude_keys_by_job": {},
-  "skip_signature_ids_by_job": {}
+  "initial_password": null,
+  "include_password": true,
+  "link_self_cluster_id": "c1"
 }
 ```
 
@@ -189,23 +195,15 @@ Spec v2 §10.4 规定：对于**已经落库**的 `LabPerson` 与 `User` 记录�
    - `SELECT ... FROM import_jobs WHERE id IN (...) FOR UPDATE`；
    - 确认所有任务均存在且 `status == "parsed"`，且每份任务的生效 `as_of_time` 均非空（任一缺失则返回 `422 as_of_time_required`）。
 2. **跨本子预对齐与 Override 应用**：
-   - 应用 `as_of_overrides`、`people_overrides`（当 `job_id` 为空时按 `key` 或统一身份作用于对应任务，指定 `job_id` 时仅作用于该任务）与 `exclude_keys_by_job`；
-   - 执行 §3.2 的跨本子身份对齐，并对所有新建账号校验 `validate_password(initial_password, email)`。
-3. **按时间轴从旧到新（`effective_as_of ASC, created_at ASC, id ASC`）依次执行**：
-   - **第 1 份本子（最早基准时间）**：
-     - 调用 `provision_import_job(..., sync_rag=False)`：创建新建成员的 `User(role='member')`，插入 `LabPerson`、`LabAchievement`、`LabProject`、`LabFacility` 基线记录，写入初始 `FieldProvenance`，并持久化该本子的电子签名。
-   - **第 2..N 份本子（后续基准时间）**：
-     - 首先为该本子中尚未在前面本子或存量库中创建账号的新成员创建 `User(role='member')`（已在前面本子创建或关联的成员自动命中 `existing` 并复用其 `user_id`）；
-     - 将新建或关联的 `user_id` 绑定到人员预览后，调用 `execute_merge(..., sync_rag=False)`：
-       - 新实体（人员、成果、项目、条件）直接插入并记录 `FieldProvenance`；
-       - 已存在实体按 Spec v2 §10.4 的 `effective_value` 时序裁决规则更新状态类字段（因为按 `as_of_time` 升序执行，新本子的非空状态字段自然演进更新，空字段保留旧本子值，绝不会发生时间倒退）；
-       - 为新插入的 `LabPerson` 补齐 `user_id` 关联；
-       - 调用 `persist_import_signatures` 落库该本子抽取的电子签名；
-       - 将该 `ImportJob.status` 标记为 `"provisioned"`，记录 `provisioned_at`、`provisioned_by` 与 `stats`。
+   - 调用 `resolve_batch_identities` 完成跨本子身份对齐；
+   - 若传入 `link_self_cluster_id`：校验管理员本人尚未关联任何 `LabPerson`，且该聚类存在、姓名与管理员一致，随后为该聚类在各本子中的条目注入 `link_user_id = actor.id`（不覆盖显式排除项）。
+3. **按时间轴从旧到新（`(effective_as_of ASC, input_index ASC)`）依次执行**：
+   - 对排序后的每份本子依次调用 `provision_import_job(..., sync_rag=False)`，并在同聚类跨本子出现时将前序本子已创建或关联的 `user_id` 自动传递至后续本子，确保同一成员只创建一个 `User` 账号与一条 `LabPerson` 记录；
+   - 首份本子建立初始状态字段基线与 `FieldProvenance`，后续本子 `[str(j.id) for j in sorted_jobs[1:]]` 输出至响应 `merge_queue`，由向导 Step 4 调用 Phase 2 `merge-preview` / `merge` 完成字段级时序演进与冲突裁决（或由管理员直接确认合入）。
 4. **单次 RAG 同步与统一分发清单生成**：
-   - 在所有任务处理完毕后，调用一次 `sync_lab_profile_rag(session, owner_id=actor_id, embedder=embedder)`；
-   - 汇总全批次新建账号（去重保序）与已有账号，调用 `render_roster_text` 与 `render_roster_csv` 生成全批次统一的微信群分发文本与 CSV；
-   - 提交事务，写入审计事件 `action="import_proposal_batch_provision"`。
+   - 在所有任务处理完毕后，调用一次 `sync_lab_profile_rag(session, owner_id=actor.id, embedder=embedder)`；
+   - 按 `user_id` 去重汇总全批次新建账号与已有账号，调用 `render_roster_text` 与 `render_roster_csv` 生成全批次统一的微信群分发文本与 CSV，并汇总全批次 `stats`；
+   - 提交事务，写入审计事件 `action="import_batch_provision"`。
 
 ---
 
@@ -215,54 +213,53 @@ Spec v2 §10.4 规定：对于**已经落库**的 `LabPerson` 与 `User` 记录�
 
 | 波次 | PR / 任务 | 分支 / Worktree | 依赖 | 核心职责 |
 |---|---|---|---|---|
-| **Wave 0** | Spec v2.3 冻结 | `feat/bootstrap-admin-api`（同 PR-1 提交） | — | 编写本规范 `proposal-coldstart-spec-v2.3-bootstrap-batch.md` 并在 `mvp-and-roadmap.md` 注册索引 |
-| **Wave 1** | **PR-1**：首任管理员引导后端 API | `feat/bootstrap-admin-api` (`/data/lab-agent/wt/bootstrap-admin-api`) | Wave 0 | 实现 `GET /api/v1/auth/bootstrap-status`、`POST /api/v1/auth/bootstrap-admin`、生产一次性令牌生成与完备单测 |
-| **Wave 1** | **PR-2**：多本子批量冷启动后端 API | `feat/batch-import-api` (`/data/lab-agent/wt/batch-import-api`) | Wave 0 | 实现 `batch/resolve` 与 `batch/provision`、跨本子身份对齐、单事务时序开号合并与完备单测 |
-| **Wave 2** | **PR-3**：登录页首任管理员引导前端 | `feat/bootstrap-admin-ui` (`/data/lab-agent/wt/bootstrap-admin-ui`) | PR-1 | `/login` 自动探测 `bootstrap-status`、切换首任管理员注册表单、支持工号与 Setup Token、自动登录跳转 |
-| **Wave 2** | **PR-4**：多本子批量冷启动向导前端 | `feat/batch-import-ui` (`/data/lab-agent/wt/batch-import-ui`) | PR-2 | `ImportProposalWizard` 支持多选 `.docx` 上传、批量时序预览、跨本子人员清单与一键批量开号结果页 |
-| **Wave 3** | 全量集成验收门禁 | 主线合入后验证 | PR-3, PR-4 | 运行后端全量 pytest、前端 `tsc --noEmit` & `npm run build`、端到端冒烟验证 |
+| **Wave 0** | Spec v2.3 冻结 | `feat/bootstrap-admin-api` | — | 编写本规范 `proposal-coldstart-spec-v2.3-bootstrap-batch.md` 并在 `mvp-and-roadmap.md` 注册索引 |
+| **Wave 1** | **Card 1A**：首任管理员引导后端 API | `feat/bootstrap-admin-api` (`/data/lab-agent/wt/bootstrap-admin-api`) | Wave 0 | 实现 `GET /api/v1/auth/bootstrap-status`、`POST /api/v1/auth/bootstrap-admin`、生产一次性令牌生成与完备单测 |
+| **Wave 1** | **Card 1B**：多本子批量冷启动后端 API | `feat/import-batch-api` (`/data/lab-agent/wt/import-batch-api`) | Wave 0 | 实现 `batch/resolve` 与 `batch/provision`、跨本子身份对齐、单事务时序开号与完备单测 |
+| **Wave 2** | **Card 2A**：冷启动引导与多本子向导前端 | `feat/coldstart-frontend-ui` (`/data/lab-agent/wt/coldstart-frontend-ui`) | Card 1A, 1B | `/login` 首任管理员引导注册表单 + `/lab` 多本子冷启动向导（上传、跨本子质量面板、账号清单、Step 4 自动时序合并） |
+| **Wave 3** | **Card 3A**：全量端到端集成验收门禁 | 统一分支合入验证 | Card 1A, 1B, 2A | 编写 `backend/tests/test_coldstart_bootstrap_e2e.py`，运行 `fast-gate.sh` 与 `pre-push-audit.sh` |
 
 ### 4.2 依赖图（DAG）
 
 ```mermaid
 graph LR
-  W0[Wave 0: Spec v2.3 Frozen] --> PR1[Wave 1 PR-1: feat/bootstrap-admin-api]
-  W0 --> PR2[Wave 1 PR-2: feat/batch-import-api]
-  PR1 --> PR3[Wave 2 PR-3: feat/bootstrap-admin-ui]
-  PR2 --> PR4[Wave 2 PR-4: feat/batch-import-ui]
-  PR3 --> W3[Wave 3: Full E2E & Regression Gate]
-  PR4 --> W3
+  W0[Wave 0: Spec v2.3 Frozen] --> C1A[Wave 1 Card 1A: bootstrap-admin-api]
+  W0 --> C1B[Wave 1 Card 1B: import-batch-api]
+  C1A --> C2A[Wave 2 Card 2A: coldstart-frontend-ui]
+  C1B --> C2A
+  C2A --> C3A[Wave 3 Card 3A: E2E Acceptance & Gate]
 ```
 
 ### 4.3 `allowed_paths` 与 `hot_resources`
 
-每个 PR 严格限制只允许修改其 `allowed_paths` 内的文件，确保同波次 PR 之间文件集合零交集（Zero File Overlap）：
+每个任务卡严格限制只允许修改其 `allowed_paths` 内的文件，确保同波次任务之间文件集合零交集（Zero File Overlap）：
 
-| PR | `allowed_paths` | `hot_resources` |
+| 任务卡 | `allowed_paths` | `hot_resources` |
 |---|---|---|
-| **Wave 0 + PR-1** (`feat/bootstrap-admin-api`) | `docs/specs/proposal-coldstart-spec-v2.3-bootstrap-batch.md`<br>`docs/specs/mvp-and-roadmap.md`<br>`backend/app/config.py`<br>`backend/app/main.py`<br>`backend/app/routes_auth_bootstrap.py`<br>`backend/tests/test_bootstrap_admin.py` | `backend/app/config.py`、`backend/app/main.py`（仅 PR-1 持有，PR-2 严禁触碰） |
-| **PR-2** (`feat/batch-import-api`) | `backend/app/importer/batch.py`<br>`backend/app/importer/provision.py`<br>`backend/app/importer/provenance.py`<br>`backend/app/routes_lab_imports.py`<br>`backend/tests/test_batch_import.py` | `backend/app/routes_lab_imports.py`、`backend/app/importer/provision.py`、`backend/app/importer/provenance.py`（仅 PR-2 持有；路由已由 `routes_lab.py` 聚合挂载，无需修改 `main.py`） |
-| **PR-3** (`feat/bootstrap-admin-ui`) | `frontend/lib/api.ts`<br>`frontend/lib/i18n.tsx`<br>`frontend/app/login/page.tsx` | `frontend/lib/api.ts`、`frontend/lib/i18n.tsx`（仅 PR-3 持有，PR-4 严禁触碰） |
-| **PR-4** (`feat/batch-import-ui`) | `frontend/lib/lab-api.ts`<br>`frontend/app/lab/components/ImportProposalWizard.tsx`<br>`frontend/app/lab/components/BatchImportSteppers.tsx` | `frontend/lib/lab-api.ts`、`ImportProposalWizard.tsx`（仅 PR-4 持有） |
+| **Wave 0 + Card 1A** (`bootstrap-admin-api`) | `docs/specs/proposal-coldstart-spec-v2.3-bootstrap-batch.md`<br>`docs/specs/mvp-and-roadmap.md`<br>`backend/app/config.py`<br>`backend/app/main.py`<br>`backend/app/routes_auth_bootstrap.py`<br>`backend/tests/test_bootstrap_admin.py` | `backend/app/config.py`、`backend/app/main.py`（仅 Card 1A 持有，Card 1B 严禁触碰） |
+| **Card 1B** (`import-batch-api`) | `backend/app/importer/batch_identity.py`<br>`backend/app/importer/provision.py`<br>`backend/app/routes_lab_import_batch.py`<br>`backend/app/routes_lab.py`<br>`backend/tests/test_import_batch.py` | `backend/app/routes_lab.py`、`backend/app/importer/provision.py`（仅 Card 1B 持有；通过 `routes_lab.py` 聚合挂载，不触碰 `main.py`） |
+| **Card 2A** (`coldstart-frontend-ui`) | `frontend/app/api/bootstrap-status/route.ts`<br>`frontend/app/api/session/bootstrap/route.ts`<br>`frontend/lib/api.ts`<br>`frontend/lib/i18n.tsx`<br>`frontend/app/login/BootstrapAdminForm.tsx`<br>`frontend/app/login/page.tsx`<br>`frontend/app/lab/components/useColdStartBatchWizard.ts`<br>`frontend/app/lab/components/ColdStartQualityPanel.tsx`<br>`frontend/app/lab/components/ColdStartWizardDialog.tsx`<br>`frontend/app/lab/components/LabHeaderAndToolbar.tsx`<br>`frontend/app/lab/components/useLabWizardAndEditActions.tsx`<br>`frontend/app/lab/page.tsx` | `frontend/lib/api.ts`、`frontend/lib/i18n.tsx`、`frontend/app/lab/components/ColdStartWizardDialog.tsx` |
+| **Card 3A** (`coldstart-e2e`) | `backend/tests/test_coldstart_bootstrap_e2e.py` | 全栈端到端验收测试 |
 
 ---
 
 ## 5. 验收测试清单
 
-### 5.1 PR-1（`backend/tests/test_bootstrap_admin.py`）
+### 5.1 Card 1A（`backend/tests/test_bootstrap_admin.py`）
 
-- [ ] 默认已有活跃 `admin` 时：`GET /api/v1/auth/bootstrap-status` 返回 `needs_bootstrap=False`，`POST /api/v1/auth/bootstrap-admin` 返回 `409 bootstrap_closed`。
-- [ ] 将所有 `admin` 设为 `is_active=False` 时：`needs_bootstrap` 仍为 `False`，`POST /api/v1/auth/bootstrap-admin` 仍返回 `409 bootstrap_closed`（P0 安全红线）。
-- [ ] 删除全部 `role='admin'` 记录后：`needs_bootstrap=True`；提交合法的 `display_name`、`email`、`staff_no`、`password` 返回 `200`，签发 JWT 且 `user.role == "admin"`、`user.login_name == staff_no`；审计表记录 `bootstrap_admin` 且 `detail` 不含 PII；使用返回的 token 请求 `GET /api/v1/auth/me` 返回 `200`。
-- [ ] 并发竞态测试：无管理员时并发发起两个 `POST /api/v1/auth/bootstrap-admin`，断言恰好一个返回 `200`、另一个返回 `409 bootstrap_closed`。
-- [ ] 生产环境与 `bootstrap_token` 校验：`APP_ENV=prod` 或配置了 `bootstrap_token` 时，缺失或错误的 `setup_token` 返回 `403 setup_token_invalid`，正确令牌返回 `200`；`ensure_prod_bootstrap_token` 在无管理员时自动生成 `0600` 权限的令牌文件，并在注册成功后自动清理。
-- [ ] OIDC 模式：设置 `oidc_issuer` 后，`GET /bootstrap-status` 返回 `needs_bootstrap=False, oidc_mode=True`，`POST /bootstrap-admin` 返回 `403 bootstrap_disabled`。
-- [ ] 输入校验：身份证号/手机号作为 `staff_no` 返回 `422 staff_no_invalid`；保留字 `admin` 作为 `staff_no` 返回 `422 staff_no_invalid`；弱口令返回 `422 password_policy_violation`；多余未知字段返回 `422`。
+- [x] 默认已有活跃 `admin` 时：`GET /api/v1/auth/bootstrap-status` 返回 `needs_bootstrap=False`，`POST /api/v1/auth/bootstrap-admin` 返回 `409 bootstrap_closed`。
+- [x] 将所有 `admin` 设为 `is_active=False` 时：`needs_bootstrap` 仍为 `False`，`POST /api/v1/auth/bootstrap-admin` 仍返回 `409 bootstrap_closed`（P0 安全红线）。
+- [x] 删除全部 `role='admin'` 记录后：`needs_bootstrap=True`；提交合法的 `display_name`、`email`、`staff_no`、`password` 返回 `200`，签发 JWT 且 `user.role == "admin"`、`user.login_name == staff_no`；审计表记录 `bootstrap_admin` 且 `detail` 不含 PII；使用返回的 token 请求 `GET /api/v1/auth/me` 返回 `200`。
+- [x] 并发竞态测试：无管理员时并发发起两个 `POST /api/v1/auth/bootstrap-admin`，断言恰好一个返回 `200`、另一个返回 `409 bootstrap_closed`。
+- [x] 生产环境与 `bootstrap_token` 校验：`APP_ENV=prod` 或配置了 `bootstrap_token` 时，缺失或错误的 `setup_token` 返回 `403 setup_token_invalid`，正确令牌返回 `200`；`ensure_prod_bootstrap_token` 在无管理员时自动生成 `0600` 权限的令牌文件，并在注册成功后自动清理。
+- [x] OIDC 模式：设置 `oidc_issuer` 后，`GET /bootstrap-status` 返回 `needs_bootstrap=False, oidc_mode=True`，`POST /bootstrap-admin` 返回 `403 bootstrap_disabled`。
+- [x] 输入校验：身份证号/手机号作为 `staff_no` 返回 `422 staff_no_invalid`；保留字 `admin` 作为 `staff_no` 返回 `422 staff_no_invalid`；弱口令返回 `422 password_policy_violation`；多余未知字段返回 `422`。
 
-### 5.2 PR-2（`backend/tests/test_batch_import.py`）
+### 5.2 Card 1B（`backend/tests/test_import_batch.py`）
 
-- [ ] 上传 3 份不同年份（如 2022、2023、2024）的申请书（乱序传入 `job_ids`），`POST /api/v1/admin/imports/batch/resolve` 自动按 `as_of_time` 升序排列。
-- [ ] 跨本子身份互补：2022 年本子中某成员无学工号（T2），2024 年本子中同一姓名+单位的成员有 T1 学工号与邮箱，`batch/resolve` 后两份本子中该成员均升级为 T1 并共享同一 `login_name` 与 `fingerprint`。
-- [ ] `POST /api/v1/admin/imports/batch/provision` 单事务时序执行：同一成员只创建一个 `User(role='member')` 与一条 `LabPerson`，其职称等状态字段取 2024 年最新本子的非空值，而 2024 年本子为空、2022 年本子非空的字段保留 2022 年的值（无时间倒退）。
-- [ ] 统一生成的 `roster_text` 与 `roster_csv` 包含全批次所有新建成员且无重复行、无 PII 泄露。
-- [ ] 事务原子性：若批次中任一任务缺少 `as_of_time` 或存在未消解的登录名冲突，整批回滚，没有任何 `ImportJob` 变为 `provisioned`，也不残留新建用户。
+- [x] 上传多份不同年份（如 2022、2023、2024）的申请书，`POST /api/v1/admin/imports/batch/resolve` 自动完成跨本子身份互补：2022 年本子中某成员无学工号（T2），2024 年本子中同一姓名+单位的成员有 T1 学工号与邮箱，`batch/resolve` 后两份本子中该成员均升级为 T1 并共享同一 `login_name`、`cluster_id` 与 `fingerprint`。
+- [x] 幂等性与防误判：连续多次调用 `batch/resolve` 结果完全一致；前序生成的拼音后缀登录名（如 `zhangsan2`）绝不会被误判为原生 T1 学工号。
+- [x] 同名冲突保护：不同学工号或不同邮箱的同名人员拒绝合并，标记 `BATCH_NAME_COLLISION` 并分配不同登录名后缀。
+- [x] `POST /api/v1/admin/imports/batch/provision` 单事务时序执行：乱序提交的本子按 `as_of_time` 升序执行，同一成员只创建一个 `User(role='member')` 与一条 `LabPerson`，支持 `link_self_cluster_id` 将管理员本人关联到对应 `LabPerson`，并返回后续本子的 `merge_queue`。
+- [x] 统一生成的 `roster_text` 与 `roster_csv` 包含全批次所有新建成员且按 `user_id` 去重、无 PII 泄露。
+- [x] 事务原子性：若批次中任一任务在开号时失败（如登录名冲突），整批回滚，没有任何 `ImportJob` 变为 `provisioned`，也不残留新建用户。

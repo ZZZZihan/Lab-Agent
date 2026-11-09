@@ -51,6 +51,7 @@ def _is_suffixed_pinyin_login(cand_sid: str, raw_name: str) -> bool:
 
 def _reset_sibling_injections(p: dict[str, Any]) -> None:
     """Strip any previously injected sibling fields and collision warnings so `resolve` is idempotent."""
+    p.pop("cluster_id", None)
     raw_warnings = p.get("warnings")
     warnings = [
         str(w)
@@ -389,7 +390,10 @@ def resolve_batch_identities(
     injected_emails = 0
 
     cluster_meta_list: list[tuple[list[_Occurrence], str | None, str | None, str | None, str | None]] = []
-    for cl in merged_clusters:
+    for idx_c, cl in enumerate(merged_clusters, start=1):
+        cid = f"c{idx_c}"
+        for occ in cl:
+            occ.person["cluster_id"] = cid
         sid_sources = [(o.native_sid, o.job.original_filename) for o in cl if o.native_sid]
         distinct_sids = {s for s, _ in sid_sources if s}
         cluster_sid: str | None = None
@@ -577,6 +581,10 @@ def resolve_batch_identities(
                 c
                 for c in clusters_out
                 if norm(normalize_person_name(str(c.get("name") or ""))) == actor_norm_name
+                and (
+                    c.get("matched_user_id") is None
+                    or str(c.get("matched_user_id")) == str(actor_user.id)
+                )
             ]
             if len(matching_clusters) == 1:
                 chosen = matching_clusters[0]

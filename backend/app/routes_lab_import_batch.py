@@ -317,11 +317,53 @@ async def batch_provision_imports(
     sorted_entries = sorted(indexed_jobs, key=lambda x: (x[1], x[0]))
     sorted_jobs = [entry[2] for entry in sorted_entries]
 
+    cluster_by_job_person: dict[tuple[uuid.UUID, str], str] = {}
+    for cl in resolved["clusters"]:
+        cid = str(cl.get("cluster_id") or "")
+        if not cid:
+            continue
+        for member in cl.get("members", []):
+            if not isinstance(member, dict):
+                continue
+            try:
+                m_jid = uuid.UUID(str(member["job_id"]))
+            except (KeyError, ValueError):
+                continue
+            m_key = str(
+                member.get("key")
+                or member.get("person_key")
+                or member.get("temp_id")
+                or ""
+            ).strip()
+            if m_key:
+                cluster_by_job_person[(m_jid, m_key)] = cid
+
+    cluster_resolved_user_id: dict[str, uuid.UUID] = {}
     job_results: list[dict[str, Any]] = []
     for _, resolved_as_of, job in sorted_entries:
         job_id_val = job.id
         job_fname = job.original_filename
         item_cfg = items_by_job_id[job_id_val]
+        ov_by_key = {ov.key: ov for ov in item_cfg.people}
+        preview_ppl = (job.preview or {}).get("people") if isinstance(job.preview, dict) else []
+        for p in (preview_ppl if isinstance(preview_ppl, list) else []):
+            if not isinstance(p, dict):
+                continue
+            pkey = str(p.get("key") or p.get("temp_id") or "").strip()
+            if not pkey or pkey in exclude_keys_by_job.get(job_id_val, set()):
+                continue
+            person_cid = cluster_by_job_person.get((job_id_val, pkey))
+            if person_cid and person_cid in cluster_resolved_user_id:
+                resolved_uid = cluster_resolved_user_id[person_cid]
+                existing_ov = ov_by_key.get(pkey)
+                if existing_ov is not None:
+                    if not existing_ov.exclude and existing_ov.link_user_id is None:
+                        existing_ov.link_user_id = resolved_uid
+                else:
+                    new_ov = PersonOverride(key=pkey, link_user_id=resolved_uid)
+                    item_cfg.people.append(new_ov)
+                    ov_by_key[pkey] = new_ov
+
         single_req = ProvisionRequest(
             as_of_time=resolved_as_of,
             initial_password=body.initial_password,
@@ -347,6 +389,26 @@ async def batch_provision_imports(
                 exc.code,
                 f"[{job_fname} ({job_id_val})] {exc.message}",
             ) from exc
+
+        updated_ppl = (job.preview or {}).get("people") if isinstance(job.preview, dict) else []
+        for p in (updated_ppl if isinstance(updated_ppl, list) else []):
+            if not isinstance(p, dict):
+                continue
+            pkey = str(p.get("key") or p.get("temp_id") or "").strip()
+            person_cid = cluster_by_job_person.get((job_id_val, pkey))
+            raw_match = p.get("match")
+            if (
+                person_cid
+                and person_cid not in cluster_resolved_user_id
+                and isinstance(raw_match, dict)
+                and raw_match.get("status") == "existing"
+                and raw_match.get("user_id")
+            ):
+                try:
+                    cluster_resolved_user_id[person_cid] = uuid.UUID(str(raw_match["user_id"]))
+                except ValueError:
+                    pass
+
         job_results.append(
             {
                 **res,
@@ -433,6 +495,30 @@ async def batch_provision_imports(
 
     merge_queue = [str(j.id) for j in sorted_jobs[1:]]
 
+    def _sum_stat(field_name: str) -> int:
+        total = 0
+        for jr in job_results:
+            st_obj = jr.get("stats")
+            if isinstance(st_obj, dict):
+                val = st_obj.get(field_name)
+                if isinstance(val, int):
+                    total += val
+        return total
+
+    aggregated_stats: dict[str, object] = {
+        "users_created": len(combined_new_accounts),
+        "users_linked": len(combined_existing_accounts),
+        "people_inserted": _sum_stat("people_inserted"),
+        "people_skipped": _sum_stat("people_skipped"),
+        "achievements_inserted": _sum_stat("achievements_inserted"),
+        "achievements_skipped": _sum_stat("achievements_skipped"),
+        "projects_inserted": _sum_stat("projects_inserted"),
+        "projects_skipped": _sum_stat("projects_skipped"),
+        "facilities_inserted": _sum_stat("facilities_inserted"),
+        "facilities_skipped": _sum_stat("facilities_skipped"),
+        "rag_doc_key": doc_key,
+    }
+
     await session.flush()
     await session.commit()
 
@@ -455,6 +541,7 @@ async def batch_provision_imports(
 
     return {
         "jobs": job_results,
+        "stats": aggregated_stats,
         "roster_text": roster_text,
         "roster_csv": roster_csv,
         "deadline": None if oidc_mode else deadline_utc.isoformat(),

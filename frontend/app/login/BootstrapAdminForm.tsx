@@ -53,13 +53,6 @@ export function BootstrapAdminForm({
             if (!trimmedName || !trimmedEmail || !password) {
               return;
             }
-            if (
-              trimmedStaffNo &&
-              !/^[A-Za-z0-9]{6,12}$/.test(trimmedStaffNo)
-            ) {
-              setError(mapLabErrorCode("staff_no_invalid"));
-              return;
-            }
             submittingRef.current = true;
             setPending(true);
             setError("");
@@ -76,7 +69,11 @@ export function BootstrapAdminForm({
               router.replace("/lab?coldstart=1");
             } catch (err) {
               if (err instanceof ApiError) {
-                setError(mapLabErrorCode(err.code, err.message));
+                setError(
+                  err.code === "staff_no_invalid" && err.message
+                    ? err.message
+                    : mapLabErrorCode(err.code, err.message),
+                );
                 if (err.code === "bootstrap_closed") {
                   onBootstrapClosed?.();
                 }

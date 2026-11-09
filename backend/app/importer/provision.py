@@ -346,7 +346,24 @@ async def provision_import_job(
             custom_login = ov.login_name.strip().lower()
             if not is_valid_login_name(custom_login):
                 raise ProvisionError(422, "login_name_invalid", f"登录名格式不合法 ({pkey})")
-            if custom_login in used_login_names:
+            cur_match_obj = person.get("match")
+            cur_matched_uid: uuid.UUID | None = None
+            if (
+                isinstance(cur_match_obj, dict)
+                and cur_match_obj.get("status") == "existing"
+                and cur_match_obj.get("user_id")
+            ):
+                try:
+                    cur_matched_uid = uuid.UUID(str(cur_match_obj["user_id"]))
+                except ValueError:
+                    cur_matched_uid = None
+            cur_matched_user = users_by_id.get(cur_matched_uid) if cur_matched_uid else None
+            is_own_existing_login = (
+                cur_matched_user is not None
+                and cur_matched_user.login_name is not None
+                and cur_matched_user.login_name.lower() == custom_login
+            )
+            if custom_login in used_login_names and not is_own_existing_login:
                 raise ProvisionError(409, "login_name_taken", f"登录名已被占用: {custom_login}")
             person["login_name"] = custom_login
             used_login_names.add(custom_login)
@@ -354,12 +371,13 @@ async def provision_import_job(
                 cur_match = person.get("match")
                 if isinstance(cur_match, dict) and cur_match.get("status") == "conflict":
                     person["match"] = {"status": "new"}
-            person["fingerprint"] = person_fp(
-                tier=str(person.get("tier") or "T2"),
-                login_name=custom_login,
-                name=normalize_person_name(str(person.get("name") or "")),
-                affiliation=str(person.get("affiliation") or "").strip() or None,
-            )
+            if not is_own_existing_login:
+                person["fingerprint"] = person_fp(
+                    tier=str(person.get("tier") or "T2"),
+                    login_name=custom_login,
+                    name=normalize_person_name(str(person.get("name") or "")),
+                    affiliation=str(person.get("affiliation") or "").strip() or None,
+                )
             warn_list = [
                 w for w in warn_list if w not in ("LOGIN_CONFLICT", "LOGIN_NAME_REQUIRED")
             ]

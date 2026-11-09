@@ -18,6 +18,9 @@ function formatSameAsOfItem(
   item: BatchIdentityQuality["same_as_of_jobs"][number],
 ): string {
   if (typeof item === "string") return item;
+  if (Array.isArray(item)) {
+    return `${item.length} 份本子基准日期相同`;
+  }
   const datePart = item.as_of_time || "未填日期";
   if (item.filenames && item.filenames.length > 0) {
     return `${datePart}：${item.filenames.join("、")}`;

@@ -721,6 +721,13 @@ export type BatchIdentityCluster = {
   student_id_source_job_id?: string | null;
   email_source_job_id?: string | null;
   source_job_ids?: string[];
+  members?: Array<{
+    job_id: string;
+    key?: string;
+    person_key?: string;
+    tier?: string;
+    login_name?: string;
+  }>;
   occurrences?: Array<{
     job_id: string;
     key: string;
@@ -752,6 +759,7 @@ export type BatchIdentityQuality = {
   >;
   same_as_of_jobs: Array<
     | string
+    | string[]
     | {
         as_of_time?: string;
         job_ids?: string[];

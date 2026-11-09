@@ -151,8 +151,11 @@ function mergeParsedAndResolvedJobs(
       const matchedCluster = clusters.find(
         (c) =>
           (p.cluster_id && c.cluster_id === p.cluster_id) ||
-          c.occurrences?.some(
-            (occ) => occ.job_id === jid && occ.key === p.key,
+          (c.members || c.occurrences)?.some(
+            (occ) =>
+              occ.job_id === jid &&
+              (occ.key === p.key ||
+                ("person_key" in occ && occ.person_key === p.key)),
           ),
       );
       const warnSet = new Set<string>(p.warnings || []);
