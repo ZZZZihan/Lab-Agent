@@ -24,6 +24,12 @@ from app.rag.index_meta import check_index, read_meta
 from app.ratelimit import RateLimiter
 from app.routes import install_exception_handler, router
 from app.routes_admin import router as admin_router
+from app.routes_auth_bootstrap import (
+    ensure_prod_bootstrap_token,
+)
+from app.routes_auth_bootstrap import (
+    router as auth_bootstrap_router,
+)
 from app.routes_lab import router as lab_router
 
 log = get_logger("api")
@@ -89,6 +95,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await session.execute(text("SELECT 1"))
             idx_state = await check_index(session, settings)
             meta = await read_meta(session)
+            if settings.app_env == "prod" and not (
+                settings.oidc_issuer and settings.oidc_issuer.strip()
+            ):
+                await ensure_prod_bootstrap_token(session, settings)
     except Exception:
         log.error("database_unreachable")
         raise
@@ -160,6 +170,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     setup_telemetry(app, settings)
     app.include_router(router)
+    app.include_router(auth_bootstrap_router)
     app.include_router(admin_router)
     app.include_router(lab_router)
     install_exception_handler(app)

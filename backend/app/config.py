@@ -178,6 +178,8 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_json: str | None = None
+    bootstrap_token: SecretStr | None = None
+    bootstrap_token_file: str = "./data/bootstrap_admin.token"
     paper_search_provider: Literal["unconfigured"] = "unconfigured"
     import_default_password: str = "LabAgent@2026"
     initial_password_ttl_days: int = 7
@@ -384,6 +386,11 @@ class Settings(BaseSettings):
             raise RuntimeError("MAINTENANCE_INTERVAL_SECONDS cannot be negative")
         if self.oidc_issuer and not self.oidc_audience:
             raise RuntimeError("OIDC_AUDIENCE is required when OIDC_ISSUER is set")
+        if (
+            self.bootstrap_token is not None
+            and not self.bootstrap_token.get_secret_value().strip()
+        ):
+            self.bootstrap_token = None
         if self.app_env == "test" and "rate_limit_enabled" not in self.model_fields_set:
             self.rate_limit_enabled = False
         root = repo_root()
@@ -451,6 +458,22 @@ class Settings(BaseSettings):
     @property
     def calibrated(self) -> bool:
         return self.calibration_source is not None
+
+    def resolve_bootstrap_token(self) -> str | None:
+        if self.bootstrap_token is not None:
+            val = self.bootstrap_token.get_secret_value().strip()
+            if val:
+                return val
+        if self.bootstrap_token_file and self.bootstrap_token_file.strip():
+            path = Path(self.bootstrap_token_file.strip())
+            try:
+                if path.is_file():
+                    content = path.read_text(encoding="utf-8").strip()
+                    if content:
+                        return content
+            except OSError:
+                return None
+        return None
 
     @property
     def resolved_audit_hmac_key(self) -> str:
