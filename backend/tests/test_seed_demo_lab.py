@@ -13,6 +13,7 @@ from app.models import (
     ApiToken,
     AuditEvent,
     Conversation,
+    Document,
     FieldProvenance,
     ImportJob,
     LabAchievement,
@@ -56,7 +57,19 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
             created_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(days=30),
         )
-        session.add_all([pre_conv, pre_pat])
+        pre_upload_doc = Document(
+            owner_id=admin.id,
+            title="用户原有上传技术笔记",
+            source="upload",
+            source_format="markdown",
+            collection="knowledge",
+            visibility="lab",
+            doc_key=None,
+            content_text="原有用户上传内容",
+            content_sha256=hashlib.sha256("原有用户上传内容".encode()).hexdigest(),
+            status="ready",
+        )
+        session.add_all([pre_conv, pre_pat, pre_upload_doc])
         await session.commit()
 
     await seed(include_lab_demo=True)
@@ -74,6 +87,9 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
         msgs = list(await session.scalars(select(Message)))
         tokens = list(await session.scalars(select(ApiToken)))
         audits = list(await session.scalars(select(AuditEvent)))
+        docs = list(await session.scalars(select(Document)))
+        docs_by_id = {str(d.id): d for d in docs}
+        docs_by_key = {d.doc_key: d for d in docs if d.doc_key}
 
         assert len(people) == 8
         assert sum(1 for p in people if p.signature_sha256) == 7
@@ -102,6 +118,15 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
         assert len(convs) == 3
         assert any(c.title == "用户原有历史会话" for c in convs)
         assert any("8 台节点，每台节点安装 4 张 A100 80GB" in m.content for m in msgs)
+        assert any(d.title == "用户原有上传技术笔记" and d.source == "upload" for d in docs)
+        assert "cryo-interlock-sop-pdf" in docs_by_key
+        assert docs_by_key["cryo-interlock-sop-pdf"].source == "demo_showcase"
+        assert docs_by_key["cryo-interlock-sop-pdf"].source_format == "pdf"
+        assert "compute-quota-autumn-docx" in docs_by_key
+        for m in msgs:
+            for cite in m.citations or []:
+                assert cite["document_id"] in docs_by_id
+                assert cite["doc_key"] in docs_by_key
         assert len(tokens) == 3
         assert any(t.prefix == "la_pat_preexist" for t in tokens)
         assert len(audits) >= 11

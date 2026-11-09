@@ -885,7 +885,9 @@ async def seed_demo_lab(
             force_record=True,
         )
 
-    await sync_lab_profile_rag(session, embedder=embedder, actor_id=admin.id)
+    profile_doc_key, profile_people_doc = await sync_lab_profile_rag(
+        session, embedder=embedder, actor_id=admin.id
+    )
 
     # 4. Job 3 (2026-09-15): Keep in `parsed` state for Temporal Merge Preview Diff Drawer
     job3_preview = _build_job3_parsed_preview("2026-09-15")
@@ -913,10 +915,11 @@ async def seed_demo_lab(
     extra_records = [
         (
             {
-                "doc_key": "cryo-interlock-sop-pdf",
+                "key": "cryo-interlock-sop-pdf",
                 "title": "低温超导杜瓦安全联锁操作规程（v3.2 修订版）",
                 "collection": "knowledge",
                 "visibility": "lab",
+                "source_format": "pdf",
             },
             (
                 "## 第 1 页 · 额定压力与液位联锁阈值\n"
@@ -928,10 +931,11 @@ async def seed_demo_lab(
         ),
         (
             {
-                "doc_key": "compute-quota-autumn-docx",
+                "key": "compute-quota-autumn-docx",
                 "title": "2026 秋季异构算力配额与存储归档周会纪要",
                 "collection": "meeting",
                 "visibility": "lab",
+                "source_format": "markdown",
             },
             (
                 "## 算力队列与预约上限复核\n"
@@ -947,7 +951,7 @@ async def seed_demo_lab(
         session,
         embedder=embedder,
         owner_id=admin.id,
-        source="upload",
+        source="demo_showcase",
         records=extra_records,
         grants={},
         group_grants={},
@@ -967,15 +971,26 @@ async def seed_demo_lab(
         docx_doc.original_filename = "清衡实验室_2026秋季算力配额与周会纪要.docx"
 
     # 6. Seed synthetic Conversations & Messages for Admin (沈昭) without deleting existing user conversations
-    profile_people_doc = await session.scalar(
-        select(Document).where(Document.doc_key == "lab-profile-people")
-    )
+    if profile_people_doc is None:
+        profile_people_doc = await session.scalar(
+            select(Document).where(Document.doc_key == profile_doc_key)
+        )
     gpu_doc = await session.scalar(select(Document).where(Document.doc_key == "cluster-gpu"))
     helios_doc = await session.scalar(
         select(Document).where(Document.doc_key == "project-helios-weekly")
     )
 
     cite_profile_id = str(profile_people_doc.id) if profile_people_doc else str(uuid.uuid4())
+    cite_profile_key = (
+        profile_people_doc.doc_key
+        if profile_people_doc and profile_people_doc.doc_key
+        else profile_doc_key
+    )
+    cite_profile_title = (
+        profile_people_doc.title
+        if profile_people_doc and profile_people_doc.title
+        else "课题组资料库：团队成员与研究专长"
+    )
     cite_cryo_id = str(pdf_doc.id) if pdf_doc else str(uuid.uuid4())
     cite_gpu_id = str(gpu_doc.id) if gpu_doc else str(uuid.uuid4())
     cite_helios_id = str(helios_doc.id) if helios_doc else cite_cryo_id
@@ -1017,8 +1032,8 @@ async def seed_demo_lab(
                 {
                     "index": 1,
                     "document_id": cite_profile_id,
-                    "doc_key": "lab-profile-people",
-                    "title": "课题组资料库：团队成员与研究专长",
+                    "doc_key": cite_profile_key,
+                    "title": cite_profile_title,
                     "heading": "团队成员（Lab People）",
                     "excerpt": "陈予安，研究员，博士生导师，极低温超导组负责人；研究专长：极低温超导磁体、液氦闭环冷却、异构算力集群协同。陆星河，副研究员，硕士生导师；研究专长：可信检索增强生成、证据门控校准、多模态科学文献解析。",
                     "score": 0.91,
