@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime, timedelta
+
 from app.db import get_sessionmaker
 from app.importer.pii import assert_no_pii
 from app.importer.provenance import build_merge_preview
@@ -16,6 +19,8 @@ from app.models import (
     LabFacility,
     LabPerson,
     LabProject,
+    Message,
+    User,
 )
 from app.seed import seed
 from app.seed_demo_lab import make_calligraphic_signature_png
@@ -36,11 +41,28 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
     client: object,
 ) -> None:
     _ = client  # ensure test database fixture is initialized
+    # First seed base demo users, then add a pre-existing user conversation & PAT
+    await seed(include_lab_demo=False)
+    maker = get_sessionmaker()
+    async with maker() as session:
+        admin = await session.scalar(select(User).where(User.email == "admin@lab.local"))
+        assert admin is not None
+        pre_conv = Conversation(user_id=admin.id, title="用户原有历史会话")
+        pre_pat = ApiToken(
+            user_id=admin.id,
+            name="Pre-existing User PAT",
+            token_hash=hashlib.sha256(b"pre-existing-user-pat").hexdigest(),
+            prefix="la_pat_preexist",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+        )
+        session.add_all([pre_conv, pre_pat])
+        await session.commit()
+
     await seed(include_lab_demo=True)
-    # Second run must be idempotent
+    # Second run must be idempotent and preserve pre-existing conversations & tokens
     await seed(include_lab_demo=True)
 
-    maker = get_sessionmaker()
     async with maker() as session:
         people = list(await session.scalars(select(LabPerson)))
         projects = list(await session.scalars(select(LabProject)))
@@ -49,6 +71,7 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
         jobs = list(await session.scalars(select(ImportJob)))
         prov_rows = list(await session.scalars(select(FieldProvenance)))
         convs = list(await session.scalars(select(Conversation)))
+        msgs = list(await session.scalars(select(Message)))
         tokens = list(await session.scalars(select(ApiToken)))
         audits = list(await session.scalars(select(AuditEvent)))
 
@@ -76,8 +99,11 @@ async def test_seed_with_lab_demo_populates_synthetic_qingheng_fixtures(
         assert len(jobs) == 3
         assert {j.status for j in jobs} == {"provisioned", "merged", "parsed"}
         assert any(r.source_kind == "manual" for r in prov_rows)
-        assert len(convs) == 2
-        assert len(tokens) == 2
+        assert len(convs) == 3
+        assert any(c.title == "用户原有历史会话" for c in convs)
+        assert any("8 台节点，每台节点安装 4 张 A100 80GB" in m.content for m in msgs)
+        assert len(tokens) == 3
+        assert any(t.prefix == "la_pat_preexist" for t in tokens)
         assert len(audits) >= 11
 
         parsed_job = next(j for j in jobs if j.status == "parsed")

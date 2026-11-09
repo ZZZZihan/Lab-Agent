@@ -16,7 +16,7 @@ import zlib
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
@@ -466,10 +466,10 @@ def _build_job1_preview(as_of_str: str) -> dict[str, Any]:
             "key": "f1",
             "category": "equipment",
             "name": "清衡-A100 高性能异构计算集群",
-            "spec": "4 台计算节点（qh-gpu-01 至 qh-gpu-04），每台 8×NVIDIA A100-SXM4-80GB，400Gb/s InfiniBand 互连",
+            "spec": "8 台计算节点，每台安装 4 张 NVIDIA A100 80GB（登录节点 login.qingheng.lab）",
             "value_wan": "680.00",
             "usage_scenario": "支撑 4096 维 Qwen3-Embedding-8B 向量索引构建、混合检索评测与科学模型训练",
-            "raw_text": "清衡-A100 高性能异构计算集群（4 台 8×A100-80GB 节点），原值 680.00 万元，用于高维向量检索与模型训练。",
+            "raw_text": "清衡-A100 高性能异构计算集群（8 台节点，每台 4 张 A100 80GB），原值 680.00 万元，用于高维向量检索与模型训练。",
             "warnings": [],
         },
         {
@@ -778,8 +778,7 @@ async def seed_demo_lab(
     # Skip if synthetic lab jobs are already seeded
     existing_job = await session.scalar(
         select(ImportJob).where(
-            ImportJob.original_filename
-            == "清衡实验室_超导磁体与算力基座_2025春季申报书.docx"
+            ImportJob.original_filename == "清衡实验室_超导磁体与算力基座_2025春季申报书.docx"
         )
     )
     if existing_job is not None:
@@ -935,9 +934,9 @@ async def seed_demo_lab(
                 "visibility": "lab",
             },
             (
-                "## 算力队列与并发上限调整\n"
-                "清衡-A100 集群共 4 台 8×A100-80GB 节点（32 张 GPU）。自 2026 年秋季学期起，交互调试分区 `interactive` 单任务最长 4 小时，最多申请 2 张 GPU；"
-                "训练分区 `train` 单用户并发上限为 8 张 GPU，最长 72 小时。\n\n"
+                "## 算力队列与预约上限复核\n"
+                "清衡-A100 共有 8 台节点，每台节点安装 4 张 A100 80GB（登录节点主机名是 login.qingheng.lab）。"
+                "预约入口是内网系统 gpu.qingheng.lab，单次预约最长 24 小时，同一任务只可续约 1 次；交互式调试单卡不超过 2 小时，超时会被调度器回收。\n\n"
                 "## 向量索引与冷备份要求\n"
                 "超过 5,000 个知识块的专题库推荐启用 `EMBEDDING_INDEX=hnsw_prefix`（1024 维前缀 HNSW 粗筛 + 4096 维 halfvec 精排），"
                 "由顾清辞与苏景行每周五晚执行一次基准回归核验。"
@@ -967,146 +966,180 @@ async def seed_demo_lab(
         docx_doc.source_format = "markdown"
         docx_doc.original_filename = "清衡实验室_2026秋季算力配额与周会纪要.docx"
 
-    # 6. Seed synthetic Conversations & Messages for Admin (沈昭) and Member (林可)
-    helios_doc = await session.scalar(
-        select(Document).where(Document.doc_key == "project-helios")
-    )
+    # 6. Seed synthetic Conversations & Messages for Admin (沈昭) without deleting existing user conversations
     profile_people_doc = await session.scalar(
         select(Document).where(Document.doc_key == "lab-profile-people")
     )
-    gpu_doc = await session.scalar(
-        select(Document).where(Document.doc_key == "cluster-gpu")
+    gpu_doc = await session.scalar(select(Document).where(Document.doc_key == "cluster-gpu"))
+    helios_doc = await session.scalar(
+        select(Document).where(Document.doc_key == "project-helios-weekly")
     )
-
-    await session.execute(
-        delete(Conversation).where(Conversation.user_id.in_([admin.id, linke.id]))
-    )
-
-    conv1 = Conversation(
-        user_id=admin.id,
-        title="陈予安与陆星河研究方向及赫利俄斯 HX-17 联锁参数",
-    )
-    conv2 = Conversation(
-        user_id=admin.id,
-        title="清衡-A100 算力集群节点规模与并发配额规范",
-    )
-    session.add_all([conv1, conv2])
-    await session.flush()
 
     cite_profile_id = str(profile_people_doc.id) if profile_people_doc else str(uuid.uuid4())
-    cite_helios_id = str(helios_doc.id) if helios_doc else str(uuid.uuid4())
+    cite_cryo_id = str(pdf_doc.id) if pdf_doc else str(uuid.uuid4())
     cite_gpu_id = str(gpu_doc.id) if gpu_doc else str(uuid.uuid4())
+    cite_helios_id = str(helios_doc.id) if helios_doc else cite_cryo_id
 
-    msg1_q = Message(
-        conversation_id=conv1.id,
-        role="user",
-        content="课题组里陈予安和陆星河的研究专长与主持项目分别是什么？赫利俄斯 HX-17 的主磁体额定工作电流上限是多少？",
-        refused=False,
-        citations=[],
+    conv1_title = "陈予安与陆星河研究方向及赫利俄斯 HX-17 联锁参数"
+    existing_conv1 = await session.scalar(
+        select(Conversation).where(
+            Conversation.user_id == admin.id,
+            Conversation.title == conv1_title,
+        )
     )
-    msg1_a = Message(
-        conversation_id=conv1.id,
-        role="assistant",
-        content=(
-            "根据课题组资料库档案，陈予安（研究员、博士生导师、极低温超导组负责人）的研究专长为极低温超导磁体、液氦闭环冷却与异构算力集群协同，"
-            "目前主持国家自然科学基金重点项目《面向百千瓦级极低温超导磁体的闭环液氦联锁与智能诊断研究》（NSFC-62530117）及赫利俄斯 HX-17 工程课题 [1]。"
-            "陆星河（副研究员、硕士生导师、可信检索组负责人）的研究专长为可信检索增强生成、证据门控校准与多模态科学文献解析，"
-            "主持省部级人工智能重大专项《面向科研合规的细粒度权限隔离检索与零幻觉证据门控技术》（QH-2026-ZX09）[1]。\n\n"
-            "在项目赫利俄斯（内部代号 HX-17）测试规程中，主磁体额定工作电流上限为 185 A；当液氦液位低于 35% 时将自动触发联锁停机保护 [2]。"
-        ),
-        refused=False,
-        citations=[
-            {
-                "index": 1,
-                "document_id": cite_profile_id,
-                "doc_key": "lab-profile-people",
-                "title": "课题组资料库：团队成员与研究专长",
-                "heading": "团队成员（Lab People）",
-                "excerpt": "陈予安，研究员，博士生导师，极低温超导组负责人；研究专长：极低温超导磁体、液氦闭环冷却、异构算力集群协同。陆星河，副研究员，硕士生导师；研究专长：可信检索增强生成、证据门控校准、多模态科学文献解析。",
-                "score": 0.91,
-            },
-            {
-                "index": 2,
-                "document_id": cite_helios_id,
-                "doc_key": "project-helios",
-                "title": "项目赫利俄斯：低温超导磁体测试记录",
-                "heading": "代号与范围",
-                "excerpt": "赫利俄斯项目内部代号为 HX-17，由陈予安负责。主磁体额定工作电流上限为 185 A，液氦液位低于 35% 时触发联锁停机。",
-                "score": 0.88,
-            },
-        ],
-    )
+    if existing_conv1 is None:
+        conv1 = Conversation(
+            user_id=admin.id,
+            title=conv1_title,
+        )
+        session.add(conv1)
+        await session.flush()
 
-    msg2_q = Message(
-        conversation_id=conv2.id,
-        role="user",
-        content="清衡-A100 一共有多少台节点？单用户训练队列最多并发多少张 GPU？",
-        refused=False,
-        citations=[],
-    )
-    msg2_a = Message(
-        conversation_id=conv2.id,
-        role="assistant",
-        content=(
-            "清衡实验室主力 GPU 集群代号为「清衡-A100」，共配备 4 台计算节点（qh-gpu-01 至 qh-gpu-04），每台节点含 8 张 A100-SXM4-80GB 加速卡，通过 400Gb/s InfiniBand 互连 [1]。\n\n"
-            "在 Slurm 队列规则中，交互分区 `interactive` 单任务最长 4 小时、最多 2 张 GPU；训练分区 `train` 单任务最长 72 小时，单用户并发上限为 8 张 GPU [1]。"
-        ),
-        refused=False,
-        citations=[
-            {
-                "index": 1,
-                "document_id": cite_gpu_id,
-                "doc_key": "cluster-gpu",
-                "title": "清衡 GPU 集群使用约定",
-                "heading": "节点与分区",
-                "excerpt": "清衡实验室主力集群代号为 清衡-A100，共 4 台计算节点（qh-gpu-01 至 qh-gpu-04），每台配备 8 张 80GB 加速卡。训练分区 train 单用户并发上限为 8 张 GPU。",
-                "score": 0.93,
-            }
-        ],
-    )
-    msg2_refuse_q = Message(
-        conversation_id=conv2.id,
-        role="user",
-        content="周三学术例会在哪间实体会议室举行？供应商采购合同的付款账号是多少？",
-        refused=False,
-        citations=[],
-    )
-    msg2_refuse_a = Message(
-        conversation_id=conv2.id,
-        role="assistant",
-        content=(
-            "证据门控拦截（insufficient_evidence）：当前授权可访问的知识库分块最高相关性得分（0.31）低于校准门控阈值（0.58），且关键实体未命中可靠证据。"
-            "实验室周会固定在线上举行（未登记周三实体会议室），且未授权的受限采购合同文档已在 SQL 检索阶段执行 ACL 物理隔离。"
-        ),
-        refused=True,
-        citations=[],
-    )
-    session.add_all([msg1_q, msg1_a, msg2_q, msg2_a, msg2_refuse_q, msg2_refuse_a])
+        msg1_q = Message(
+            conversation_id=conv1.id,
+            role="user",
+            content="课题组里陈予安和陆星河的研究专长与主持项目分别是什么？赫利俄斯 HX-17 的主磁体额定工作电流上限是多少？",
+            refused=False,
+            citations=[],
+        )
+        msg1_a = Message(
+            conversation_id=conv1.id,
+            role="assistant",
+            content=(
+                "根据课题组资料库档案，陈予安（研究员、博士生导师、极低温超导组负责人）的研究专长为极低温超导磁体、液氦闭环冷却与异构算力集群协同，"
+                "目前主持国家自然科学基金重点项目《面向百千瓦级极低温超导磁体的闭环液氦联锁与智能诊断研究》（NSFC-62530117）及赫利俄斯 HX-17 工程课题 [1]。"
+                "陆星河（副研究员、硕士生导师、可信检索组负责人）的研究专长为可信检索增强生成、证据门控校准与多模态科学文献解析，"
+                "主持省部级人工智能重大专项《面向科研合规的细粒度权限隔离检索与零幻觉证据门控技术》（QH-2026-ZX09）[1]。\n\n"
+                "根据《低温超导杜瓦安全联锁操作规程（v3.2 修订版）》，赫利俄斯 HX-17 主磁体额定工作电流上限为 185 A；当液氦液位低于 35% 时，双路冗余液位计将在 20 ms 内触发硬件联锁停机并启动快速消磁回路 [2]。"
+            ),
+            refused=False,
+            citations=[
+                {
+                    "index": 1,
+                    "document_id": cite_profile_id,
+                    "doc_key": "lab-profile-people",
+                    "title": "课题组资料库：团队成员与研究专长",
+                    "heading": "团队成员（Lab People）",
+                    "excerpt": "陈予安，研究员，博士生导师，极低温超导组负责人；研究专长：极低温超导磁体、液氦闭环冷却、异构算力集群协同。陆星河，副研究员，硕士生导师；研究专长：可信检索增强生成、证据门控校准、多模态科学文献解析。",
+                    "score": 0.91,
+                },
+                {
+                    "index": 2,
+                    "document_id": cite_cryo_id,
+                    "doc_key": "cryo-interlock-sop-pdf",
+                    "title": "低温超导杜瓦安全联锁操作规程（v3.2 修订版）",
+                    "heading": "第 1 页 · 额定压力与液位联锁阈值",
+                    "excerpt": "赫利俄斯 HX-17 低温杜瓦罐液氮补给阀额定压力上限为 350 kPa，每 14 天由林可带队执行一次气密性巡检。主磁体额定工作电流上限为 185 A；当液氦液位低于 35% 时，双路冗余液位计将在 20 ms 内触发硬件联锁停机并启动快速消磁回路。",
+                    "score": 0.89,
+                },
+            ],
+        )
+        session.add_all([msg1_q, msg1_a])
+    else:
+        conv1 = existing_conv1
 
-    # 7. Seed Personal Access Tokens in `api_tokens` for Admin
-    await session.execute(delete(ApiToken).where(ApiToken.user_id == admin.id))
+    conv2_title = "清衡-A100 算力集群节点规模与并发配额规范"
+    existing_conv2 = await session.scalar(
+        select(Conversation).where(
+            Conversation.user_id == admin.id,
+            Conversation.title == conv2_title,
+        )
+    )
+    if existing_conv2 is None:
+        conv2 = Conversation(
+            user_id=admin.id,
+            title=conv2_title,
+        )
+        session.add(conv2)
+        await session.flush()
+
+        msg2_q = Message(
+            conversation_id=conv2.id,
+            role="user",
+            content="清衡-A100 一共有多少台节点？预约时长上限与交互调试限制分别是什么？",
+            refused=False,
+            citations=[],
+        )
+        msg2_a = Message(
+            conversation_id=conv2.id,
+            role="assistant",
+            content=(
+                "根据《清衡 GPU 集群使用约定》，清衡-A100 共有 8 台节点，每台节点安装 4 张 A100 80GB（登录节点主机名是 login.qingheng.lab）[1]。\n\n"
+                "预约入口是内网系统 gpu.qingheng.lab，单次预约最长 24 小时，同一任务只可续约 1 次；交互式调试单卡不超过 2 小时，超时会被调度器回收 [1]。"
+            ),
+            refused=False,
+            citations=[
+                {
+                    "index": 1,
+                    "document_id": cite_gpu_id,
+                    "doc_key": "cluster-gpu",
+                    "title": "清衡 GPU 集群使用约定",
+                    "heading": "硬件规模",
+                    "excerpt": "清衡-A100 共有 8 台节点，每台节点安装 4 张 A100 80GB。登录节点主机名是 login.qingheng.lab。这 8 台是 GPU 节点，不是存储服务器。",
+                    "score": 0.93,
+                }
+            ],
+        )
+        msg2_refuse_q = Message(
+            conversation_id=conv2.id,
+            role="user",
+            content="周三学术例会在哪间实体会议室举行？供应商采购合同的付款账号是多少？",
+            refused=False,
+            citations=[],
+        )
+        msg2_refuse_a = Message(
+            conversation_id=conv2.id,
+            role="assistant",
+            content=(
+                "证据门控拦截（insufficient_evidence）：当前授权可访问的知识库分块最高相关性得分（0.31）低于校准门控阈值（0.58），且关键实体未命中可靠证据。"
+                "实验室周会固定在线上举行（未登记周三实体会议室），且未授权的受限采购合同文档已在 SQL 检索阶段执行 ACL 物理隔离。"
+            ),
+            refused=True,
+            citations=[],
+        )
+        session.add_all([msg2_q, msg2_a, msg2_refuse_q, msg2_refuse_a])
+    else:
+        conv2 = existing_conv2
+
+    # 7. Seed Personal Access Tokens in `api_tokens` for Admin without deleting existing user tokens
     now_utc = datetime.now(UTC)
-    pat_active = ApiToken(
-        user_id=admin.id,
-        name="Claude Desktop MCP (Workstation)",
-        token_hash=hashlib.sha256(b"synth-demo-pat-active-qingheng").hexdigest(),
-        prefix="la_pat_qh9x82k1",
-        created_at=now_utc - timedelta(days=5),
-        last_used_at=now_utc - timedelta(hours=2),
-        expires_at=now_utc + timedelta(days=85),
-        revoked_at=None,
+    active_hash = hashlib.sha256(b"synth-demo-pat-active-qingheng").hexdigest()
+    existing_active_pat = await session.scalar(
+        select(ApiToken).where(ApiToken.token_hash == active_hash)
     )
-    pat_revoked = ApiToken(
-        user_id=admin.id,
-        name="Nightly Eval Pipeline Runner",
-        token_hash=hashlib.sha256(b"synth-demo-pat-revoked-qingheng").hexdigest(),
-        prefix="la_pat_ci7m30p4",
-        created_at=now_utc - timedelta(days=28),
-        last_used_at=now_utc - timedelta(days=14),
-        expires_at=now_utc + timedelta(days=62),
-        revoked_at=now_utc - timedelta(days=10),
+    if existing_active_pat is None:
+        pat_active = ApiToken(
+            user_id=admin.id,
+            name="Claude Desktop MCP (Workstation)",
+            token_hash=active_hash,
+            prefix="la_pat_qh9x82k1",
+            created_at=now_utc - timedelta(days=5),
+            last_used_at=now_utc - timedelta(hours=2),
+            expires_at=now_utc + timedelta(days=85),
+            revoked_at=None,
+        )
+        session.add(pat_active)
+        await session.flush()
+    else:
+        pat_active = existing_active_pat
+
+    revoked_hash = hashlib.sha256(b"synth-demo-pat-revoked-qingheng").hexdigest()
+    existing_revoked_pat = await session.scalar(
+        select(ApiToken).where(ApiToken.token_hash == revoked_hash)
     )
-    session.add_all([pat_active, pat_revoked])
+    if existing_revoked_pat is None:
+        session.add(
+            ApiToken(
+                user_id=admin.id,
+                name="Nightly Eval Pipeline Runner",
+                token_hash=revoked_hash,
+                prefix="la_pat_ci7m30p4",
+                created_at=now_utc - timedelta(days=28),
+                last_used_at=now_utc - timedelta(days=14),
+                expires_at=now_utc + timedelta(days=62),
+                revoked_at=now_utc - timedelta(days=10),
+            )
+        )
     await session.commit()
 
     # 8. Write hash-chained PII-free audit events via `write_audit()`
