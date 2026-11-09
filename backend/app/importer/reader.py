@@ -1,4 +1,4 @@
-"""Safe .doc / .docx reader with magic-byte, zip-bomb, OLE2, macro, merged-cell, and embedded-image extraction."""
+"""Safe .doc / .docx reader backed by olefile, python-docx, lxml, defusedxml, striprtf, and charset-normalizer."""
 
 from __future__ import annotations
 
@@ -10,18 +10,23 @@ import posixpath
 import re
 import struct
 import unicodedata
-import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from typing import Any, Literal
 
+import charset_normalizer
 import docx
+import lxml.etree
+import lxml.html
+import olefile
+import striprtf.striprtf as _striprtf
+from defusedxml import ElementTree as DefusedET
+from defusedxml.common import DefusedXmlException
 from docx.table import Table
 
 ZIP_MAGIC = b"PK\x03\x04"
 OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-ZERO_WIDTH_RE = re.compile(r"[​-‏﻿]")
+ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\ufeff]")
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0e-\x1f]")
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -32,6 +37,38 @@ REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 MAX_EMBEDDED_IMAGE_READ_BYTES = 2_097_152 + 1  # Read up to 2 MiB + 1 byte to trigger SIGNATURE_TOO_LARGE safely
 MAX_IMPORT_IMAGE_COUNT = 64
 MAX_IMPORT_DEDUP_IMAGE_BYTES = 32 * 1024 * 1024  # 32 MiB
+
+# Configure striprtf table/structure markers using Unicode Private Use Area codepoints so user text never collides
+_RTF_PAR_TOK = "\uf00d"
+_RTF_CELL_TOK = "\uf007"
+_RTF_ROW_TOK = "\uf01e"
+_RTF_TROWD_TOK = "\uf01d"
+
+_striprtf.charset_map[134] = "gb18030"
+_striprtf.HYPERLINKS = re.compile(r"(?!x)(x)(x)")
+_striprtf.FONTTABLE = re.compile(r"\\f(\d+)[^{};]*?\\fcharset(\d+)[^{};]*?([^;{}]+);")
+_striprtf.specialchars.update(
+    {
+        "par": _RTF_PAR_TOK,
+        "sect": _RTF_PAR_TOK,
+        "page": _RTF_PAR_TOK,
+        "line": "\n",
+        "cell": _RTF_CELL_TOK,
+        "nestcell": _RTF_CELL_TOK,
+        "row": _RTF_ROW_TOK,
+        "nestrow": _RTF_ROW_TOK,
+        "trowd": _RTF_TROWD_TOK,
+        "-": "",
+        "_": "-",
+        "zwj": "\u200d",
+        "zwnj": "\u200c",
+        "ltrmark": "\u200e",
+        "rtlmark": "\u200f",
+        "zwbo": "\u200b",
+        "zwnbo": "\ufeff",
+    }
+)
+_striprtf.destinations = _striprtf.destinations - {"ud", "upr"}
 
 
 @dataclass(frozen=True)
@@ -78,7 +115,7 @@ def normalize_cell_text(raw: str) -> str:
     text = text.replace("\x0b", "\n").replace("\x0c", "\n")
     text = ZERO_WIDTH_RE.sub("", text)
     text = CONTROL_CHARS_RE.sub("", text)
-    lines = [re.sub(r"[ \t　]+", " ", ln).strip() for ln in text.splitlines()]
+    lines = [re.sub(r"[ \t\u3000]+", " ", ln).strip() for ln in text.splitlines()]
     return "\n".join(ln for ln in lines if ln).strip()
 
 
@@ -116,13 +153,7 @@ _MSDOC_SPECIAL_BYTES: dict[int, str] = {
 
 
 def _decode_msdoc_compressed(chunk: bytes) -> str:
-    out: list[str] = []
-    for b in chunk:
-        if b in _MSDOC_SPECIAL_BYTES:
-            out.append(_MSDOC_SPECIAL_BYTES[b])
-        else:
-            out.append(chr(b))
-    return "".join(out)
+    return "".join(_MSDOC_SPECIAL_BYTES.get(b, chr(b)) for b in chunk)
 
 
 def _strip_msdoc_fields(
@@ -152,9 +183,8 @@ def _strip_msdoc_fields(
                 field_stack[-1] = False
                 active_instr[0] -= 1
         elif ch == "\x15":
-            if field_stack:
-                if field_stack.pop():
-                    active_instr[0] -= 1
+            if field_stack and field_stack.pop():
+                active_instr[0] -= 1
         elif active_instr[0] == 0:
             out.append(ch)
     return "".join(out)
@@ -185,7 +215,7 @@ def _sniff_legacy_doc_kind(
     else:
         head_str = sample.decode("latin-1", errors="ignore")
 
-    head_lower = head_str.lstrip("﻿ \t\r\n").lower()
+    head_lower = head_str.lstrip("\ufeff \t\r\n").lower()
     if head_lower.startswith("{\\rtf"):
         return "rtf"
     if (
@@ -210,253 +240,74 @@ def _read_ole2_streams(
     *,
     max_uncompressed_bytes: int,
 ) -> tuple[dict[str, bytes], set[str]]:
-    if len(raw_bytes) < 512 or raw_bytes[:8] != OLE2_MAGIC:
+    """Read root-level OLE2 streams and all entry names using `olefile.OleFileIO`."""
+    if len(raw_bytes) < 512 or not olefile.isOleFile(raw_bytes):
         raise DocxValidationError(
             415,
             "import_unsupported_format",
             "不是有效的 .doc (OLE2) 文件",
         )
-    sector_shift = struct.unpack_from("<H", raw_bytes, 0x1E)[0]
-    mini_sector_shift = struct.unpack_from("<H", raw_bytes, 0x20)[0]
-    if sector_shift not in (9, 12) or mini_sector_shift != 6:
-        raise DocxValidationError(
-            415,
-            "import_unsupported_format",
-            "损坏的 .doc (OLE2) 文件头",
-        )
-    sector_size = 1 << sector_shift
-    mini_sector_size = 1 << mini_sector_shift
-    max_file_sectors = (len(raw_bytes) - 512) // sector_size
-    num_fat_sectors = struct.unpack_from("<I", raw_bytes, 0x2C)[0]
-    first_dir_sector = struct.unpack_from("<I", raw_bytes, 0x30)[0]
-    mini_cutoff = struct.unpack_from("<I", raw_bytes, 0x38)[0] or 4096
-    first_minifat_sector = struct.unpack_from("<I", raw_bytes, 0x3C)[0]
-    num_minifat_sectors = struct.unpack_from("<I", raw_bytes, 0x40)[0]
-    first_difat_sector = struct.unpack_from("<I", raw_bytes, 0x44)[0]
-    num_difat_sectors = struct.unpack_from("<I", raw_bytes, 0x48)[0]
-
-    if (
-        num_fat_sectors <= 0
-        or num_fat_sectors > max_file_sectors
-        or num_difat_sectors > max_file_sectors
-        or (num_minifat_sectors > max_file_sectors and first_minifat_sector < 0xFFFFFFFC)
-    ):
-        raise DocxValidationError(
-            415,
-            "import_unsupported_format",
-            "损坏的 .doc (OLE2) 扇区分配表",
-        )
-    if (
-        num_fat_sectors * sector_size > max_uncompressed_bytes
-        or num_minifat_sectors * sector_size > max_uncompressed_bytes
-    ):
-        raise DocxValidationError(
-            413,
-            "import_uncompressed_too_large",
-            "文档解压后大小超过安全上限",
-        )
-
-    def _read_sector(sec_id: int) -> bytes:
-        offset = (sec_id + 1) * sector_size
-        if sec_id < 0 or sec_id >= max_file_sectors or offset + sector_size > len(raw_bytes):
-            raise DocxValidationError(
-                415,
-                "import_unsupported_format",
-                "损坏的 .doc 扇区数据",
-            )
-        return raw_bytes[offset : offset + sector_size]
-
-    difat: list[int] = [
+    header_difat = [
         sec for sec in struct.unpack_from("<109I", raw_bytes, 0x4C) if sec < 0xFFFFFFFC
     ]
-    difat_sec = first_difat_sector
-    visited_difat: set[int] = set()
-    entries_per_sector = sector_size // 4
-    for _ in range(min(num_difat_sectors, max_file_sectors, 4096)):
-        if difat_sec >= 0xFFFFFFFC:
-            raise DocxValidationError(
-                415,
-                "import_unsupported_format",
-                "损坏的 .doc (OLE2) DIFAT 扇区链",
-            )
-        if difat_sec in visited_difat:
-            raise DocxValidationError(
-                415,
-                "import_unsupported_format",
-                "损坏的 .doc (OLE2) DIFAT 重复扇区引用",
-            )
-        visited_difat.add(difat_sec)
-        sec_bytes = _read_sector(difat_sec)
-        vals = struct.unpack_from(f"<{entries_per_sector}I", sec_bytes, 0)
-        difat.extend(v for v in vals[:-1] if v < 0xFFFFFFFC)
-        difat_sec = vals[-1]
-    if difat_sec < 0xFFFFFFFC:
+    if len(header_difat) != len(set(header_difat)):
         raise DocxValidationError(
             415,
             "import_unsupported_format",
-            "损坏的 .doc (OLE2) DIFAT 扇区链未正常终止",
+            "损坏的 .doc (OLE2) 重复 FAT 扇区引用",
         )
-
-    if len(difat) != num_fat_sectors:
-        raise DocxValidationError(
-            415,
-            "import_unsupported_format",
-            "损坏的 .doc (OLE2) FAT 扇区数量不一致",
-        )
-
-    fat: list[int] = []
-    seen_fat_sectors: set[int] = set()
-    for fat_sec in difat[:num_fat_sectors]:
-        if fat_sec in seen_fat_sectors or fat_sec in visited_difat:
-            raise DocxValidationError(
-                415,
-                "import_unsupported_format",
-                "损坏的 .doc (OLE2) 重复 FAT 扇区引用",
+    try:
+        with olefile.OleFileIO(raw_bytes) as ole:
+            if ole.num_difat_sectors == 0 and len(header_difat) != ole.num_fat_sectors:
+                raise DocxValidationError(
+                    415,
+                    "import_unsupported_format",
+                    "损坏的 .doc (OLE2) FAT 扇区数量不一致",
+                )
+            for sid in range(len(ole.direntries)):
+                if ole.direntries[sid] is None:
+                    try:
+                        ole._load_direntry(sid)
+                    except Exception:
+                        continue
+            total_stream_bytes = sum(
+                int(entry.size)
+                for entry in ole.direntries
+                if entry is not None and entry.entry_type == olefile.STGTY_STREAM
             )
-        seen_fat_sectors.add(fat_sec)
-        sec_bytes = _read_sector(fat_sec)
-        fat.extend(struct.unpack_from(f"<{entries_per_sector}I", sec_bytes, 0))
-    fat = fat[:max_file_sectors]
-
-    def _read_chain(start_sec: int, exact_size: int | None = None) -> bytes:
-        if start_sec >= 0xFFFFFFFC or exact_size == 0:
-            return b""
-        chunks: list[bytes] = []
-        total = 0
-        sec = start_sec
-        visited: set[int] = set()
-        limit = exact_size if exact_size is not None else max_uncompressed_bytes
-        while sec < 0xFFFFFFFC:
-            if sec in visited or sec >= len(fat):
-                break
-            visited.add(sec)
-            blk = _read_sector(sec)
-            chunks.append(blk)
-            total += len(blk)
-            if total > max_uncompressed_bytes:
+            if total_stream_bytes > max_uncompressed_bytes:
                 raise DocxValidationError(
                     413,
                     "import_uncompressed_too_large",
                     "文档解压后大小超过安全上限",
                 )
-            if exact_size is not None and total >= limit:
-                break
-            sec = fat[sec]
-        joined = b"".join(chunks)
-        return joined[:exact_size] if exact_size is not None else joined
-
-    dir_bytes = _read_chain(first_dir_sector)
-    if len(dir_bytes) < 128:
+            all_names_lower = {
+                str(entry.name).lower()
+                for entry in ole.direntries
+                if entry is not None and entry.name
+            }
+            streams: dict[str, bytes] = {}
+            for entry in sorted(ole.root.kids, key=lambda e: e.sid):
+                if entry.entry_type == olefile.STGTY_STREAM and entry.name not in streams:
+                    data = ole._open(entry.isectStart, entry.size).read(
+                        max_uncompressed_bytes + 1
+                    )
+                    if len(data) > max_uncompressed_bytes:
+                        raise DocxValidationError(
+                            413,
+                            "import_uncompressed_too_large",
+                            "文档解压后大小超过安全上限",
+                        )
+                    streams[entry.name] = data
+            return streams, all_names_lower
+    except DocxValidationError:
+        raise
+    except Exception as exc:
         raise DocxValidationError(
             415,
             "import_unsupported_format",
-            "损坏的 .doc 目录流",
-        )
-
-    minifat: list[int] = []
-    if num_minifat_sectors > 0 and first_minifat_sector < 0xFFFFFFFC:
-        minifat_bytes = _read_chain(first_minifat_sector, num_minifat_sectors * sector_size)
-        count = len(minifat_bytes) // 4
-        if count > 0:
-            minifat = list(struct.unpack_from(f"<{count}I", minifat_bytes, 0))
-
-    root_start_sec = struct.unpack_from("<I", dir_bytes, 116)[0]
-    root_size = struct.unpack_from("<Q", dir_bytes, 120)[0]
-    if sector_shift == 9:
-        root_size &= 0xFFFFFFFF
-    if root_size > max_uncompressed_bytes:
-        raise DocxValidationError(
-            413,
-            "import_uncompressed_too_large",
-            "文档解压后大小超过安全上限",
-        )
-    mini_stream = (
-        _read_chain(root_start_sec, int(root_size))
-        if root_start_sec < 0xFFFFFFFC and root_size > 0
-        else b""
-    )
-
-    def _read_mini_chain(start_mini_sec: int, exact_size: int) -> bytes:
-        if start_mini_sec >= 0xFFFFFFFC or exact_size <= 0:
-            return b""
-        chunks: list[bytes] = []
-        total = 0
-        sec = start_mini_sec
-        visited: set[int] = set()
-        while sec < 0xFFFFFFFC and total < exact_size:
-            if sec in visited:
-                break
-            visited.add(sec)
-            off = sec * mini_sector_size
-            if off < 0 or off + mini_sector_size > len(mini_stream):
-                break
-            chunks.append(mini_stream[off : off + mini_sector_size])
-            total += mini_sector_size
-            if sec >= len(minifat):
-                break
-            sec = minifat[sec]
-        return b"".join(chunks)[:exact_size]
-
-    streams: dict[str, bytes] = {}
-    all_names_lower: set[str] = set()
-    total_stream_bytes = 0
-    num_entries = len(dir_bytes) // 128
-
-    # Collect direct children of Root Entry (entry 0) by traversing only sibling links
-    # (left_sib at offset 68, right_sib at offset 72) from Root Entry's child_id (offset 76),
-    # without descending into nested storages (obj_type == 1) such as ObjectPool.
-    root_direct_indices: set[int] = set()
-    if num_entries > 0:
-        root_child_id = struct.unpack_from("<I", dir_bytes, 76)[0]
-        stack: list[int] = [root_child_id]
-        while stack:
-            curr = stack.pop()
-            if curr == 0 or curr >= num_entries or curr in root_direct_indices:
-                continue
-            c_entry = dir_bytes[curr * 128 : (curr + 1) * 128]
-            if c_entry[66] == 0:
-                continue
-            root_direct_indices.add(curr)
-            left_sib, right_sib = struct.unpack_from("<II", c_entry, 68)
-            if left_sib < num_entries:
-                stack.append(left_sib)
-            if right_sib < num_entries:
-                stack.append(right_sib)
-
-    for idx in range(num_entries):
-        entry = dir_bytes[idx * 128 : (idx + 1) * 128]
-        name_cb = struct.unpack_from("<H", entry, 64)[0]
-        obj_type = entry[66]
-        if obj_type == 0 or name_cb < 2 or name_cb > 64:
-            continue
-        name = entry[: name_cb - 2].decode("utf-16-le", errors="ignore").strip("\x00")
-        if not name:
-            continue
-        all_names_lower.add(name.lower())
-        if obj_type != 2:
-            continue
-        start_sec = struct.unpack_from("<I", entry, 116)[0]
-        size = struct.unpack_from("<Q", entry, 120)[0]
-        if sector_shift == 9:
-            size &= 0xFFFFFFFF
-        stream_size = int(size)
-        total_stream_bytes += stream_size
-        if total_stream_bytes > max_uncompressed_bytes:
-            raise DocxValidationError(
-                413,
-                "import_uncompressed_too_large",
-                "文档解压后大小超过安全上限",
-            )
-        if root_direct_indices and idx not in root_direct_indices:
-            continue
-        if name in streams:
-            continue
-        if stream_size < mini_cutoff and mini_stream:
-            streams[name] = _read_mini_chain(start_sec, stream_size)
-        else:
-            streams[name] = _read_chain(start_sec, stream_size)
-
-    return streams, all_names_lower
+            "损坏的 .doc (OLE2) 文件结构",
+        ) from exc
 
 
 def _parse_papx_table_flags(
@@ -522,11 +373,11 @@ def _parse_papx_table_flags(
                     b_offset_cache[b_offset] = (False, False)
                     continue
                 cb_bytes = fkp[papx_pos + 1] * 2
-                grp_start = papx_pos + 4  # skip 2-byte cb + 2-byte istd
+                grp_start = papx_pos + 4
                 grp_end = min(511, papx_pos + 2 + cb_bytes)
             else:
                 cb_bytes = cb * 2 - 1
-                grp_start = papx_pos + 3  # skip 1-byte cb + 2-byte istd
+                grp_start = papx_pos + 3
                 grp_end = min(511, papx_pos + 1 + cb_bytes)
             if grp_start >= grp_end:
                 b_offset_cache[b_offset] = (False, False)
@@ -547,8 +398,8 @@ def _parse_papx_table_flags(
                     op_len = 4
                 elif spra == 7:
                     op_len = 3
-                else:  # spra == 6 (variable length)
-                    if sprm == 0xD608:  # sprmTDefTable
+                else:
+                    if sprm == 0xD608:
                         if pos + 2 > len(grpprl):
                             break
                         td_cb = struct.unpack_from("<H", grpprl, pos)[0]
@@ -561,13 +412,13 @@ def _parse_papx_table_flags(
                         op_len = 1 + grpprl[pos]
                 if pos + op_len > len(grpprl):
                     break
-                if sprm in (0x2416, 0x244B) and grpprl[pos] != 0:  # sprmPFInTable / InnerTableCell
+                if sprm in (0x2416, 0x244B) and grpprl[pos] != 0:
                     is_in_tbl = True
-                elif sprm == 0x6649:  # sprmPItap (table nesting depth)
+                elif sprm == 0x6649:
                     itap = struct.unpack_from("<I", grpprl, pos)[0]
                     if itap > 0:
                         is_in_tbl = True
-                elif sprm in (0x2417, 0x244C) and grpprl[pos] != 0:  # sprmPFTtp / InnerTtp
+                elif sprm in (0x2417, 0x244C) and grpprl[pos] != 0:
                     is_in_tbl = True
                     is_ttp = True
                 pos += op_len
@@ -599,12 +450,10 @@ def _finalize_legacy_blocks_and_tables(
             cleaned_tables.append(norm_rows)
 
     body_blocks: list[BodyBlock] = []
-    paragraph_texts: list[str] = []
     for kind, txt, t_idx in raw_blocks:
         if kind == "paragraph":
             norm_t = normalize_cell_text(txt)
             if norm_t:
-                paragraph_texts.append(norm_t)
                 body_blocks.append(
                     BodyBlock(
                         block_index=len(body_blocks),
@@ -630,8 +479,6 @@ def _finalize_legacy_blocks_and_tables(
                 )
             )
 
-    # If the foundation anchors ([学术简历]/[前期成果]/[承担项目]) are split across paragraphs or rows/cells,
-    # synthesize a consolidated 1x1 table cell so `_extract_t4_foundation` can parse them identically to .docx.
     foundation_markers = (
         "[学术简历]",
         "[前期成果]",
@@ -722,7 +569,6 @@ def _parse_msdoc_ole2(
         or streams.get("0Table")
     )
 
-    # Parse FIB sections
     csw = struct.unpack_from("<H", word_doc, 0x0020)[0]
     offset_lw = 0x0022 + 2 * csw
     ccp_text = 0
@@ -749,7 +595,7 @@ def _parse_msdoc_ole2(
                     "<II", word_doc, rg_fclcb_start + 33 * 8
                 )
 
-    pieces: list[tuple[int, int, int, int, str, bool]] = []  # (py_start, py_end, fc_byte, char_width, text, has_supp)
+    pieces: list[tuple[int, int, int, int, str, bool]] = []
     py_cursor = 0
     if (
         table_stream is not None
@@ -918,7 +764,6 @@ def _parse_msdoc_ole2(
             raw_blocks.append(("table", "", t_idx))
             current_table = []
 
-    # Tokenize main_text by \r and \x07 while preserving cp indices
     n_chars = len(main_text)
     idx = 0
     seg_start = 0
@@ -932,7 +777,6 @@ def _parse_msdoc_ole2(
         raw_seg = _strip_msdoc_fields(main_text[seg_start:idx], state=field_state)
         fc_end = _cp_to_fc_end(idx)
 
-        # Check for \r\x07 pair (standard row-end or cell-end sequence)
         if ch == "\r" and idx + 1 < n_chars and main_text[idx + 1] == "\x07":
             fc_end_next = _cp_to_fc_end(idx + 1)
             is_ttp = (
@@ -963,14 +807,14 @@ def _parse_msdoc_ole2(
                 is_ttp = fc_end in ttp_fc_ends
             else:
                 expected_cols = len(current_table[0]) if current_table else 0
-                next_has_cell_Quick = "\x07" in main_text[idx + 1 : idx + 200]
+                next_has_cell = "\x07" in main_text[idx + 1 : idx + 200]
                 is_ttp = (
                     not raw_seg.strip()
                     and not cell_lines
                     and bool(current_row)
                     and (
                         (expected_cols > 0 and len(current_row) >= expected_cols)
-                        or not next_has_cell_Quick
+                        or not next_has_cell
                     )
                 )
             if is_ttp:
@@ -991,7 +835,6 @@ def _parse_msdoc_ole2(
             seg_start = idx
             continue
 
-        # ch == "\r" (not immediately followed by \x07)
         in_tbl = (
             (fc_end in in_table_fc_ends)
             if in_table_fc_ends
@@ -1020,349 +863,8 @@ def _parse_msdoc_ole2(
     return _finalize_legacy_blocks_and_tables(tables, raw_blocks)
 
 
-def _parse_word2003_xml_doc(
-    raw_bytes: bytes,
-    *,
-    max_uncompressed_bytes: int,
-) -> ParsedLegacyDoc:
-    if len(raw_bytes) > max_uncompressed_bytes:
-        raise DocxValidationError(
-            413,
-            "import_uncompressed_too_large",
-            "文档大小超过安全上限",
-        )
-    decoded_xml = _decode_html_doc_bytes(raw_bytes).lstrip("﻿")
-    lower_xml = decoded_xml.lower()
-    lower_bytes = raw_bytes.lower()
-    if (
-        b"<!entity" in lower_bytes
-        or b"<!doctype" in lower_bytes
-        or "<!entity" in lower_xml
-        or "<!doctype" in lower_xml
-    ):
-        raise DocxValidationError(
-            415,
-            "import_unsupported_format",
-            "文档包含不安全的 XML 实体声明",
-        )
-    try:
-        root = ET.fromstring(raw_bytes)
-    except (ET.ParseError, ValueError, LookupError):
-        cleaned_xml = re.sub(
-            r"(<\?xml\b[^>]*?)\bencoding\s*=\s*[\"'][^\"']*[\"']",
-            r"\1",
-            decoded_xml,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-        try:
-            root = ET.fromstring(cleaned_xml.encode("utf-8"))
-        except (ET.ParseError, ValueError, LookupError) as exc:
-            raise DocxValidationError(
-                422,
-                "import_parse_failed",
-                "无法解析 Word XML (.doc) 文档结构",
-            ) from exc
-
-    def _local(tag: str) -> str:
-        return tag.split("}")[-1] if "}" in tag else tag
-
-    def _p_text(p_elem: ET.Element) -> str:
-        parts: list[str] = []
-
-        def _walk(node: ET.Element) -> None:
-            if _is_wordml_deletion(node):
-                return
-            ln = _local(node.tag)
-            if ln == "oMath":
-                parts.append(_render_omath_node(node))
-                return
-            if ln == "t" and node.text:
-                parts.append(node.text)
-            elif ln in ("br", "cr"):
-                parts.append("\n")
-            elif ln in ("tab", "ptab"):
-                parts.append("\t")
-            elif ln == "noBreakHyphen":
-                parts.append("-")
-            for ch in node:
-                _walk(ch)
-
-        _walk(p_elem)
-        return normalize_cell_text("".join(parts))
-
-    def _iter_wordml_blocks(elem: ET.Element) -> list[ET.Element]:
-        out: list[ET.Element] = []
-        for ch in elem:
-            if _is_wordml_deletion(ch):
-                continue
-            ln = _local(ch.tag)
-            if ln in ("p", "tbl", "oMathPara", "oMath"):
-                out.append(ch)
-            elif ln in (
-                "sect",
-                "sub-section",
-                "sdt",
-                "sdtContent",
-                "customXml",
-                "body",
-                "annotation",
-                "ins",
-            ):
-                out.extend(_iter_wordml_blocks(ch))
-        return out
-
-    def _iter_wordml_trs(elem: ET.Element) -> list[ET.Element]:
-        out: list[ET.Element] = []
-        for ch in elem:
-            if _is_wordml_deletion(ch):
-                continue
-            ln = _local(ch.tag)
-            if ln == "tr":
-                out.append(ch)
-            elif ln in ("sdt", "sdtContent", "customXml", "annotation", "ins"):
-                out.extend(_iter_wordml_trs(ch))
-        return out
-
-    def _iter_wordml_cell_ps(elem: ET.Element) -> list[ET.Element]:
-        out: list[ET.Element] = []
-        for ch in elem:
-            if _is_wordml_deletion(ch):
-                continue
-            ln = _local(ch.tag)
-            if ln == "p":
-                out.append(ch)
-            else:
-                out.extend(_iter_wordml_cell_ps(ch))
-        return out
-
-    tables: list[list[list[str]]] = []
-    raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
-
-    body_nodes = [el for el in root.iter() if _local(el.tag) == "body"]
-    container = body_nodes[0] if body_nodes else root
-
-    for child in _iter_wordml_blocks(container):
-        ln = _local(child.tag)
-        if ln in ("p", "oMathPara", "oMath"):
-            txt = _p_text(child)
-            if txt:
-                raw_blocks.append(("paragraph", txt, None))
-        elif ln == "tbl":
-            grid: list[list[str]] = []
-            propagated_chars = 0
-            for tr in _iter_wordml_trs(child):
-                row_cells: list[str] = []
-                for tc in tr:
-                    if _local(tc.tag) != "tc":
-                        continue
-                    cell_ps = [
-                        _p_text(p)
-                        for p in _iter_wordml_cell_ps(tc)
-                    ]
-                    cell_text = "\n".join(cp for cp in cell_ps if cp)
-                    tc_pr = next(
-                        (ch for ch in tc if _local(ch.tag).lower() == "tcpr"),
-                        None,
-                    )
-                    if not cell_text and grid and len(row_cells) < len(grid[-1]):
-                        has_vmerge_cont = False
-                        if tc_pr is not None:
-                            for sub in tc_pr:
-                                if _local(sub.tag).lower() == "vmerge":
-                                    val = next(
-                                        (
-                                            v
-                                            for k, v in sub.attrib.items()
-                                            if _local(k).lower() == "val"
-                                        ),
-                                        "continue",
-                                    )
-                                    if val.lower() != "restart":
-                                        has_vmerge_cont = True
-                                    break
-                        if has_vmerge_cont:
-                            prev_cell = grid[-1][len(row_cells)]
-                            if (
-                                len(prev_cell) <= 256
-                                and propagated_chars + len(prev_cell) <= 65_536
-                            ):
-                                cell_text = prev_cell
-                                propagated_chars += len(prev_cell)
-                    grid_span = 1
-                    if tc_pr is not None:
-                        for sub in tc_pr:
-                            if _local(sub.tag).lower() == "gridspan":
-                                val = next(
-                                    (
-                                        v
-                                        for k, v in sub.attrib.items()
-                                        if _local(k).lower() == "val"
-                                    ),
-                                    "1",
-                                )
-                                try:
-                                    grid_span = max(1, min(int(val), 64))
-                                except ValueError:
-                                    grid_span = 1
-                                break
-                    row_cells.append(cell_text)
-                    for _ in range(grid_span - 1):
-                        row_cells.append("")
-                if row_cells:
-                    grid.append(row_cells)
-            if grid:
-                t_idx = len(tables)
-                tables.append(grid)
-                raw_blocks.append(("table", "", t_idx))
-
-    return _finalize_legacy_blocks_and_tables(tables, raw_blocks)
-
-
-class _HtmlDocParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.tables: list[list[list[str]]] = []
-        self.raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
-        self._in_table = 0
-        self._current_table: list[list[str]] = []
-        self._current_row: list[str] | None = None
-        self._current_cell: list[str] | None = None
-        self._current_para: list[str] = []
-        self._skip_depth = 0
-        self._pending_spans: dict[int, tuple[int, str]] = {}
-        self._propagated_chars = 0
-        self._col_idx = 0
-        self._cell_rowspan = 1
-        self._cell_colspan = 1
-
-    def _consume_pending_spans(self) -> None:
-        while self._current_row is not None and self._col_idx in self._pending_spans:
-            rem, span_text = self._pending_spans.pop(self._col_idx)
-            self._current_row.append(span_text)
-            if rem > 1:
-                self._pending_spans[self._col_idx] = (rem - 1, span_text)
-            self._col_idx += 1
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        t = tag.lower()
-        if t in ("script", "style", "head", "del"):
-            self._skip_depth += 1
-            return
-        if self._skip_depth > 0:
-            return
-        if t == "table":
-            if self._in_table == 0 and self._current_para:
-                txt = "".join(self._current_para).strip()
-                if txt:
-                    self.raw_blocks.append(("paragraph", txt, None))
-                self._current_para = []
-            self._in_table += 1
-            if self._in_table == 1:
-                self._current_table = []
-                self._pending_spans.clear()
-                self._propagated_chars = 0
-        elif t == "tr" and self._in_table == 1:
-            self._current_row = []
-            self._col_idx = 0
-        elif t in ("td", "th") and self._in_table == 1:
-            self._current_cell = []
-            attr_map = {k.lower(): (v or "").strip() for k, v in attrs if k}
-            try:
-                rs = int(attr_map.get("rowspan", "1") or "1")
-            except ValueError:
-                rs = 1
-            try:
-                cs = int(attr_map.get("colspan", "1") or "1")
-            except ValueError:
-                cs = 1
-            self._cell_rowspan = max(1, min(rs, 256))
-            self._cell_colspan = max(1, min(cs, 64))
-        elif t == "br":
-            if self._current_cell is not None:
-                self._current_cell.append("\n")
-            elif self._in_table == 0:
-                self._current_para.append("\n")
-        elif t in ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
-            if self._current_cell is not None and self._current_cell:
-                self._current_cell.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        t = tag.lower()
-        if t in ("script", "style", "head", "del") and self._skip_depth > 0:
-            self._skip_depth -= 1
-            return
-        if self._skip_depth > 0:
-            return
-        if t in ("td", "th") and self._in_table == 1:
-            if self._current_row is not None and self._current_cell is not None:
-                self._consume_pending_spans()
-                cell_text = normalize_cell_text("".join(self._current_cell))
-                for c_off in range(self._cell_colspan):
-                    col_val = cell_text if c_off == 0 else ""
-                    self._current_row.append(col_val)
-                    if self._cell_rowspan > 1:
-                        rem_rows = self._cell_rowspan - 1
-                        span_cost = len(col_val) * rem_rows
-                        if (
-                            len(col_val) <= 256
-                            and self._propagated_chars + span_cost <= 65_536
-                        ):
-                            span_val = col_val
-                            self._propagated_chars += span_cost
-                        else:
-                            span_val = ""
-                        self._pending_spans[self._col_idx] = (
-                            rem_rows,
-                            span_val,
-                        )
-                    self._col_idx += 1
-                    self._consume_pending_spans()
-            self._current_cell = None
-        elif t in ("td", "th") and self._in_table > 1:
-            if self._current_cell is not None:
-                self._current_cell.append(" ")
-        elif t == "tr" and self._in_table == 1:
-            if self._current_row is not None:
-                self._consume_pending_spans()
-                for col_k in sorted(k for k in self._pending_spans if k >= self._col_idx):
-                    while self._col_idx < col_k:
-                        self._current_row.append("")
-                        self._col_idx += 1
-                    self._consume_pending_spans()
-            if self._current_row:
-                self._current_table.append(self._current_row)
-            self._current_row = None
-        elif t == "tr" and self._in_table > 1:
-            if self._current_cell is not None:
-                self._current_cell.append("\n")
-        elif t == "table" and self._in_table > 0:
-            if self._in_table == 1:
-                self._pending_spans.clear()
-                if self._current_table:
-                    t_idx = len(self.tables)
-                    self.tables.append(self._current_table)
-                    self.raw_blocks.append(("table", "", t_idx))
-                    self._current_table = []
-            self._in_table -= 1
-        elif t in ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6") and self._in_table == 0:
-            txt = normalize_cell_text("".join(self._current_para))
-            if txt:
-                if t in ("h1", "h2", "h3") and not txt.startswith("#"):
-                    txt = f"## {txt}"
-                self.raw_blocks.append(("paragraph", txt, None))
-            self._current_para = []
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth > 0:
-            return
-        if self._current_cell is not None:
-            self._current_cell.append(data)
-        elif self._in_table == 0:
-            self._current_para.append(data)
-
-
 def _decode_html_doc_bytes(raw_bytes: bytes) -> str:
+    """Decode HTML / XML `.doc` bytes honoring BOM, `<meta charset>` / `<?xml encoding>`, and `charset-normalizer`."""
     if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
         return raw_bytes.decode("utf-16", errors="replace")
     if b"\x00<" in raw_bytes[:128] or b"<\x00" in raw_bytes[:128]:
@@ -1389,12 +891,173 @@ def _decode_html_doc_bytes(raw_bytes: bytes) -> str:
         except LookupError:
             pass
 
-    for enc in ("utf-8-sig", "gb18030", "cp1252"):
+    for enc in ("utf-8-sig", "gb18030"):
         try:
             return raw_bytes.decode(enc)
         except UnicodeDecodeError:
             continue
-    return raw_bytes.decode("utf-8", errors="replace")
+
+    best = charset_normalizer.from_bytes(raw_bytes).best()
+    if best is not None:
+        return str(best)
+    return raw_bytes.decode("cp1252", errors="replace")
+
+
+def _parse_word2003_xml_doc(
+    raw_bytes: bytes,
+    *,
+    max_uncompressed_bytes: int,
+) -> ParsedLegacyDoc:
+    """Parse Word 2003 XML (`.doc`) using `defusedxml` and unified WordML walkers."""
+    if len(raw_bytes) > max_uncompressed_bytes:
+        raise DocxValidationError(
+            413,
+            "import_uncompressed_too_large",
+            "文档大小超过安全上限",
+        )
+    decoded_xml = _decode_html_doc_bytes(raw_bytes).lstrip("\ufeff")
+    cleaned_xml = re.sub(
+        r"(<\?xml\b[^>]*?)\bencoding\s*=\s*[\"'][^\"']*[\"']",
+        r"\1",
+        decoded_xml,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    try:
+        root = DefusedET.fromstring(
+            cleaned_xml.encode("utf-8"),
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except DefusedXmlException as exc:
+        raise DocxValidationError(
+            415,
+            "import_unsupported_format",
+            "文档包含不安全的 XML 实体声明",
+        ) from exc
+    except Exception as exc:
+        raise DocxValidationError(
+            422,
+            "import_parse_failed",
+            "无法解析 Word XML (.doc) 文档结构",
+        ) from exc
+
+    def _iter_wordml_blocks(elem: Any) -> list[Any]:
+        out: list[Any] = []
+        for ch in elem:
+            if _is_wordml_deletion(ch):
+                continue
+            ln = _xml_local_name(ch.tag)
+            if ln in ("p", "tbl", "oMathPara", "oMath"):
+                out.append(ch)
+            elif ln in (
+                "sect",
+                "sub-section",
+                "sdt",
+                "sdtContent",
+                "customXml",
+                "body",
+                "annotation",
+                "ins",
+            ):
+                out.extend(_iter_wordml_blocks(ch))
+        return out
+
+    def _iter_wordml_trs(elem: Any) -> list[Any]:
+        out: list[Any] = []
+        for ch in elem:
+            if _is_wordml_deletion(ch):
+                continue
+            ln = _xml_local_name(ch.tag)
+            if ln == "tr":
+                out.append(ch)
+            elif ln in ("sdt", "sdtContent", "customXml", "annotation", "ins"):
+                out.extend(_iter_wordml_trs(ch))
+        return out
+
+    tables: list[list[list[str]]] = []
+    raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
+
+    body_nodes = [el for el in root.iter() if _xml_local_name(el.tag) == "body"]
+    container = body_nodes[0] if body_nodes else root
+
+    for child in _iter_wordml_blocks(container):
+        ln = _xml_local_name(child.tag)
+        if ln in ("p", "oMathPara", "oMath"):
+            txt = _extract_element_lines_text(child)
+            if txt:
+                raw_blocks.append(("paragraph", txt, None))
+        elif ln == "tbl":
+            grid: list[list[str]] = []
+            propagated_chars = 0
+            for tr in _iter_wordml_trs(child):
+                row_cells: list[str] = []
+                for tc in tr:
+                    if _xml_local_name(tc.tag) != "tc":
+                        continue
+                    cell_text = _extract_element_lines_text(tc)
+                    tc_pr = next(
+                        (ch for ch in tc if _xml_local_name(ch.tag).lower() == "tcpr"),
+                        None,
+                    )
+                    if not cell_text and grid and len(row_cells) < len(grid[-1]):
+                        has_vmerge_cont = False
+                        if tc_pr is not None:
+                            for sub in tc_pr:
+                                if _xml_local_name(sub.tag).lower() == "vmerge":
+                                    val = next(
+                                        (
+                                            v
+                                            for k, v in sub.attrib.items()
+                                            if _xml_local_name(k).lower() == "val"
+                                        ),
+                                        "continue",
+                                    )
+                                    if val.lower() != "restart":
+                                        has_vmerge_cont = True
+                                    break
+                        if has_vmerge_cont:
+                            prev_cell = grid[-1][len(row_cells)]
+                            if (
+                                len(prev_cell) <= 256
+                                and propagated_chars + len(prev_cell) <= 65_536
+                            ):
+                                cell_text = prev_cell
+                                propagated_chars += len(prev_cell)
+                    grid_span = 1
+                    if tc_pr is not None:
+                        for sub in tc_pr:
+                            if _xml_local_name(sub.tag).lower() == "gridspan":
+                                val = next(
+                                    (
+                                        v
+                                        for k, v in sub.attrib.items()
+                                        if _xml_local_name(k).lower() == "val"
+                                    ),
+                                    "1",
+                                )
+                                try:
+                                    grid_span = max(1, min(int(val), 64))
+                                except ValueError:
+                                    grid_span = 1
+                                break
+                    row_cells.append(cell_text)
+                    for _ in range(grid_span - 1):
+                        row_cells.append("")
+                if row_cells:
+                    grid.append(row_cells)
+            if grid:
+                t_idx = len(tables)
+                tables.append(grid)
+                raw_blocks.append(("table", "", t_idx))
+
+    return _finalize_legacy_blocks_and_tables(tables, raw_blocks)
+
+
+_HTML_BLOCK_TAGS: frozenset[str] = frozenset(
+    {"table", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"}
+)
 
 
 def _parse_html_doc(
@@ -1402,209 +1065,151 @@ def _parse_html_doc(
     *,
     max_uncompressed_bytes: int,
 ) -> ParsedLegacyDoc:
+    """Parse HTML-backed `.doc` using `lxml.html` DOM traversal instead of a custom HTMLParser state machine."""
     if len(raw_bytes) > max_uncompressed_bytes:
         raise DocxValidationError(
             413,
             "import_uncompressed_too_large",
             "文档大小超过安全上限",
         )
-    text = _decode_html_doc_bytes(raw_bytes)
-    parser = _HtmlDocParser()
-    parser.feed(text)
-    if parser._current_para:
-        rem = normalize_cell_text("".join(parser._current_para))
-        if rem:
-            parser.raw_blocks.append(("paragraph", rem, None))
-    return _finalize_legacy_blocks_and_tables(parser.tables, parser.raw_blocks)
+    text = _decode_html_doc_bytes(raw_bytes).lstrip("\ufeff").strip()
+    text = re.sub(r"^\s*<\?xml\b[^>]*\?>\s*", "", text, flags=re.IGNORECASE)
+    if not text:
+        return _finalize_legacy_blocks_and_tables([], [])
 
+    doc = lxml.html.fromstring(text)
+    lxml.etree.strip_elements(doc, "script", "style", "head", "del", with_tail=False)
+    for br in doc.xpath(".//br"):
+        br.tail = "\n" + (br.tail or "")
 
-_RTF_CODEPAGE_MAP: dict[int, str] = {
-    437: "cp437",
-    850: "cp850",
-    852: "cp852",
-    866: "cp866",
-    874: "cp874",
-    932: "cp932",
-    936: "gb18030",
-    949: "cp949",
-    950: "cp950",
-    1250: "cp1250",
-    1251: "cp1251",
-    1252: "cp1252",
-    1253: "cp1253",
-    1254: "cp1254",
-    1255: "cp1255",
-    1256: "cp1256",
-    1257: "cp1257",
-    1258: "cp1258",
-    10000: "mac_roman",
-    54936: "gb18030",
-    65001: "utf-8",
-}
+    tables: list[list[list[str]]] = []
+    raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
 
-_RTF_CHARSET_MAP: dict[int, str] = {
-    0: "cp1252",
-    2: "cp1252",
-    77: "mac_roman",
-    128: "cp932",
-    129: "cp949",
-    130: "johab",
-    134: "gb18030",
-    136: "cp950",
-    161: "cp1253",
-    162: "cp1254",
-    163: "cp1258",
-    177: "cp1255",
-    178: "cp1256",
-    186: "cp1257",
-    204: "cp1251",
-    222: "cp874",
-    238: "cp1250",
-    254: "cp437",
-    255: "cp850",
-}
+    def _extract_html_table(tbl_el: Any) -> list[list[str]]:
+        grid: list[list[str]] = []
+        pending_spans: dict[int, tuple[int, str]] = {}
+        propagated_chars = 0
+        for tr in tbl_el.xpath("./tr | ./thead/tr | ./tbody/tr | ./tfoot/tr"):
+            row: list[str] = []
+            col_idx = 0
 
-_RTF_SKIP_DESTINATIONS: frozenset[str] = frozenset(
-    {
-        "fonttbl",
-        "colortbl",
-        "stylesheet",
-        "info",
-        "pict",
-        "object",
-        "header",
-        "footer",
-        "headerl",
-        "headerr",
-        "headerf",
-        "footerl",
-        "footerr",
-        "footerf",
-        "fldinst",
-        "bkmkstart",
-        "bkmkend",
-        "datafield",
-    }
-)
+            def _consume_spans(target_row: list[str]) -> None:
+                nonlocal col_idx
+                while col_idx in pending_spans:
+                    rem, val = pending_spans.pop(col_idx)
+                    target_row.append(val)
+                    if rem > 1:
+                        pending_spans[col_idx] = (rem - 1, val)
+                    col_idx += 1
 
+            for td in tr.xpath("./td | ./th"):
+                _consume_spans(row)
+                for sub_td in td.xpath(".//table//td | .//table//th"):
+                    sub_td.tail = " " + (sub_td.tail or "")
+                for sub_blk in td.xpath(
+                    ".//p | .//div | .//li | .//tr | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6"
+                ):
+                    sub_blk.tail = "\n" + (sub_blk.tail or "")
+                cell_text = normalize_cell_text(td.text_content())
+                try:
+                    rs = max(1, min(int(td.get("rowspan") or 1), 256))
+                except ValueError:
+                    rs = 1
+                try:
+                    cs = max(1, min(int(td.get("colspan") or 1), 64))
+                except ValueError:
+                    cs = 1
+                for c_off in range(cs):
+                    col_val = cell_text if c_off == 0 else ""
+                    row.append(col_val)
+                    if rs > 1:
+                        rem_rows = rs - 1
+                        cost = len(col_val) * rem_rows
+                        if len(col_val) <= 256 and propagated_chars + cost <= 65_536:
+                            span_val = col_val
+                            propagated_chars += cost
+                        else:
+                            span_val = ""
+                        pending_spans[col_idx] = (rem_rows, span_val)
+                    col_idx += 1
+                    _consume_spans(row)
+            _consume_spans(row)
+            for col_k in sorted(k for k in pending_spans if k >= col_idx):
+                while col_idx < col_k:
+                    row.append("")
+                    col_idx += 1
+                _consume_spans(row)
+            if row:
+                grid.append(row)
+        return grid
 
-def _strip_rtf_nonbody_groups(raw: str) -> str:
-    """Remove `{\\*...}` and header/instruction destination groups (`\\fonttbl`, `\\fldinst`, `\\pict`, etc.) with nested braces and `\\binN`."""
-    out: list[str] = []
-    i = 0
-    n = len(raw)
-    skip_depth = 0
-    while i < n:
-        ch = raw[i]
-        if ch == "\\":
-            if i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
-                if skip_depth == 0:
-                    out.append(raw[i : i + 2])
-                i += 2
-                continue
-            m_bin = re.match(r"\\bin(-?\d+) ?", raw[i : i + 32], re.IGNORECASE)
-            if m_bin is not None:
-                bin_len = max(0, int(m_bin.group(1)))
-                i = min(n, i + m_bin.end() + bin_len)
-                continue
-        if ch == "{":
-            if skip_depth > 0:
-                skip_depth += 1
-                i += 1
-                continue
-            m_upr = re.match(r"\{\s*\\upr(?![a-zA-Z]) ?", raw[i : i + 32], re.IGNORECASE)
-            if m_upr is not None:
-                out.append("{")
-                i += m_upr.end()
-                upr_depth = 0
-                while i < n:
-                    uch = raw[i]
-                    if uch == "\\":
-                        if i + 1 < n and raw[i + 1] in ("\\", "{", "}"):
-                            i += 2
-                            continue
-                        m_ubin = re.match(
-                            r"\\bin(-?\d+) ?", raw[i : i + 32], re.IGNORECASE
-                        )
-                        if m_ubin is not None:
-                            i = min(n, i + m_ubin.end() + max(0, int(m_ubin.group(1))))
-                            continue
-                        i += 1
-                        continue
-                    if uch == "{":
-                        if upr_depth == 0:
-                            m_ud_in = re.match(
-                                r"\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?",
-                                raw[i : i + 32],
-                                re.IGNORECASE,
-                            )
-                            if m_ud_in is not None:
-                                out.append("{")
-                                i += m_ud_in.end()
-                                break
-                        upr_depth += 1
-                        i += 1
-                        continue
-                    if uch == "}":
-                        if upr_depth > 0:
-                            upr_depth -= 1
-                            i += 1
-                            continue
-                        out.append("}")
-                        i += 1
-                        break
-                    i += 1
-                continue
-            m_ud = re.match(
-                r"\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?", raw[i : i + 32], re.IGNORECASE
-            )
-            if m_ud is not None:
-                out.append("{")
-                i += m_ud.end()
-                continue
-            m_star = re.match(r"\{\s*\\\*\s*\\[a-zA-Z]+", raw[i : i + 40])
-            m_dest = re.match(r"\{\s*\\([a-zA-Z]+)(?![a-zA-Z])", raw[i : i + 40])
-            if m_star is not None or (
-                m_dest is not None and m_dest.group(1).lower() in _RTF_SKIP_DESTINATIONS
-            ):
-                skip_depth = 1
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "}":
-            if skip_depth > 0:
-                skip_depth -= 1
-                if skip_depth == 0:
-                    out.append("{}")
+    def _has_block_descendant(el: Any) -> bool:
+        return bool(
+            el.xpath(".//table | .//p | .//div | .//li | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6")
+        )
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node.tag, str):
+            return
+        tag = node.tag.lower()
+        if tag == "table":
+            grid = _extract_html_table(node)
+            if grid:
+                t_idx = len(tables)
+                tables.append(grid)
+                raw_blocks.append(("table", "", t_idx))
+            return
+        if tag in _HTML_BLOCK_TAGS and not _has_block_descendant(node):
+            txt = normalize_cell_text(node.text_content())
+            if txt:
+                if tag in ("h1", "h2", "h3") and not txt.startswith("#"):
+                    txt = f"## {txt}"
+                raw_blocks.append(("paragraph", txt, None))
+            return
+
+        inline_buf: list[str] = []
+
+        def _flush_inline() -> None:
+            if not inline_buf:
+                return
+            joined = normalize_cell_text("".join(inline_buf))
+            inline_buf.clear()
+            if joined:
+                if tag in ("h1", "h2", "h3") and not joined.startswith("#"):
+                    joined = f"## {joined}"
+                raw_blocks.append(("paragraph", joined, None))
+
+        if node.text:
+            inline_buf.append(node.text)
+        for ch in node:
+            ch_tag = ch.tag.lower() if isinstance(ch.tag, str) else ""
+            if ch_tag in _HTML_BLOCK_TAGS or _has_block_descendant(ch):
+                _flush_inline()
+                _walk(ch)
+                if ch.tail:
+                    inline_buf.append(ch.tail)
             else:
-                out.append(ch)
-            i += 1
-            continue
-        if skip_depth == 0:
-            out.append(ch)
-        i += 1
-    return "".join(out)
+                inline_buf.append(ch.text_content())
+                if ch.tail:
+                    inline_buf.append(ch.tail)
+        _flush_inline()
+
+    _walk(doc)
+    return _finalize_legacy_blocks_and_tables(tables, raw_blocks)
 
 
-def _resolve_rtf_codepage_num(cpg: int) -> str | None:
-    if cpg in _RTF_CODEPAGE_MAP:
-        return _RTF_CODEPAGE_MAP[cpg]
-    cand = f"cp{cpg}"
-    try:
-        codecs.lookup(cand)
-        return cand
-    except LookupError:
-        return None
-
-
-def _resolve_rtf_encoding(raw_str: str) -> str | None:
+def _resolve_rtf_default_encoding(raw_str: str, raw_bytes: bytes) -> str:
     cpg_match = re.search(r"\\ansicpg(\d+)(?![a-zA-Z0-9])", raw_str[:4096])
     if cpg_match is not None:
-        resolved = _resolve_rtf_codepage_num(int(cpg_match.group(1)))
-        if resolved is not None:
-            return resolved
+        cpg = int(cpg_match.group(1))
+        if cpg in (936, 54936):
+            return "gb18030"
+        cand = "utf-8" if cpg == 65001 else f"cp{cpg}"
+        try:
+            codecs.lookup(cand)
+            return cand
+        except LookupError:
+            pass
     if re.search(r"\\mac(?![a-zA-Z])", raw_str[:1024]):
         return "mac_roman"
     if re.search(r"\\pca(?![a-zA-Z])", raw_str[:1024]):
@@ -1613,392 +1218,11 @@ def _resolve_rtf_encoding(raw_str: str) -> str | None:
         return "cp437"
     if re.search(r"\\ansi(?![a-zA-Z])", raw_str[:1024]):
         return "cp1252"
-    return None
-
-
-def _extract_rtf_font_encodings(raw_str: str) -> tuple[dict[int, str], int | None]:
-    """Parse `\\deffN` and `{\\fonttbl ...}` to map font index `N` -> Python codec name."""
-    deff_match = re.search(r"\\deff(-?\d+)(?![a-zA-Z0-9])", raw_str[:4096])
-    default_font = int(deff_match.group(1)) if deff_match is not None else None
-    font_map: dict[int, str] = {}
-    m_ft = re.search(r"\{\s*\\fonttbl(?![a-zA-Z])", raw_str)
-    if m_ft is None:
-        return font_map, default_font
-
-    i = m_ft.start()
-    n = len(raw_str)
-    depth = 0
-    cur_f: int | None = None
-    pending_enc: str | None = None
-    while i < n:
-        ch = raw_str[i]
-        if ch == "\\" and i + 1 < n and raw_str[i + 1] in ("\\", "{", "}"):
-            i += 2
-            continue
-        if ch == "{":
-            depth += 1
-            i += 1
-            continue
-        if ch == "}":
-            if depth <= 2:
-                if cur_f is not None and pending_enc is not None and cur_f not in font_map:
-                    font_map[cur_f] = pending_enc
-                cur_f = None
-                pending_enc = None
-            depth -= 1
-            i += 1
-            if depth <= 0:
-                break
-            continue
-        if ch == ";":
-            if cur_f is not None and pending_enc is not None and cur_f not in font_map:
-                font_map[cur_f] = pending_enc
-            cur_f = None
-            pending_enc = None
-            i += 1
-            continue
-        if ch == "\\":
-            m_cw = re.match(r"\\([a-zA-Z]+)(-?\d*) ?", raw_str[i : i + 64])
-            if m_cw is not None:
-                word = m_cw.group(1).lower()
-                arg_str = m_cw.group(2)
-                i += m_cw.end()
-                if word == "f" and arg_str:
-                    cur_f = int(arg_str)
-                    if pending_enc is not None:
-                        font_map[cur_f] = pending_enc
-                        pending_enc = None
-                elif word == "fcharset" and arg_str:
-                    cs_enc = _RTF_CHARSET_MAP.get(int(arg_str))
-                    if cs_enc is not None:
-                        if cur_f is not None:
-                            font_map[cur_f] = cs_enc
-                        else:
-                            pending_enc = cs_enc
-                elif word == "cpg" and arg_str:
-                    cpg_enc = _resolve_rtf_codepage_num(int(arg_str))
-                    if cpg_enc is not None:
-                        if cur_f is not None:
-                            font_map[cur_f] = cpg_enc
-                        else:
-                            pending_enc = cpg_enc
-                continue
-        i += 1
-    return font_map, default_font
-
-
-_RTF_CHAR_CONTROL_WORDS: dict[str, str] = {
-    "emdash": "—",
-    "endash": "–",
-    "emspace": " ",
-    "enspace": " ",
-    "qmspace": " ",
-    "bullet": "•",
-    "lquote": "‘",
-    "rquote": "’",
-    "ldblquote": "“",
-    "rdblquote": "”",
-    "zwj": "‍",
-    "zwnj": "‌",
-    "ltrmark": "‎",
-    "rtlmark": "‏",
-    "zwbo": "​",
-    "zwnbo": "﻿",
-}
-
-
-def _tokenize_rtf_body(
-    s: str,
-    declared_enc: str | None,
-    font_encodings: dict[int, str] | None = None,
-    default_font: int | None = None,
-) -> str:
-    """Single-pass RTF body tokenizer preserving literal braces/backslashes, `\\ucN` counts, active font charset, hidden/deleted state (`\\v`, `\\deleted`), and codepage bytes."""
-    out: list[str] = []
-    byte_buf = bytearray()
-    uc = 1
-    font_enc_map = font_encodings or {}
-    active_font: int | None = default_font
-    hidden = False
-    deleted = False
-    state_stack: list[tuple[int, int | None, bool, bool]] = []
-
-    def _current_enc() -> str | None:
-        if active_font is not None and active_font in font_enc_map:
-            return font_enc_map[active_font]
-        return declared_enc
-
-    def _sanitize_literal(text: str) -> str:
-        return (
-            text.replace("\x07", " ")
-            .replace("\r", " ")
-            .replace("\x1d", " ")
-            .replace("\x1e", " ")
-        )
-
-    def _flush_bytes() -> None:
-        if not byte_buf:
-            return
-        b = bytes(byte_buf)
-        byte_buf.clear()
-        if hidden or deleted:
-            return
-        eff_enc = _current_enc()
-        if eff_enc is not None:
-            decoded = b.decode(eff_enc, errors="replace")
-        else:
-            try:
-                decoded = b.decode("gb18030", errors="strict")
-            except UnicodeDecodeError:
-                decoded = b.decode("cp1252", errors="replace")
-        out.append(_sanitize_literal(decoded))
-
-    i = 0
-    n = len(s)
-    while i < n:
-        ch = s[i]
-        if ch in ("\r", "\n"):
-            i += 1
-            continue
-        if ch == "{":
-            _flush_bytes()
-            state_stack.append((uc, active_font, hidden, deleted))
-            i += 1
-            continue
-        if ch == "}":
-            _flush_bytes()
-            if state_stack:
-                uc, active_font, hidden, deleted = state_stack.pop()
-            i += 1
-            continue
-        if ch == "\\":
-            if i + 1 >= n:
-                i += 1
-                continue
-            nxt = s[i + 1]
-            if nxt in ("\\", "{", "}"):
-                if not (hidden or deleted):
-                    if byte_buf:
-                        byte_buf.append(ord(nxt))
-                    else:
-                        out.append(nxt)
-                i += 2
-                continue
-            if nxt in ("\r", "\n"):
-                _flush_bytes()
-                out.append("\r")
-                i += 2
-                if nxt == "\r" and i < n and s[i] == "\n":
-                    i += 1
-                continue
-            if nxt == "~":
-                _flush_bytes()
-                if not (hidden or deleted):
-                    out.append("\u00a0")
-                i += 2
-                continue
-            if nxt == "-":
-                _flush_bytes()
-                i += 2
-                continue
-            if nxt == "_":
-                _flush_bytes()
-                if not (hidden or deleted):
-                    out.append("-")
-                i += 2
-                continue
-            if (
-                nxt == "'"
-                and i + 3 < n
-                and all(c in "0123456789abcdefABCDEF" for c in s[i + 2 : i + 4])
-            ):
-                if not (hidden or deleted):
-                    byte_buf.append(int(s[i + 2 : i + 4], 16))
-                i += 4
-                continue
-
-            m_cw = re.match(r"\\([a-zA-Z]+)(-?\d*) ?", s[i : i + 64])
-            if m_cw is not None:
-                _flush_bytes()
-                word = m_cw.group(1).lower()
-                arg_str = m_cw.group(2)
-                i += m_cw.end()
-                if word == "uc" and arg_str:
-                    uc = max(0, int(arg_str))
-                    continue
-                if word == "bin" and arg_str:
-                    i = min(n, i + max(0, int(arg_str)))
-                    continue
-                if word == "f" and arg_str:
-                    active_font = int(arg_str)
-                    continue
-                if word == "af" and arg_str:
-                    af_idx = int(arg_str)
-                    if af_idx in font_enc_map and active_font is None:
-                        active_font = af_idx
-                    continue
-                if word == "v":
-                    hidden = arg_str != "0"
-                    continue
-                if word == "deleted":
-                    deleted = arg_str != "0"
-                    continue
-                if word == "plain":
-                    active_font = default_font
-                    hidden = False
-                    deleted = False
-                    continue
-                if word == "u" and arg_str:
-                    code = int(arg_str)
-                    if code < 0:
-                        code += 65536
-                    if not (hidden or deleted) and 0 <= code <= 0x10FFFF:
-                        out.append(_sanitize_literal(chr(code)))
-                    skipped = 0
-                    while skipped < uc and i < n:
-                        if s[i] in ("\r", "\n"):
-                            i += 1
-                            continue
-                        if s[i] in ("{", "}"):
-                            break
-                        if (
-                            s[i] == "\\"
-                            and i + 3 < n
-                            and s[i + 1] == "'"
-                            and all(
-                                c in "0123456789abcdefABCDEF"
-                                for c in s[i + 2 : i + 4]
-                            )
-                        ):
-                            i += 4
-                            skipped += 1
-                        elif s[i] == "\\":
-                            m_next_cw = re.match(
-                                r"\\([a-zA-Z]+)(-?\d*) ?", s[i : i + 32]
-                            )
-                            if m_next_cw is not None:
-                                if m_next_cw.group(1).lower() in (
-                                    "par",
-                                    "cell",
-                                    "nestcell",
-                                    "row",
-                                    "nestrow",
-                                    "trowd",
-                                    "u",
-                                    "uc",
-                                    "pard",
-                                    "intbl",
-                                    "cellx",
-                                ):
-                                    break
-                                i += m_next_cw.end()
-                                skipped += 1
-                            else:
-                                i += 2 if i + 1 < n else 1
-                                skipped += 1
-                        else:
-                            i += 1
-                            skipped += 1
-                    continue
-                if word == "trowd":
-                    out.append("\x1d")
-                elif word in ("cell", "nestcell"):
-                    out.append("\x07")
-                elif word in ("row", "nestrow"):
-                    out.append("\x1e")
-                elif word == "par":
-                    out.append("\r")
-                elif word == "line":
-                    if not (hidden or deleted):
-                        out.append("\n")
-                elif word == "tab":
-                    if not (hidden or deleted):
-                        out.append("\t")
-                elif word in _RTF_CHAR_CONTROL_WORDS:
-                    if not (hidden or deleted):
-                        out.append(_RTF_CHAR_CONTROL_WORDS[word])
-                continue
-
-            _flush_bytes()
-            i += 2
-            continue
-
-        code_pt = ord(ch)
-        if code_pt >= 0x80:
-            if not (hidden or deleted):
-                byte_buf.append(code_pt)
-            cur_enc = _current_enc()
-            if (
-                cur_enc in (None, "gb18030")
-                and 0x81 <= code_pt <= 0xFE
-                and i + 3 < n
-                and 0x30 <= ord(s[i + 1]) <= 0x39
-                and 0x81 <= ord(s[i + 2]) <= 0xFE
-                and 0x30 <= ord(s[i + 3]) <= 0x39
-            ):
-                if not (hidden or deleted):
-                    byte_buf.append(ord(s[i + 1]))
-                    byte_buf.append(ord(s[i + 2]))
-                    byte_buf.append(ord(s[i + 3]))
-                i += 4
-                continue
-            if (
-                cur_enc in (None, "gb18030", "cp932", "cp949", "cp950", "johab")
-                and 0x81 <= code_pt <= 0xFE
-                and i + 1 < n
-                and 0x40 <= ord(s[i + 1]) < 0x80
-                and s[i + 1] not in ("\\", "{", "}")
-            ):
-                if not (hidden or deleted):
-                    byte_buf.append(ord(s[i + 1]))
-                i += 2
-                continue
-            i += 1
-            continue
-
-        if byte_buf and _current_enc() in (
-            "gb18030",
-            "cp932",
-            "cp949",
-            "cp950",
-            "johab",
-        ):
-            if not (hidden or deleted):
-                byte_buf.append(code_pt)
-            i += 1
-            continue
-
-        if (
-            byte_buf
-            and len(byte_buf) % 2 == 1
-            and 0x81 <= byte_buf[-1] <= 0xFE
-            and _current_enc() is None
-            and 0x30 <= code_pt <= 0x39
-        ):
-            if (
-                len(byte_buf) >= 3
-                and 0x81 <= byte_buf[-3] <= 0xFE
-                and 0x30 <= byte_buf[-2] <= 0x39
-            ) or (
-                i + 1 < n
-                and (
-                    0x81 <= ord(s[i + 1]) <= 0xFE
-                    or s[i + 1 : i + 3] == "\\'"
-                )
-            ):
-                if not (hidden or deleted):
-                    byte_buf.append(code_pt)
-                i += 1
-                continue
-
-        _flush_bytes()
-        if not (hidden or deleted):
-            out.append(_sanitize_literal(ch))
-        i += 1
-
-    _flush_bytes()
-    rendered = "".join(out)
-    return rendered.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    try:
+        raw_bytes.decode("gb18030", errors="strict")
+        return "gb18030"
+    except UnicodeDecodeError:
+        return "cp1252"
 
 
 def _parse_rtf_doc(
@@ -2006,6 +1230,7 @@ def _parse_rtf_doc(
     *,
     max_uncompressed_bytes: int,
 ) -> ParsedLegacyDoc:
+    """Parse RTF-backed `.doc` using `striprtf` (`rtf_to_text`) with table/cell structural markers."""
     if len(raw_bytes) > max_uncompressed_bytes:
         raise DocxValidationError(
             413,
@@ -2014,33 +1239,106 @@ def _parse_rtf_doc(
         )
     if raw_bytes.startswith(b"\xef\xbb\xbf"):
         raw_bytes = raw_bytes[3:]
-    raw_str = raw_bytes.decode("latin-1", errors="ignore")
-    declared_enc = _resolve_rtf_encoding(raw_str)
-    font_encodings, default_font = _extract_rtf_font_encodings(raw_str)
-    s = _strip_rtf_nonbody_groups(raw_str)
-    s = _tokenize_rtf_body(s, declared_enc, font_encodings, default_font)
-    # Convert in-cell paragraph breaks (\r inside a table row before \x1e) into \n in O(N) time
-    row_chunks = s.split("\x1e")
+
+    # Skip any raw \binN byte runs before converting non-ASCII bytes to \'xx hex escapes
+    if b"\\bin" in raw_bytes:
+        out_b = bytearray()
+        i, n = 0, len(raw_bytes)
+        while i < n:
+            if raw_bytes[i : i + 4] == b"\\bin":
+                m = re.match(rb"\\bin(-?\d+) ?", raw_bytes[i : i + 32], re.IGNORECASE)
+                if m is not None:
+                    i = min(n, i + m.end() + max(0, int(m.group(1))))
+                    continue
+            out_b.append(raw_bytes[i])
+            i += 1
+        raw_bytes = bytes(out_b)
+
+    raw_head = raw_bytes[:4096].decode("latin-1", errors="ignore")
+    default_enc = _resolve_rtf_default_encoding(raw_head, raw_bytes)
+
+    escaped = re.sub(
+        rb"[\x80-\xff]",
+        lambda m: f"\\'{m.group(0)[0]:02x}".encode("ascii"),
+        raw_bytes,
+    )
+    s = escaped.decode("ascii", errors="ignore")
+    # Remove \ansicpgN so striprtf uses our resolved default_enc (e.g. gb18030 for 936/54936, mac_roman for 10000)
+    s = re.sub(r"\\ansicpg\d+ ?", "", s)
+    # Convert escaped ASCII trail bytes (\\, \{, \}) immediately following a CJK lead byte into hex escapes
+    s = re.sub(
+        r"(\\'[89a-fA-F][0-9a-fA-F])\\([\\{}])",
+        lambda m: m.group(1) + f"\\'{ord(m.group(2)):02x}",
+        s,
+    )
+    # Convert 4-byte GB18030 digit trail bytes (0x30..0x39) between \'81..\'fe lead bytes into \'3x
+    s = re.sub(
+        r"(\\'[89a-fA-F][0-9a-fA-F])([0-9])(\\'[89a-fA-F][0-9a-fA-F])([0-9])",
+        lambda m: f"{m.group(1)}\\'{ord(m.group(2)):02x}{m.group(3)}\\'{ord(m.group(4)):02x}",
+        s,
+    )
+    if default_enc in ("gb18030", "cp932", "cp949", "cp950", "cp1361"):
+        s = re.sub(
+            r"(\\'[89a-fA-F][0-9a-fA-F])([\x40-\x5b\x5d-\x7a\x7c\x7e])",
+            lambda m: f"{m.group(1)}\\'{ord(m.group(2)):02x}",
+            s,
+        )
+    s = re.sub(r"\\fcharset(\d+)\s*\\f(\d+)", r"\\f\2\\fcharset\1", s)
+    m_deff = re.search(r"\\deff(\d+)(?![a-zA-Z0-9])", s[:4096])
+    if m_deff is not None:
+        deff_id = m_deff.group(1)
+        s = re.sub(r"\\deff(\d+)", r"\\deff\1\\f\1", s, count=1)
+        s = re.sub(r"\\plain(?![a-zA-Z])", f"\\\\plain\\\\f{deff_id}", s)
+    # Unwrap {\upr{ansi}{\*\ud unicode}} to retain the Unicode branch
+    s = re.sub(
+        r"\{\s*\\upr\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?",
+        "{{",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"\{\s*\\\*\s*\\ud(?![a-zA-Z]) ?", "{", s, flags=re.IGNORECASE)
+    # Normalize single-token control-word fallbacks after \uN so striprtf skips 1 placeholder character
+    s = re.sub(
+        r"(\\u-?\d+) ?\\(?:[~_-]|emdash|endash|bullet|[lr](?:dbl)?quote)(?![a-zA-Z]) ?",
+        r"\1?",
+        s,
+    )
+    # Strip hidden (\v) and tracked-deletion (\deleted) groups/runs
+    while re.search(r"\{\s*\\(?:v|deleted)(?![a-zA-Z0-9])[^{}]*\}", s):
+        s = re.sub(r"\{\s*\\(?:v|deleted)(?![a-zA-Z0-9])[^{}]*\}", "", s)
+    s = re.sub(
+        r"\\(?:v|deleted)(?![a-zA-Z0-9]) ?.*?(?=\\(?:v0|deleted0|plain|par|pard|row|cell)(?![a-zA-Z])|(?<!\\)\})",
+        "",
+        s,
+        flags=re.DOTALL,
+    )
+
+    rendered = _striprtf.rtf_to_text(s, encoding=default_enc, errors="replace")
+    rendered = rendered.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+    # Convert in-cell paragraph breaks (_RTF_PAR_TOK inside a table row before _RTF_ROW_TOK) into \n
+    row_chunks = rendered.split(_RTF_ROW_TOK)
     processed_chunks: list[str] = []
     for chunk in row_chunks[:-1]:
-        if "\x1d" in chunk:
-            before_row, in_row = chunk.split("\x1d", 1)
+        if _RTF_TROWD_TOK in chunk:
+            before_row, in_row = chunk.split(_RTF_TROWD_TOK, 1)
             processed_chunks.append(
-                before_row + in_row.replace("\x1d", "").replace("\r", "\n")
+                before_row
+                + in_row.replace(_RTF_TROWD_TOK, "").replace(_RTF_PAR_TOK, "\n")
             )
-        elif "\x07" in chunk:
-            processed_chunks.append(chunk.replace("\r", "\n"))
+        elif _RTF_CELL_TOK in chunk:
+            processed_chunks.append(chunk.replace(_RTF_PAR_TOK, "\n"))
         else:
             processed_chunks.append(chunk)
-    processed_chunks.append(row_chunks[-1].replace("\x1d", ""))
-    s = "\r".join(processed_chunks)
+    processed_chunks.append(row_chunks[-1].replace(_RTF_TROWD_TOK, ""))
+    joined = _RTF_PAR_TOK.join(processed_chunks)
 
     tables: list[list[list[str]]] = []
     raw_blocks: list[tuple[Literal["paragraph", "table"], str, int | None]] = []
     cur_table: list[list[str]] = []
-    for line in s.split("\r"):
-        if "\x07" in line:
-            parts = [normalize_cell_text(p) for p in line.split("\x07")]
+    for line in joined.split(_RTF_PAR_TOK):
+        if _RTF_CELL_TOK in line:
+            parts = [normalize_cell_text(p) for p in line.split(_RTF_CELL_TOK)]
             if parts and parts[-1] == "":
                 parts = parts[:-1]
             if any(parts):
@@ -2109,13 +1407,10 @@ def build_ole2_doc_bytes(
         for row in tbl:
             cells_str = "\x07".join(str(c).replace("\n", "\x0b") for c in row)
             parts.append(cells_str + "\x07\r\x07")
-    body_text = "".join(parts)
-    if not body_text:
-        body_text = "\r"
+    body_text = "".join(parts) or "\r"
     text_utf16 = body_text.encode("utf-16-le")
     ccp_text = len(text_utf16) // 2
 
-    # Build 1Table stream with a Clx Piece Table (1 uncompressed UTF-16LE piece starting at fc=1024)
     clx_bytes = (
         b"\x02"
         + struct.pack("<I", 16)
@@ -2124,19 +1419,18 @@ def build_ole2_doc_bytes(
     )
     table_stream = clx_bytes.ljust(4096, b"\x00")
 
-    # Build WordDocument stream: FIB at 0..1024, UTF-16LE text at 1024..
     fib = bytearray(1024)
     struct.pack_into("<HH", fib, 0x0000, 0xA5EC, 0x00C1)
-    struct.pack_into("<H", fib, 0x000A, 0x0200)  # fWhichTblStm = 1 (1Table)
+    struct.pack_into("<H", fib, 0x000A, 0x0200)
     struct.pack_into("<II", fib, 0x0018, 1024, 1024 + len(text_utf16))
-    struct.pack_into("<H", fib, 0x0020, 14)  # csw = 14
-    offset_lw = 0x0022 + 28  # 0x003E
-    struct.pack_into("<H", fib, offset_lw, 22)  # cslw = 22
-    rg_lw_start = offset_lw + 2  # 0x0040
-    struct.pack_into("<I", fib, rg_lw_start + 12, ccp_text)  # ccpText at index 3
-    offset_fclcb = rg_lw_start + 88  # 0x0098
-    struct.pack_into("<H", fib, offset_fclcb, 93)  # cbRgFcLcb = 93
-    rg_fclcb_start = offset_fclcb + 2  # 0x009A
+    struct.pack_into("<H", fib, 0x0020, 14)
+    offset_lw = 0x0022 + 28
+    struct.pack_into("<H", fib, offset_lw, 22)
+    rg_lw_start = offset_lw + 2
+    struct.pack_into("<I", fib, rg_lw_start + 12, ccp_text)
+    offset_fclcb = rg_lw_start + 88
+    struct.pack_into("<H", fib, offset_fclcb, 93)
+    rg_fclcb_start = offset_fclcb + 2
     struct.pack_into("<II", fib, rg_fclcb_start + 33 * 8, 0, len(clx_bytes))
 
     word_doc_raw = bytes(fib) + text_utf16
@@ -2146,12 +1440,7 @@ def build_ole2_doc_bytes(
         word_doc_raw = word_doc_raw.ljust(((len(word_doc_raw) + 511) // 512) * 512, b"\x00")
 
     n_word_secs = len(word_doc_raw) // 512
-    n_tbl_secs = len(table_stream) // 512  # 8 sectors
-    # Sector layout:
-    # 0 .. n_word_secs-1: WordDocument
-    # n_word_secs .. n_word_secs+n_tbl_secs-1: 1Table
-    # dir_sec = n_word_secs + n_tbl_secs
-    # fat_sec_0 .. : FAT sectors
+    n_tbl_secs = len(table_stream) // 512
     dir_sec = n_word_secs + n_tbl_secs
 
     def _make_dir_entry(
@@ -2168,7 +1457,7 @@ def build_ole2_doc_bytes(
         buf[: len(name_bytes)] = name_bytes
         struct.pack_into("<H", buf, 64, len(name_bytes))
         buf[66] = obj_type
-        buf[67] = 1  # black node
+        buf[67] = 1
         struct.pack_into("<III", buf, 68, left_sib, right_sib, child_id)
         struct.pack_into("<I", buf, 116, start_sec)
         struct.pack_into("<Q", buf, 120, size)
@@ -2196,15 +1485,15 @@ def build_ole2_doc_bytes(
     fat_entries[dir_sec] = 0xFFFFFFFE
     fat_sec_ids = [dir_sec + 1 + k for k in range(num_fat_secs)]
     for f_sec in fat_sec_ids:
-        fat_entries[f_sec] = 0xFFFFFFFD  # FATSECT
+        fat_entries[f_sec] = 0xFFFFFFFD
 
     fat_bytes = struct.pack(f"<{len(fat_entries)}I", *fat_entries)
 
     header = bytearray(512)
     header[:8] = OLE2_MAGIC
     struct.pack_into("<HH", header, 0x18, 0x003E, 0x0003)
-    struct.pack_into("<HH", header, 0x1C, 0xFFFE, 9)  # sector_shift=9
-    struct.pack_into("<H", header, 0x20, 6)  # mini_sector_shift=6
+    struct.pack_into("<HH", header, 0x1C, 0xFFFE, 9)
+    struct.pack_into("<H", header, 0x20, 6)
     struct.pack_into("<I", header, 0x2C, num_fat_secs)
     struct.pack_into("<I", header, 0x30, dir_sec)
     struct.pack_into("<I", header, 0x38, 4096)
@@ -2259,13 +1548,21 @@ def validate_and_load_docx(
                         "import_uncompressed_too_large",
                         f"文档解压后大小超过 {max_uncompressed_mb}MB 安全上限",
                     )
-                doc_xml_head = zf.read("word/document.xml")[:4096].lower()
-                if b"<!entity" in doc_xml_head or b"<!doctype" in doc_xml_head:
+                try:
+                    DefusedET.fromstring(
+                        zf.read("word/document.xml"),
+                        forbid_dtd=True,
+                        forbid_entities=True,
+                        forbid_external=True,
+                    )
+                except DefusedXmlException as exc:
                     raise DocxValidationError(
                         415,
                         "import_unsupported_format",
                         "文档包含不安全的 XML 实体声明",
-                    )
+                    ) from exc
+                except Exception:
+                    pass
         except DocxValidationError:
             raise
         except zipfile.BadZipFile as exc:
@@ -2618,7 +1915,7 @@ def _iter_visible_docx_paragraphs(node: Any) -> list[Any]:
     for ch in node:
         if _is_wordml_deletion(ch):
             continue
-        if ch.tag == f"{{{W_NS}}}p":
+        if _xml_local_name(ch.tag) == "p":
             out.append(ch)
         else:
             out.extend(_iter_visible_docx_paragraphs(ch))
@@ -2626,26 +1923,27 @@ def _iter_visible_docx_paragraphs(node: Any) -> list[Any]:
 
 
 def _extract_element_lines_text(elem: Any) -> str:
-    """Extract normalized text from `<w:p>`, `<m:oMathPara>`, or `<w:tbl>`, preserving cell, paragraph, equation (`<m:oMath>`), and `<w:br/>` boundaries."""
+    """Extract normalized text from `<w:p>`, `<m:oMathPara>`, `<w:tc>`, or `<w:tbl>` across both `.docx` and Word 2003 XML."""
     paragraphs = (
         [elem]
-        if elem.tag in (f"{{{W_NS}}}p", f"{{{M_NS}}}oMathPara", f"{{{M_NS}}}oMath")
+        if _xml_local_name(elem.tag) in ("p", "oMathPara", "oMath")
         else _iter_visible_docx_paragraphs(elem)
     )
+
     def _walk_p(node: Any, out: list[str]) -> None:
         if _is_wordml_deletion(node):
             return
-        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
+        local_name = _xml_local_name(node.tag)
         if local_name == "oMath":
             out.append(_render_omath_node(node))
             return
-        if node.tag in (f"{{{W_NS}}}t", f"{{{M_NS}}}t"):
+        if local_name == "t":
             out.append(node.text or "")
-        elif node.tag in (f"{{{W_NS}}}br", f"{{{W_NS}}}cr"):
+        elif local_name in ("br", "cr"):
             out.append("\n")
-        elif node.tag in (f"{{{W_NS}}}tab", f"{{{W_NS}}}ptab"):
+        elif local_name in ("tab", "ptab"):
             out.append("\t")
-        elif node.tag == f"{{{W_NS}}}noBreakHyphen":
+        elif local_name == "noBreakHyphen":
             out.append("-")
         for child in node:
             _walk_p(child, out)
@@ -2660,7 +1958,7 @@ def _extract_element_lines_text(elem: Any) -> str:
     return "\n".join(lines)
 
 
-def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
+def _extract_rel_ids_from_element(elem: Any) -> list[str]:
     """Extract embedded image relationship IDs (`a:blip/@r:embed` and `v:imagedata/@r:id`).
 
     Explicitly ignores external links (`a:blip/@r:link`) and selects at most one branch
@@ -2668,19 +1966,11 @@ def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
     """
     rel_ids: list[str] = []
 
-    def _walk(node: ET.Element) -> None:
-        local_name = node.tag.split("}")[-1] if "}" in node.tag else node.tag
+    def _walk(node: Any) -> None:
+        local_name = _xml_local_name(node.tag)
         if local_name == "AlternateContent":
-            choices = [
-                ch
-                for ch in node
-                if (ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag) == "Choice"
-            ]
-            fallbacks = [
-                ch
-                for ch in node
-                if (ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag) == "Fallback"
-            ]
+            choices = [ch for ch in node if _xml_local_name(ch.tag) == "Choice"]
+            fallbacks = [ch for ch in node if _xml_local_name(ch.tag) == "Fallback"]
             for branch in (*choices, *fallbacks):
                 branch_ids = _extract_rel_ids_from_element(branch)
                 if branch_ids:
@@ -2703,25 +1993,24 @@ def _extract_rel_ids_from_element(elem: ET.Element) -> list[str]:
 
 
 def _parse_document_media_rels(zf: zipfile.ZipFile) -> dict[str, str]:
-    """Parse `word/_rels/document.xml.rels` into `{rel_id: normalized_media_path}`.
-
-    Ignores `TargetMode="External"` and any target outside `word/media/`.
-    """
+    """Parse `word/_rels/document.xml.rels` into `{rel_id: normalized_media_path}` using `defusedxml`."""
     rels_path = "word/_rels/document.xml.rels"
     if rels_path not in zf.namelist():
         return {}
     raw_rels = zf.read(rels_path)
-    if b"<!entity" in raw_rels[:4096].lower() or b"<!doctype" in raw_rels[:4096].lower():
-        return {}
     try:
-        root = ET.fromstring(raw_rels)
-    except ET.ParseError:
+        root = DefusedET.fromstring(
+            raw_rels,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except Exception:
         return {}
 
     mapping: dict[str, str] = {}
     for rel in root.iter():
-        local_name = rel.tag.split("}")[-1] if "}" in rel.tag else rel.tag
-        if local_name != "Relationship":
+        if _xml_local_name(rel.tag) != "Relationship":
             continue
         target_mode = (rel.get("TargetMode") or "").strip().lower()
         if target_mode == "external":
@@ -2771,12 +2060,19 @@ def extract_body_blocks_and_images(
                 return None
             info = zf.getinfo(media_path)
             with zf.open(info) as fp:
-                # Cap read at 2 MiB + 1 byte so oversized entries trigger SIGNATURE_TOO_LARGE without OOM
                 data = fp.read(MAX_EMBEDDED_IMAGE_READ_BYTES)
             media_cache[media_path] = data
             return data
 
-        root = ET.fromstring(zf.read("word/document.xml"))
+        try:
+            root = DefusedET.fromstring(
+                zf.read("word/document.xml"),
+                forbid_dtd=True,
+                forbid_entities=True,
+                forbid_external=True,
+            )
+        except Exception:
+            return blocks, images
         body = root.find(f"{{{W_NS}}}body")
         if body is None:
             return blocks, images
@@ -2896,7 +2192,6 @@ def extract_body_blocks_and_images(
                 )
                 for r_idx, tr in enumerate(elem.findall(f"{{{W_NS}}}tr")):
                     for c_idx, tc in enumerate(tr.findall(f"{{{W_NS}}}tc")):
-                        # Skip vertical merge continuation cells (which have <w:vMerge/> without w:val="restart")
                         vmerge = tc.find(f"./{{{W_NS}}}tcPr/{{{W_NS}}}vMerge")
                         if vmerge is not None:
                             vmerge_val = (vmerge.get(f"{{{W_NS}}}val") or "").strip().lower()
@@ -2944,7 +2239,6 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
                     blocks_out.append(tbl_str)
         return "\n\n".join(blocks_out)
 
-    # python-docx Document
     def _extract_tc_text(tc_elem: Any) -> str:
         parts: list[str] = []
         for child in _iter_body_elements(tc_elem):
@@ -3010,4 +2304,3 @@ def extract_word_text(filename: str, raw_bytes: bytes) -> str:
             if tbl_str:
                 out_chunks.append(tbl_str)
     return "\n\n".join(out_chunks)
-

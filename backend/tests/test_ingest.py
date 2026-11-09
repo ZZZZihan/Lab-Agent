@@ -328,6 +328,16 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("cp932.doc", rtf_cp932_escaped_trail, max_chars=300_000).text.strip()
         == "表 and 表 and 表"
     )
+    rtf_gb18030_4byte = (
+        b"{\\rtf1\\ansi\\ansicpg1252{\\fonttbl{\\f0 Arial;}{\\f1\\fcharset134 SimSun;}}"
+        b"\\pard \\f0 caf\\'e9 {\\f1 "
+        + "清衡实验室𠀀".encode("gb18030")
+        + b"}\\par}"
+    )
+    assert (
+        extract_upload("gb4.doc", rtf_gb18030_4byte, max_chars=300_000).text.strip()
+        == "café 清衡实验室𠀀"
+    )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
@@ -517,6 +527,28 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     corpus_items = read_corpus_dir(tmp_path)
     loaded_keys = {meta["key"] for meta, _ in corpus_items}
     assert loaded_keys == {"note", "legacy", "modern"}
+
+    # 7. defusedxml blocks DTD/XXE in Word 2003 XML .doc and lxml.html handles headings/del/inline-block mixes
+    xxe_wordml = (
+        b'<?xml version="1.0"?>'
+        b'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        b'<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
+        b"<w:body><w:p><w:r><w:t>&xxe;</w:t></w:r></w:p></w:body></w:wordDocument>"
+    )
+    with pytest.raises(DocxValidationError) as exc_xxe_xml:
+        validate_and_load_docx("xxe.doc", xxe_wordml)
+    assert exc_xxe_xml.value.status == 415
+
+    html_mixed = (
+        "<html><head><title>Ignored</title><script>evil()</script></head>"
+        "<body><h2>章节标题</h2><div><b>前言</b>说明<p>正文<del>删除内容</del>保留内容<br>第二行</p>尾部说明</div></body></html>"
+    ).encode()
+    extracted_html_mixed = extract_upload("mixed.doc", html_mixed, max_chars=300_000)
+    assert "## 章节标题" in extracted_html_mixed.text
+    assert "前言说明" in extracted_html_mixed.text
+    assert "正文保留内容\n第二行" in extracted_html_mixed.text
+    assert "删除内容" not in extracted_html_mixed.text
+    assert "尾部说明" in extracted_html_mixed.text
 
 
 async def test_worker_processes_pending_and_retries_to_failed() -> None:
