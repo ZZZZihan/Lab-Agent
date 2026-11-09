@@ -52,6 +52,7 @@ def _is_suffixed_pinyin_login(cand_sid: str, raw_name: str) -> bool:
 def _reset_sibling_injections(p: dict[str, Any]) -> None:
     """Strip any previously injected sibling fields and collision warnings so `resolve` is idempotent."""
     p.pop("cluster_id", None)
+    p.pop("provisioned_user_id", None)
     raw_warnings = p.get("warnings")
     warnings = [
         str(w)
@@ -165,6 +166,7 @@ class _Occurrence:
         "norm_name",
         "person",
         "person_key",
+        "prior_cluster_id",
     )
 
     def __init__(
@@ -180,6 +182,7 @@ class _Occurrence:
         norm_aff: str,
         native_sid: str | None,
         native_email: str | None,
+        prior_cluster_id: str | None = None,
     ) -> None:
         self.job = job
         self.job_id = job.id
@@ -192,6 +195,7 @@ class _Occurrence:
         self.norm_aff = norm_aff
         self.native_sid = native_sid
         self.native_email = native_email
+        self.prior_cluster_id = prior_cluster_id
 
 
 def resolve_batch_identities(
@@ -210,6 +214,7 @@ def resolve_batch_identities(
     job_people_lists: dict[uuid.UUID, list[dict[str, Any]]] = {}
     job_previews: dict[uuid.UUID, dict[str, Any]] = {}
     per_job_name_counts: dict[uuid.UUID, dict[str, int]] = {}
+    prior_cid_by_job_key: dict[tuple[uuid.UUID, str], str] = {}
     occurrences: list[_Occurrence] = []
 
     # Pre-pass: reset prior sibling injections and count normalized names per job among non-excluded people
@@ -231,6 +236,9 @@ def resolve_batch_identities(
             pkey = str(p.get("key") or p.get("temp_id") or f"p{idx}").strip()
             p["key"] = pkey
             p["temp_id"] = pkey
+            raw_prior_cid = str(p.get("cluster_id") or "").strip()
+            if raw_prior_cid:
+                prior_cid_by_job_key[(job.id, pkey)] = raw_prior_cid
             _reset_sibling_injections(p)
             if _is_person_excluded(p, ex_keys):
                 if ex_keys and pkey in ex_keys:
@@ -270,6 +278,7 @@ def resolve_batch_identities(
                     norm_aff=n_aff,
                     native_sid=native_sid,
                     native_email=native_email,
+                    prior_cluster_id=prior_cid_by_job_key.get((job.id, pkey)),
                 )
             )
 
@@ -388,10 +397,31 @@ def resolve_batch_identities(
     # Step 3: Cross-job sibling injection of student_id and email
     injected_student_ids = 0
     injected_emails = 0
+    has_exclusions = bool(
+        exclude_keys_by_job and any(bool(s) for s in exclude_keys_by_job.values())
+    )
+    assigned_cids: list[str] = [""] * len(merged_clusters)
+    used_cids: set[str] = set()
+    if has_exclusions:
+        for i_cl, cl in enumerate(merged_clusters):
+            prior_cids = {o.prior_cluster_id for o in cl if o.prior_cluster_id}
+            if len(prior_cids) == 1:
+                cand_cid = next(iter(prior_cids))
+                if cand_cid and cand_cid not in used_cids:
+                    assigned_cids[i_cl] = cand_cid
+                    used_cids.add(cand_cid)
+    next_seq = 1
+    for i_cl in range(len(merged_clusters)):
+        if not assigned_cids[i_cl]:
+            while f"c{next_seq}" in used_cids:
+                next_seq += 1
+            assigned_cids[i_cl] = f"c{next_seq}"
+            used_cids.add(assigned_cids[i_cl])
+            next_seq += 1
 
-    cluster_meta_list: list[tuple[list[_Occurrence], str | None, str | None, str | None, str | None]] = []
-    for idx_c, cl in enumerate(merged_clusters, start=1):
-        cid = f"c{idx_c}"
+    cluster_meta_list: list[tuple[str, list[_Occurrence], str | None, str | None, str | None, str | None]] = []
+    for i_cl, cl in enumerate(merged_clusters):
+        cid = assigned_cids[i_cl]
         for occ in cl:
             occ.person["cluster_id"] = cid
         sid_sources = [(o.native_sid, o.job.original_filename) for o in cl if o.native_sid]
@@ -429,7 +459,7 @@ def resolve_batch_identities(
                     injected_emails += 1
 
         cluster_meta_list.append(
-            (cl, cluster_sid, cluster_sid_source, cluster_email, cluster_email_source)
+            (cid, cl, cluster_sid, cluster_sid_source, cluster_email, cluster_email_source)
         )
 
     # Step 4: Run assign_people_identities on each job and update job.preview
@@ -455,14 +485,14 @@ def resolve_batch_identities(
     clusters_out: list[dict[str, Any]] = []
     t1_covered = 0
 
-    for idx_c, (
+    for (
+        cluster_id,
         cl,
         cluster_sid,
         cluster_sid_source,
         cluster_email,
         cluster_email_source,
-    ) in enumerate(cluster_meta_list, start=1):
-        cluster_id = f"c{idx_c}"
+    ) in cluster_meta_list:
         first_occ = cl[0]
         members_out: list[dict[str, Any]] = []
         has_t1 = bool(cluster_sid)

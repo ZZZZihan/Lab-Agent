@@ -719,6 +719,13 @@ export function useColdStartBatchWizard({
     }));
   }
 
+  function getSkippedSignatureIdsForJob(jobId: string): string[] {
+    const skipForJob = jobSkipSignaturesMap[jobId] || {};
+    return Object.entries(skipForJob)
+      .filter(([, skipped]) => skipped)
+      .map(([sigId]) => sigId);
+  }
+
   async function handleProvision() {
     if (provisioningRef.current || provisioning || batchJobs.length === 0) {
       return;
@@ -741,7 +748,6 @@ export function useColdStartBatchWizard({
       const jobsPayload = batchJobs.map((job) => {
         const jid = job.job_id;
         const ovForJob = jobOverridesMap[jid] || {};
-        const skipForJob = jobSkipSignaturesMap[jid] || {};
         const peoplePayload = (job.preview?.people || []).map((p) => {
           const ov = ovForJob[p.key];
           return {
@@ -752,9 +758,7 @@ export function useColdStartBatchWizard({
               : {}),
           };
         });
-        const skippedSigs = Object.entries(skipForJob)
-          .filter(([, skipped]) => skipped)
-          .map(([sigId]) => sigId);
+        const skippedSigs = getSkippedSignatureIdsForJob(jid);
         return {
           job_id: jid,
           as_of_time: (jobAsOfMap[jid] || "").trim() || undefined,
@@ -883,9 +887,13 @@ export function useColdStartBatchWizard({
           };
           setStep4Jobs([...working]);
 
+          const skippedSigs = getSkippedSignatureIdsForJob(current.jobId);
           const execRes = await executeImportMerge(current.jobId, {
             as_of_time: preview.as_of_time || current.asOfTime || undefined,
             decisions: [],
+            ...(skippedSigs.length > 0
+              ? { skip_signature_ids: skippedSigs }
+              : {}),
           });
           working[i] = {
             ...working[i],
@@ -1001,10 +1009,14 @@ export function useColdStartBatchWizard({
         change_key,
         action,
       }));
+      const skippedSigs = getSkippedSignatureIdsForJob(target.jobId);
       const execRes = await executeImportMerge(target.jobId, {
         as_of_time:
           target.preview.as_of_time || target.asOfTime || undefined,
         decisions: decisionsList,
+        ...(skippedSigs.length > 0
+          ? { skip_signature_ids: skippedSigs }
+          : {}),
       });
       working[targetIdx] = {
         ...working[targetIdx],

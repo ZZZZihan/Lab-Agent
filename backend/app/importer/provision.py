@@ -518,6 +518,11 @@ async def provision_import_job(
                 await session.flush()
                 user_id = new_user.id
                 users_created += 1
+                person["match"] = {
+                    **match_info,
+                    "status": "new",
+                    "user_id": str(user_id),
+                }
                 new_roster_items.append(
                     {
                         "user_id": str(user_id),
@@ -530,6 +535,7 @@ async def provision_import_job(
                     }
                 )
 
+            person["provisioned_user_id"] = str(user_id)
             pkey = str(person.get("temp_id") or person.get("key") or "")
             fp_val = str(person.get("fingerprint") or "") or person_fp(
                 tier=p_tier,

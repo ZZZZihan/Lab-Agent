@@ -16,6 +16,8 @@ from app.audit import write_audit
 from app.auth import Actor
 from app.db import get_session
 from app.importer.batch_identity import resolve_batch_identities
+from app.importer.fingerprint import norm
+from app.importer.people import normalize_person_name
 from app.importer.pii import PIILeakError, assert_no_pii
 from app.importer.provision import (
     PersonOverride,
@@ -246,6 +248,24 @@ async def batch_provision_imports(
     existing_people = list(await session.scalars(select(LabPerson)))
     actor_user = next((u for u in existing_users if u.id == actor.id), None)
 
+    has_any_exclusions = any(bool(s) for s in exclude_keys_by_job.values())
+    if has_any_exclusions:
+        has_prior_cids = True
+        for j in jobs:
+            j_ppl = (j.preview or {}).get("people") if isinstance(j.preview, dict) else None
+            if isinstance(j_ppl, list) and j_ppl:
+                if not any(isinstance(p, dict) and bool(p.get("cluster_id")) for p in j_ppl):
+                    has_prior_cids = False
+                    break
+        if not has_prior_cids:
+            resolve_batch_identities(
+                jobs,
+                existing_users=existing_users,
+                existing_people=existing_people,
+                actor_user=actor_user,
+                exclude_keys_by_job=None,
+            )
+
     resolved = resolve_batch_identities(
         jobs,
         existing_users=existing_users,
@@ -264,12 +284,32 @@ async def batch_provision_imports(
             ),
             None,
         )
-        if matched_cluster is None:
+        actor_norm_name = (
+            norm(normalize_person_name(actor_user.display_name))
+            if actor_user is not None
+            else ""
+        )
+        cluster_norm_name = (
+            norm(normalize_person_name(str(matched_cluster.get("name") or "")))
+            if matched_cluster is not None
+            else ""
+        )
+        if (
+            matched_cluster is None
+            or actor_user is None
+            or any(lp.user_id == actor.id for lp in existing_people)
+            or (
+                matched_cluster.get("matched_user_id") is not None
+                and str(matched_cluster.get("matched_user_id")) != str(actor.id)
+            )
+            or not actor_norm_name
+            or cluster_norm_name != actor_norm_name
+        ):
             await session.rollback()
             raise APIError(
                 422,
                 "link_self_cluster_invalid",
-                f"指定的本人关联聚类不存在: {target_cid}",
+                f"指定的本人关联聚类无效或与当前管理员身份不匹配: {target_cid}",
             )
         for member in matched_cluster.get("members", []):
             if not isinstance(member, dict):
@@ -322,6 +362,8 @@ async def batch_provision_imports(
         cid = str(cl.get("cluster_id") or "")
         if not cid:
             continue
+        cluster_custom_logins: set[str] = set()
+        cluster_members_keys: list[tuple[uuid.UUID, str]] = []
         for member in cl.get("members", []):
             if not isinstance(member, dict):
                 continue
@@ -337,6 +379,43 @@ async def batch_provision_imports(
             ).strip()
             if m_key:
                 cluster_by_job_person[(m_jid, m_key)] = cid
+                if m_key not in exclude_keys_by_job.get(m_jid, set()):
+                    cluster_members_keys.append((m_jid, m_key))
+                    m_cfg = items_by_job_id.get(m_jid)
+                    if m_cfg is not None:
+                        m_ov = next(
+                            (ov for ov in m_cfg.people if ov.key == m_key), None
+                        )
+                        if (
+                            m_ov is not None
+                            and not m_ov.exclude
+                            and m_ov.login_name is not None
+                            and m_ov.login_name.strip()
+                        ):
+                            cluster_custom_logins.add(
+                                m_ov.login_name.strip().lower()
+                            )
+        if len(cluster_custom_logins) > 1:
+            await session.rollback()
+            raise APIError(
+                422,
+                "login_name_invalid",
+                f"同一人员聚类 ({cid}) 在不同本子中设置了冲突的自定义登录名",
+            )
+        if len(cluster_custom_logins) == 1:
+            shared_login = next(iter(cluster_custom_logins))
+            for m_jid, m_key in cluster_members_keys:
+                m_cfg = items_by_job_id[m_jid]
+                m_ov = next(
+                    (ov for ov in m_cfg.people if ov.key == m_key), None
+                )
+                if m_ov is not None:
+                    if not m_ov.exclude and m_ov.login_name is None:
+                        m_ov.login_name = shared_login
+                else:
+                    m_cfg.people.append(
+                        PersonOverride(key=m_key, login_name=shared_login)
+                    )
 
     cluster_resolved_user_id: dict[str, uuid.UUID] = {}
     job_results: list[dict[str, Any]] = []
@@ -397,15 +476,16 @@ async def batch_provision_imports(
             pkey = str(p.get("key") or p.get("temp_id") or "").strip()
             person_cid = cluster_by_job_person.get((job_id_val, pkey))
             raw_match = p.get("match")
+            prov_uid_raw = p.get("provisioned_user_id") or (
+                raw_match.get("user_id") if isinstance(raw_match, dict) else None
+            )
             if (
                 person_cid
                 and person_cid not in cluster_resolved_user_id
-                and isinstance(raw_match, dict)
-                and raw_match.get("status") == "existing"
-                and raw_match.get("user_id")
+                and prov_uid_raw
             ):
                 try:
-                    cluster_resolved_user_id[person_cid] = uuid.UUID(str(raw_match["user_id"]))
+                    cluster_resolved_user_id[person_cid] = uuid.UUID(str(prov_uid_raw))
                 except ValueError:
                     pass
 

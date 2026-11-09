@@ -388,3 +388,176 @@ async def test_full_coldstart_bootstrap_to_batch_provision_and_downstream_usage(
         settings.app_env = orig_env
         settings.bootstrap_token = orig_token
         settings.oidc_issuer = orig_oidc
+
+
+async def test_batch_provision_preserves_self_cluster_on_exclusion_and_shared_t1_custom_login(
+    client: AsyncClient,
+) -> None:
+    """Regression test for Codex review findings:
+    1. Excluding an earlier cluster (c1) in Step 2 must not shift `link_self_cluster_id` (c2) to link a third person (c3);
+       and attempting to link a cluster whose name does not match the admin must fail closed with 422 `link_self_cluster_invalid`.
+    2. Customizing `login_name` on a shared T1 person across multiple jobs in a batch must propagate the newly created user_id
+       across jobs without raising 409 `login_name_taken` or creating duplicate accounts.
+    """
+    settings = get_settings()
+    orig_env = settings.app_env
+    orig_token = settings.bootstrap_token
+    orig_oidc = settings.oidc_issuer
+    try:
+        settings.app_env = "dev"
+        settings.bootstrap_token = None
+        settings.oidc_issuer = None
+        await _clear_all_users()
+
+        boot_resp = await client.post(
+            "/api/v1/auth/bootstrap-admin",
+            json={
+                "display_name": PI_NAME,
+                "email": PI_EMAIL,
+                "staff_no": PI_STAFF_NO,
+                "password": PI_PASSWORD,
+            },
+        )
+        assert boot_resp.status_code == 200, boot_resp.text
+        admin_token = boot_resp.json()["access_token"]
+        admin_user_id = boot_resp.json()["user"]["id"]
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        # Job 1 has applicant "顾长风" (c1), member PI_NAME "沈昭" (c2), and T1 member "林疏影" (c3, student_id 2021310888)
+        docx_1 = _build_proposal_docx(
+            project_title="联合基金A课题",
+            applicant_name="顾长风",
+            applicant_title="教授",
+            fill_date="2023年3月10日",
+            members=[
+                (PI_NAME, "", "教授", "天津工业大学", ""),
+                ("林疏影", "2021310888", "博士生", "天津工业大学", ""),
+            ],
+        )
+        # Job 2 has applicant PI_NAME "沈昭" (c2) and T1 member "林疏影" (c3, student_id 2021310888)
+        docx_2 = _build_proposal_docx(
+            project_title="联合基金B课题",
+            applicant_name=PI_NAME,
+            applicant_title="教授",
+            fill_date="2024年3月10日",
+            members=[
+                ("林疏影", "2021310888", "博士候选人", "天津工业大学", ""),
+            ],
+        )
+
+        r1 = await client.post(
+            "/api/v1/admin/imports?as_of_time=2023-03-10",
+            headers=admin_headers,
+            files={
+                "file": (
+                    "joint_a.docx",
+                    docx_1,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        assert r1.status_code == 200, r1.text
+        job1_id = r1.json()["id"]
+
+        r2 = await client.post(
+            "/api/v1/admin/imports?as_of_time=2024-03-10",
+            headers=admin_headers,
+            files={
+                "file": (
+                    "joint_b.docx",
+                    docx_2,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        assert r2.status_code == 200, r2.text
+        job2_id = r2.json()["id"]
+
+        res_resp = await client.post(
+            "/api/v1/admin/imports/batch/resolve",
+            headers=admin_headers,
+            json={"job_ids": [job1_id, job2_id]},
+        )
+        assert res_resp.status_code == 200, res_resp.text
+        res_data = res_resp.json()
+
+        clusters_by_name = {c["name"]: c for c in res_data["clusters"]}
+        assert clusters_by_name["顾长风"]["cluster_id"] == "c1"
+        assert clusters_by_name[PI_NAME]["cluster_id"] == "c2"
+        assert clusters_by_name["林疏影"]["cluster_id"] == "c3"
+        assert res_data["self_candidate"]["cluster_id"] == "c2"
+
+        jobs_by_id = {j["id"]: j for j in res_data["jobs"]}
+        gu_key_j1 = next(
+            p["key"] for p in jobs_by_id[job1_id]["preview"]["people"] if p["name"] == "顾长风"
+        )
+        lin_key_j1 = next(
+            p["key"] for p in jobs_by_id[job1_id]["preview"]["people"] if p["name"] == "林疏影"
+        )
+        lin_key_j2 = next(
+            p["key"] for p in jobs_by_id[job2_id]["preview"]["people"] if p["name"] == "林疏影"
+        )
+
+        # Attempting to link c3 (林疏影) as self_candidate must fail closed with 422 link_self_cluster_invalid
+        bad_self_resp = await client.post(
+            "/api/v1/admin/imports/batch/provision",
+            headers=admin_headers,
+            json={
+                "jobs": [
+                    {"job_id": job1_id, "as_of_time": "2023-03-10"},
+                    {"job_id": job2_id, "as_of_time": "2024-03-10"},
+                ],
+                "initial_password": INITIAL_MEMBER_PW,
+                "link_self_cluster_id": "c3",
+            },
+        )
+        assert bad_self_resp.status_code == 422, bad_self_resp.text
+        assert bad_self_resp.json()["error"]["code"] == "link_self_cluster_invalid"
+
+        # Now exclude c1 ("顾长风"), keep link_self_cluster_id="c2" (PI_NAME), and set a custom login_name on shared T1 person "林疏影"
+        prov_resp = await client.post(
+            "/api/v1/admin/imports/batch/provision",
+            headers=admin_headers,
+            json={
+                "jobs": [
+                    {
+                        "job_id": job1_id,
+                        "as_of_time": "2023-03-10",
+                        "people": [
+                            {"key": gu_key_j1, "exclude": True},
+                            {"key": lin_key_j1, "login_name": "lin_custom_t1"},
+                        ],
+                    },
+                    {
+                        "job_id": job2_id,
+                        "as_of_time": "2024-03-10",
+                        "people": [
+                            {"key": lin_key_j2, "login_name": "lin_custom_t1"},
+                        ],
+                    },
+                ],
+                "initial_password": INITIAL_MEMBER_PW,
+                "include_password": True,
+                "link_self_cluster_id": "c2",
+            },
+        )
+        assert prov_resp.status_code == 200, prov_resp.text
+        prov_data = prov_resp.json()
+        assert prov_data["stats"]["users_created"] == 1
+        assert prov_data["stats"]["users_linked"] == 1
+
+        maker = get_sessionmaker()
+        async with maker() as session:
+            people_rows = (await session.execute(select(LabPerson))).scalars().all()
+            by_name = {p.name: p for p in people_rows}
+            assert "顾长风" not in by_name
+            assert str(by_name[PI_NAME].user_id) == admin_user_id
+            assert by_name["林疏影"].user_id is not None
+            assert str(by_name["林疏影"].user_id) != admin_user_id
+            lin_user = await session.get(User, by_name["林疏影"].user_id)
+            assert lin_user is not None
+            assert lin_user.login_name == "lin_custom_t1"
+    finally:
+        settings.app_env = orig_env
+        settings.bootstrap_token = orig_token
+        settings.oidc_issuer = orig_oidc
