@@ -87,7 +87,7 @@ export type MatchedPersonCardData = {
 
 export const CANVAS_SUGGESTIONS = [
   "主磁体额定工作电流上限是多少？液氦液位低于多少会触发联锁停机？",
-  "课题组里万振凯和郭建民的研究专长分别是什么？",
+  "课题组里陈予安和陆星河的研究专长分别是什么？",
   "清衡-A100 一共有多少台节点？",
   "周三学术例会在哪间实体会议室？",
 ];
@@ -101,8 +101,8 @@ export const COMPACT_RAIL_SUGGESTIONS: Array<{
     prompt: "主磁体额定工作电流上限是多少？液氦液位低于多少会触发联锁停机？",
   },
   {
-    label: "万振凯与郭建民研究专长档案",
-    prompt: "课题组里万振凯和郭建民的研究专长分别是什么？",
+    label: "陈予安与陆星河研究专长档案",
+    prompt: "课题组里陈予安和陆星河的研究专长分别是什么？",
   },
   {
     label: "清衡-A100 算力节点规模",
@@ -301,17 +301,6 @@ export function extractMatchedPeopleForTurn(
   const citationCorpus = sourceCitations
     .map((c) => `${c.title || ""} ${c.heading || ""} ${c.excerpt || ""}`)
     .join(" ");
-
-  const isMemberRelatedQuery =
-    /专长|成员|团队|人员|职称|导师|申请人|负责人|谁|简介|简历|研究方向|课题组/.test(
-      turn.question,
-    ) ||
-    sourceCitations.some(
-      (c) =>
-        (c.doc_key && c.doc_key.startsWith("lab-profile-")) ||
-        (c.heading && /团队成员|成员|申请人|课题组概况/.test(c.heading)) ||
-        (c.title && /课题组资料库|申报书/.test(c.title)),
-    );
 
   const sourcePool = labPeople.map((p) => ({
     id: p.id,

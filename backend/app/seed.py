@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from app.models import Group, GroupMember, User
 from app.rag.chunker import parse_front_matter
 from app.rag.embedder import build_embedder
 from app.rag.ingest import upsert_source
+from app.seed_demo_lab import seed_demo_lab
 
 DEMO_USERS = (
     ("admin@lab.local", "沈昭", "admin", "LabAgent-Demo-2026-Admin"),
@@ -42,7 +44,7 @@ def assert_demo_seed_allowed(app_env: str) -> None:
         )
 
 
-async def seed() -> None:
+async def seed(*, include_lab_demo: bool = False) -> None:
     settings = get_settings()
     assert_demo_seed_allowed(settings.app_env)
     embedder = build_embedder(settings)
@@ -103,14 +105,31 @@ async def seed() -> None:
                 group_grants=group_grants,
             )
             await session.commit()
+            if include_lab_demo:
+                await seed_demo_lab(
+                    session,
+                    settings=settings,
+                    embedder=embedder,
+                    users=users,
+                )
     finally:
         await embedder.aclose()
         await dispose_engine()
-    print(f"seeded {stats.total} documents for 清衡实验室")
+    suffix = " + synthetic /lab showcase fixtures" if include_lab_demo else ""
+    print(f"seeded {stats.total} documents for 清衡实验室{suffix}")
 
 
-def main() -> None:
-    asyncio.run(seed())
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Seed synthetic Qingheng Lab demo accounts and documents."
+    )
+    parser.add_argument(
+        "--with-lab-demo",
+        action="store_true",
+        help="Also seed synthetic /lab researchers, projects, achievements, signatures, provenance, and conversations.",
+    )
+    args = parser.parse_args(argv)
+    asyncio.run(seed(include_lab_demo=args.with_lab_demo))
 
 
 if __name__ == "__main__":

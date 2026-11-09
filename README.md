@@ -1,23 +1,107 @@
-# Lab Agent
+# Lab Agent · 清衡实验室科研智能与资产工作台
 
-Lab Agent 是清衡实验室的知识助手。它只根据当前用户有权阅读的文档回答，引用具体小节，证据不够就拒绝，并留下不含原文的审计记录。
+Lab Agent 是面向科研课题组与实验室构建的**权限隔离知识助手（Grounded RAG）与全生命周期科研资产中枢**。系统将数据库级细粒度访问控制（ACL）、开发集校准的拒答门控、项目申报书（`.doc` / `.docx`）冷启动解析、字段级时间线溯源合并、个人全息档案袋（含内嵌电子签名核验）以及防篡改哈希链审计统一在同一套工程底座中。
 
-这是一次从零开始的重写，面向检索、权限和可复现评测。旧系统里的业务 CRUD 没有搬过来。
+> **合成演示数据声明**：本仓库所有文档、评测集与下方界面截图均基于 100% 虚构的**「清衡实验室（Qingheng Lab）」**合成数据（可通过 `python -m app.seed --with-lab-demo` 一键复现），不包含任何真实科研机构、项目或个人敏感信息（PII）。
 
-## 中文说明
+---
 
-Lab Agent 回答实验室已经写下来的事实：集群约定、组会、项目笔记、论文笔记。上传的 Markdown 按 `##` 标题切成块，检索在数据库里就带上访问控制，模型只有在余弦相似度（或显式开启的重排分数）超过开发集上调好的阈值时才会被调用。
+## 核心能力一览
 
-下面的账号和密码只属于本地合成演示。`APP_ENV=prod` 时种子脚本会直接退出，不会写入这些账号。登录框只有在 `NEXT_PUBLIC_DEMO_HINTS=true` 时才预填密码；镜像构建默认是关闭的，`docker compose` 的本地演示才会打开。
+| 模块 | 核心工程机制 |
+| --- | --- |
+| **零幻觉证据门控问答 (`/chat`)** | 检索阶段在 PostgreSQL + `pgvector` SQL 层内联下推 ACL 过滤；融合 `halfvec(4096)` 向量检索（支持 1024 维前缀 HNSW 两阶段精排）与 `jieba` BM25 倒排（Reciprocal Rank Fusion）。模型调用前必须通过已校准的余弦相似度与稀有词覆盖率双门控；回答强制校验 `[n]` 引用角标并自动挂载核验成员卡片。 |
+| **申报书冷启动与三级账号开通 (`/admin/imports`)** | 支持上传历史或新编 `.doc`（OLE2 二进制）/ `.docx` 项目申报书，内存中物理剥离身份证号与手机号（零入库），自动抽取封面、团队成员、承担项目、代表性成果、支撑设备及内嵌电子签名，并支持按 **T1（学号/工作证号）→ T2（拼音登录名）→ T3（姓名）** 三级标识符一键开通全组账号。 |
+| **字段级时间线溯源与多本子合并 (`FieldProvenance`)** | 每个实体字段独立维护基准日期（`as_of_time`）、来源类型（`proposal_import` / `manual`）与前序快照。跨年度导入多份申报书时自动识别**新增实体、字段演进更新、空白补齐、时间倒退忽略、人工修改保护与同时间冲突**，支持强制采纳裁决与一键事务级撤销合并（Revert）。 |
+| **课题组资料库、全息档案袋与写本子素材篮 (`/lab`)** | 按姓名确定性归一化（NFKC、剥离括号标注与脚标、统一中点符）自动归因每位成员主持/参与的项目与一作/合作成果；提供内嵌电子签名安全预览与 ETag 缓存下载；跨标签页「写本子素材篮」支持自定义排序、一键导出标准申报书格式 `.docx`（附带成员签名表）或打包下载 `.zip` 电子签名包。 |
+| **防篡改哈希链审计与 MCP 工具协议 (`/audit` & `/settings`)** | 审计表 `audit_events` 由数据库触发器强制只追加（Append-Only），每行通过 `prev_hash` 与 `row_hash`（SHA-256）构成防篡改哈希链，仅记录动作、资源 ID 与模型用量（零原文、零邮箱、零外发 PII）。内置 `la_pat_` 个人访问令牌（PAT）与标准 MCP（Model Context Protocol）服务端，供 Claude Code / Claude Desktop 直接安全调用。 |
 
-| 姓名 | 邮箱 | 角色 | 密码 |
+---
+
+## 真实页面展示（基于「清衡实验室」合成演示数据）
+
+### 1. 动态科研研报与证据门控问答 (`/chat`)
+
+回答紧扣当前用户有权访问的知识库分块，内联标注 `[1]`、`[2]` 引用角标，并在画布下方自动挂载经证据核验的课题组成员专长与签名状态卡片；右侧「智能探针与证据检索流（Inspector）」实时展示 Hybrid RRF 命中得分与原文证据胶囊。
+
+![动态科研研报与证据门控问答](docs/assets/screenshots/01-chat-grounded-rag.png)
+
+### 2. 校准拒答门控与 SQL 级权限边界 (`/chat`)
+
+当提问超出知识库记载范围（如未登记的线下实体会议室）或涉及当前账号无权读取的受限文档（如未授权的采购合同）时，ACL 在 SQL 检索阶段直接物理隔离，证据门控在调用生成模型前拦截并返回可核查的「知识库证据边界备忘」，杜绝猜测性幻觉。
+
+![校准拒答门控与权限边界](docs/assets/screenshots/02-chat-calibrated-refusal.png)
+
+### 3. 课题组资料库与字段级人工保护溯源 (`/lab`)
+
+集中管理课题组团队成员（8 人）、承担项目（5 项）、前期成果（5 篇/项）与设备支撑条件（3 台/套）。卡片内联展示每个字段的导入基准日期（如 `来源: 申报书 (2025-03-15)`）与管理员或本人手工修订状态（`来源: 人工修改`），并支持一键「恢复为导入值」。
+
+![课题组资料库与字段级溯源](docs/assets/screenshots/03-lab-assets-hub.png)
+
+### 4. 成员个人全息档案袋与内嵌电子签名 (`/lab`)
+
+点击任意成员即可打开全息档案袋，集中展示从申报书中提取并经魔数/尺寸安全核验的**真实内嵌电子签名**（支持 PNG 下载、替换与删除）、一行式申报书标准简介、个人学术简历全文，以及按姓名确定性归因的关联承担项目与代表性成果。
+
+![成员个人全息档案袋与电子签名](docs/assets/screenshots/04-lab-person-dossier.png)
+
+### 5. 跨标签页「写本子素材篮」与一键申报书导出 (`/lab`)
+
+在成员、项目、成果、设备任意标签页或全息档案袋中勾选条目即可加入底部常驻的「写本子素材篮」，支持上下调整导出顺序、选择签名包命名规则（`01_姓名.ext` / `姓名.ext` / `姓名_ID.ext`）、一键批量复制标准文本、打包下载 `.zip` 签名包或导出带成员签名表的 Word（`.docx`）文档。
+
+![跨标签页写本子素材篮](docs/assets/screenshots/05-lab-reuse-basket.png)
+
+### 6. 申报书导入管理与多本子时间线合并预览 (`/admin/imports`)
+
+管理历次申报书导入任务（`provisioned` 已开号、`merged` 已合并、`parsed` 待开号/待合并）。点击「版本合并预览」即可按本子基准时间（`as_of_time`）自动比对字段级变化：高亮展示**新增独立实体、字段更新、空白字段补齐、时间倒退自动忽略、人工修改保护忽略**，并支持管理员勾选强制采纳或一键撤销历史合并。
+
+![多本子版本合并预览与冲突裁决](docs/assets/screenshots/06-imports-temporal-merge.png)
+
+### 7. 多格式知识库文档与细粒度 ACL 权限管理 (`/documents`)
+
+支持上传与异步解析 Markdown（`.md` / `.txt`）、PDF（`.pdf`）与 Word（`.docx`）文档，以及由课题组资料库自动同步生成的结构化档案分块（`lab_profile`）。每篇文档支持 `lab`（全员可读）、`restricted`（指定成员或项目组如 `helios` 赫利俄斯组可读）与 `private`（仅上传者与管理员可读）三级访问控制。
+
+![多格式知识库文档与细粒度权限](docs/assets/screenshots/07-documents-acl-ingestion.png)
+
+### 8. 防篡改哈希链安全审计日志 (`/audit`)
+
+所有敏感操作（登录、文档检索、模型调用、证据拒答、越权拦截、个人访问令牌签发、申报书导入合并、电子签名读取与打包导出）均实时写入只追加审计表，通过 `prev_hash` 与 `row_hash` 构成 SHA-256 哈希链，不记录任何提问原文、回答正文或个人隐私字段。
+
+![防篡改哈希链安全审计日志](docs/assets/screenshots/08-audit-hash-chain.png)
+
+---
+
+## 合成演示账号与「清衡实验室」测试数据
+
+下面的账号、学号/工号与密码仅属于本地合成演示。当 `APP_ENV=prod` 时，种子脚本会直接拒绝退出，绝不写入任何演示账号。登录框仅在 `NEXT_PUBLIC_DEMO_HINTS=true` 时显示快捷填充提示（生产镜像默认关闭）。
+
+### 1. 基础角色演示账号（`python -m app.seed` 默认写入）
+
+| 姓名 | 登录邮箱 | 角色与权限边界 | 演示密码 |
 | --- | --- | --- | --- |
-| 沈昭 | admin@lab.local | 管理员 | `LabAgent-Demo-2026-Admin` |
-| 林可 | member@lab.local | 成员，可读项目赫利俄斯 | `LabAgent-Demo-2026-Member` |
-| 周宁 | zhou@lab.local | 成员，可读采购笔记，不能读赫利俄斯 | `LabAgent-Demo-2026-Zhou` |
-| 王敏 | viewer@lab.local | 查看者，不能上传 | `LabAgent-Demo-2026-Viewer` |
+| **沈昭** | admin@lab.local | 管理员（`admin`），可访问全部文档、导入管理、用户/项目组与审计日志 | `LabAgent-Demo-2026-Admin` |
+| **林可** | member@lab.local | 课题组成员（`member`），隶属「项目赫利俄斯组（`helios`）」，可读赫利俄斯受限测试记录 | `LabAgent-Demo-2026-Member` |
+| **周宁** | zhou@lab.local | 课题组成员（`member`），获单独授权可读「采购审批」，不可读赫利俄斯项目文档 | `LabAgent-Demo-2026-Zhou` |
+| **王敏** | viewer@lab.local | 访客（`viewer`），仅可读全组公开文档（`visibility=lab`），无上传与编辑权限 | `LabAgent-Demo-2026-Viewer` |
 
-界面默认中文，右上角可以切到英文。
+### 2. 合成课题组档案与三级登录演示（`python -m app.seed --with-lab-demo` 额外写入）
+
+加上 `--with-lab-demo` 参数运行种子脚本时，系统会在不依赖任何外部文件的情况下，自动生成完整的清衡实验室科研资产库（8 名虚拟科研人员、7 枚合成手写体电子签名、5 项科研项目、5 项代表性成果、3 套支撑设备、3 条历次申报书导入任务与字段溯源记录、多格式文档及示例对话）：
+
+```bash
+cd backend && uv run python -m app.seed --with-lab-demo
+```
+
+除邮箱外，已通过冷启动开通账号的合成成员支持直接使用 **学号/工作证号（T1）、拼音登录名（T2）或姓名（T3）** 登录（合成冷启动账号的初始演示密码统一为 `QingHeng-Demo-2026#Init`）：
+
+| 姓名 (T3) | 账号层级 | 学号 / 工作证号 (T1) | 登录名 (T2 / T1) | 职称 / 学位 | 合成研究专长 |
+| --- | --- | --- | --- | --- | --- |
+| **陈予安** | `T2` | — | `chenyuan` | 研究员 · 博士（课题负责人） | 极低温超导磁体、液氦闭环冷却、异构算力集群协同 |
+| **陆星河** | `T2` | — | `luxinghe` | 副研究员 · 博士（课题负责人） | 可信检索增强生成、证据门控校准、多模态科学文献解析 |
+| **顾清辞** | `T2` | — | `guqingci` | 高级工程师 · 硕士 | 高速 RDMA 网络互连、NVMe-oF 并行文件系统、容器化算力编排 |
+| **苏景行** | `T1` | `20260108` | `20260108` | 学士 · 课题组成员 | 稠密向量两阶段 HNSW 检索、混合 RRF 融合评测 |
+| **许知微** | `T1` | `20260115` | `20260115` | 学士 · 课题组成员 | 科学表格结构化抽取、版面跨页拼接与字段溯源 |
+
+界面默认中文，点击右上角 `EN` / `中文` 可随时切换双语界面。
 
 ### 本地运行
 
@@ -84,7 +168,7 @@ export LLM_MODEL=claude-sonnet-5-5  # 任选一个 Magpie 上可用的对话模�
 不使用 `demo.sh` 或 Docker 时，先起 Postgres（带 pgvector）和 Redis，再：
 
 ```bash
-cd backend && uv sync && uv run alembic upgrade head && uv run python -m app.reindex --apply --if-needed && uv run python -m app.seed
+cd backend && uv sync && uv run alembic upgrade head && uv run python -m app.reindex --apply --if-needed && uv run python -m app.seed --with-lab-demo
 uv run uvicorn app.main:app --host 127.0.0.1 --port 43124
 ```
 
@@ -122,20 +206,23 @@ cd backend && uv run python -m evals.run_eval --check
 
 ```mermaid
 flowchart LR
-  web["Next.js Lab Agent"] --> api["FastAPI"]
-  api --> worker["Async ingest worker"]
-  api --> agent["LangGraph"]
-  agent --> retrieve["ACL search"]
-  retrieve --> pg["Postgres + pgvector"]
-  retrieve --> ollama["Host Ollama (Qwen3-Embedding-8B)"]
+  web["Next.js 16 / React 19 UI\n(/chat · /lab · /admin/imports · /audit)"] --> api["FastAPI Backend"]
+  api --> importer["Proposal Cold-Start Importer\n(.doc/.docx · PII Strip · Signatures)"]
+  importer --> provenance["Temporal Field Provenance\n& Asset Hub (lab_*)"]
+  provenance --> worker["Async Ingest & Profile Sync"]
+  api --> worker
+  api --> agent["LangGraph Agent"]
+  agent --> retrieve["SQL-Pushed ACL Hybrid Search"]
+  retrieve --> pg["Postgres + pgvector\n(halfvec 4096 + Prefix HNSW)"]
+  retrieve --> ollama["Host Ollama\n(Qwen3-Embedding-8B)"]
   retrieve --> bm25["jieba BM25 + RRF"]
-  agent --> llm["Magpie gateway (OpenAI-compatible LLM) or local fallback"]
-  api --> audit["append-only audit"]
-  api --> redis["Redis rate limit"]
-  mcp["MCP stdio"] --> retrieve
+  agent --> llm["OpenAI-Compatible LLM Gateway\n(PII Redacted) or Local Fallback"]
+  api --> audit["Append-Only Hash-Chained Audit\n(prev_hash -> row_hash)"]
+  api --> redis["Redis Rate Limit"]
+  mcp["MCP Server (stdio / PAT)"] --> retrieve
 ```
 
-登录后的浏览器只拿一个 httpOnly cookie（`la_session`）。Next.js 路由把 cookie 换成 Authorization 并附带可信代理签名的 `X-Client-IP` 再转给 API。检索、文档读取和 MCP 工具共用同一条 ACL。审计与对话正文分开存放。
+登录后的浏览器只持有 `httpOnly` 会话 Cookie（`la_session`）。Next.js 同源代理路由将 Cookie 转换为 `Authorization: Bearer` 令牌并附带可信代理签名的 `X-Client-IP` 转发至后端 API。对话检索、文档读取、课题组资料库同步与 MCP 工具共用同一条 SQL 级 ACL 与外发 PII 脱敏管线；只追加哈希链审计表与对话正文物理隔离存放。
 
 ## What the baseline actually measured
 
@@ -434,13 +521,16 @@ To evaluate retrieval scaling beyond the 48-chunk `v1` corpus without requiring 
 
 ## Layout
 
-- `backend/app` — API, ACL, audit, async ingestion worker, retrieval, agent, MCP
-- `evals/data/v1` — synthetic Chinese corpus and questions
-- `evals/calibrations` & `evals/results/v1` — per-fingerprint calibration thresholds and evaluation reports
-- `frontend` — login, streaming chat, documents, audit
+- `backend/app` — FastAPI routes, SQL-pushed ACL (`acl.py`), PII redaction (`redact.py`), hash-chained audit (`audit.py`), async ingestion worker, hybrid retrieval (`rag/`), LangGraph agent (`agent/`), MCP server (`mcp_server/`), and synthetic showcase seeding (`seed.py`, `seed_demo_lab.py`)
+- `backend/app/importer` — Proposal `.doc` / `.docx` cold-start parser, in-memory PII stripper (`pii.py`), deterministic person attribution (`matching.py`), electronic signature extractor (`signature.py`), temporal field provenance & merge/revert engine (`provenance.py`), and Word/ZIP exporter (`exporter.py`)
+- `evals/data/v1` & `evals/data/v2` — Synthetic Chinese evaluation corpora and benchmark question sets
+- `evals/calibrations` & `evals/results` — Per-fingerprint calibration thresholds and evaluation reports
+- `frontend` — Next.js 16 / React 19 UI (`/chat` Research Canvas & Inspector, `/lab` Assets Hub & Dossier/Basket, `/admin/imports` Cold-Start & Temporal Merge, `/documents`, `/audit`, `/settings`)
+- `docs/assets/screenshots` — Real UI screenshots rendered from synthetic Qingheng Lab showcase fixtures
+- `docs/specs` — Architecture & domain specifications (`mvp-and-roadmap.md`, `proposal-coldstart-spec-v2.md`, `proposal-coldstart-spec-v2.2-dossier-basket.md`)
 - `docs/demo.md` — 10-minute end-to-end walkthrough script
-- `docs/adr` — architecture decision records (0001–0006)
-- `SECURITY.md` — data flow, secrets, retention, redaction
+- `docs/adr` — Architecture decision records (0001–0006)
+- `SECURITY.md` — Data flow, secrets, retention, and outbound PII redaction rules
 
 ## Tests
 
