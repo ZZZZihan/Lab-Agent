@@ -541,7 +541,8 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
 
     html_mixed = (
         "<html><head><title>Ignored</title><script>evil()</script></head>"
-        "<body><h2>章节标题</h2><div><b>前言</b>说明<p>正文<del>删除内容</del>保留内容<br>第二行</p>尾部说明</div></body></html>"
+        "<body><h2>章节标题</h2><div><b>前言</b>说明<p>正文<del>删除内容</del>保留内容<br>第二行</p>尾部说明</div>"
+        "<table><tr><td>第一段<div>第二段</div></td></tr></table></body></html>"
     ).encode()
     extracted_html_mixed = extract_upload("mixed.doc", html_mixed, max_chars=300_000)
     assert "## 章节标题" in extracted_html_mixed.text
@@ -549,6 +550,24 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     assert "正文保留内容\n第二行" in extracted_html_mixed.text
     assert "删除内容" not in extracted_html_mixed.text
     assert "尾部说明" in extracted_html_mixed.text
+    parsed_html_mixed = validate_and_load_docx("mixed.doc", html_mixed)
+    assert extract_table_grid(iter_document_tables(parsed_html_mixed)[0]) == [["第一段\n第二段"]]
+
+    # 8. RTF edge cases: escaped backslashes before 'bin64', nested groups inside \v/\deleted, and CJK font under \ansicpg1252
+    rtf_edge = (
+        rb"{\rtf1\ansi\ansicpg1252\deff1{\fonttbl{\f0\fnil Arial;}{\f1\fcharset128 MS Gothic;}}"
+        rb"{\f0 Path C:\\bin64\\tool "
+        rb"before {\v secret {\b nested} still secret} after "
+        rb"{\deleted old {\i inner} gone}} "
+        rb"\'83e\'81@\'83X\'81[\par}"
+    )
+    extracted_rtf_edge = extract_upload("edge.doc", rtf_edge, max_chars=300_000)
+    assert r"Path C:\bin64\tool" in extracted_rtf_edge.text
+    assert "before after" in extracted_rtf_edge.text
+    assert "secret" not in extracted_rtf_edge.text
+    assert "nested" not in extracted_rtf_edge.text
+    assert "gone" not in extracted_rtf_edge.text
+    assert "テ スー" in extracted_rtf_edge.text
 
 
 async def test_worker_processes_pending_and_retries_to_failed() -> None:

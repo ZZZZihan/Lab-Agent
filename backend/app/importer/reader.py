@@ -46,7 +46,9 @@ _RTF_TROWD_TOK = "\uf01d"
 
 _striprtf.charset_map[134] = "gb18030"
 _striprtf.HYPERLINKS = re.compile(r"(?!x)(x)(x)")
-_striprtf.FONTTABLE = re.compile(r"\\f(\d+)[^{};]*?\\fcharset(\d+)[^{};]*?([^;{}]+);")
+_striprtf.FONTTABLE = re.compile(
+    r"\\f(\d+)(?:[^{};]|\{[^{}]*\})*?\\fcharset(\d+)(?:[^{};]|\{[^{}]*\})*?([^;{}]+);"
+)
 _striprtf.specialchars.update(
     {
         "par": _RTF_PAR_TOK,
@@ -1105,10 +1107,12 @@ def _parse_html_doc(
             for td in tr.xpath("./td | ./th"):
                 _consume_spans(row)
                 for sub_td in td.xpath(".//table//td | .//table//th"):
+                    sub_td.text = " " + (sub_td.text or "")
                     sub_td.tail = " " + (sub_td.tail or "")
                 for sub_blk in td.xpath(
                     ".//p | .//div | .//li | .//tr | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6"
                 ):
+                    sub_blk.text = "\n" + (sub_blk.text or "")
                     sub_blk.tail = "\n" + (sub_blk.tail or "")
                 cell_text = normalize_cell_text(td.text_content())
                 try:
@@ -1225,6 +1229,271 @@ def _resolve_rtf_default_encoding(raw_str: str, raw_bytes: bytes) -> str:
         return "cp1252"
 
 
+_CJK_ENCODINGS: frozenset[str] = frozenset(
+    {"gb18030", "cp936", "cp932", "cp949", "cp950", "cp1361", "johab"}
+)
+
+
+def _strip_rtf_bin_runs(raw_bytes: bytes) -> bytes:
+    """Remove raw `\\binN` binary payload runs while preserving escaped `\\\\`, `\\{`, and `\\}`."""
+    if b"\\bin" not in raw_bytes and b"\\BIN" not in raw_bytes:
+        return raw_bytes
+    out_b = bytearray()
+    i, n = 0, len(raw_bytes)
+    while i < n:
+        if (
+            raw_bytes[i] == 0x5C
+            and i + 1 < n
+            and raw_bytes[i + 1] in (0x5C, 0x7B, 0x7D)
+        ):
+            out_b.extend(raw_bytes[i : i + 2])
+            i += 2
+            continue
+        if raw_bytes[i : i + 4].lower() == b"\\bin":
+            m = re.match(rb"\\bin(-?\d+) ?", raw_bytes[i : i + 32], re.IGNORECASE)
+            if m is not None:
+                i = min(n, i + m.end() + max(0, int(m.group(1))))
+                continue
+        out_b.append(raw_bytes[i])
+        i += 1
+    return bytes(out_b)
+
+
+def _normalize_rtf_for_striprtf(s: str, default_enc: str) -> str:
+    """Normalize RTF tokens via `striprtf.PATTERN` with group-stack tracking for `\\v`, `\\deleted`, `\\upr`/`\\ud`, and active-font CJK trail bytes."""
+    s = re.sub(r"\\fcharset(\d+)\s*\\f(\d+)", r"\\f\2\\fcharset\1", s)
+    font_tbl_str = _striprtf.font_table_group(s)
+    if not font_tbl_str:
+        inline_fonts = re.findall(r"\\f(\d+)\\fcharset(\d+)", s)
+        if inline_fonts:
+            synth_tbl = (
+                "{\\fonttbl"
+                + "".join(f"{{\\f{fid}\\fcharset{fcs} f{fid};}}" for fid, fcs in inline_fonts)
+                + "}"
+            )
+            s = re.sub(r"(\\rtf\d*)", r"\1" + synth_tbl, s, count=1)
+            font_tbl_str = synth_tbl
+    font_enc: dict[str, str] = {}
+    for f_id, f_cs, _ in _striprtf.FONTTABLE.findall(font_tbl_str):
+        font_enc[f_id] = _striprtf.charset_map.get(int(f_cs), default_enc)
+
+    m_deff = re.search(r"\\deff(-?\d+)(?![a-zA-Z0-9])", s[:4096])
+    default_font: str | None = m_deff.group(1) if m_deff is not None else None
+    current_font: str | None = default_font
+    in_fonttbl = False
+    hidden = False
+    deleted = False
+    ucskip = 1
+    curskip = 0
+    pending_cjk_lead = False
+    upr_expect_ansi = False
+    stack: list[tuple[str | None, bool, bool, bool, int, bool]] = []
+    out: list[str] = []
+
+    def _active_enc() -> str:
+        return font_enc.get(current_font or "", default_enc)
+
+    def _is_cjk_lead(b_val: int) -> bool:
+        enc = _active_enc()
+        if enc == "cp932":
+            return (0x81 <= b_val <= 0x9F) or (0xE0 <= b_val <= 0xFC)
+        if enc in _CJK_ENCODINGS:
+            return 0x81 <= b_val <= 0xFE
+        return False
+
+    def _is_cjk_trail_ascii(ch_ord: int) -> bool:
+        enc = _active_enc()
+        if enc in ("gb18030", "cp936"):
+            return 0x30 <= ch_ord <= 0x7E
+        if enc in _CJK_ENCODINGS:
+            return 0x40 <= ch_ord <= 0x7E
+        return False
+
+    for match in _striprtf.PATTERN.finditer(s):
+        word, arg, _hex, char, brace, tchar = match.groups()
+        tok = match.group(0)
+        if brace:
+            pending_cjk_lead = False
+            curskip = 0
+            if brace == "{":
+                stack.append((current_font, in_fonttbl, hidden, deleted, ucskip, False))
+                if upr_expect_ansi:
+                    hidden = True
+                    upr_expect_ansi = False
+                out.append("{")
+            else:
+                inner_font = current_font
+                was_in_fonttbl = in_fonttbl
+                if stack:
+                    (
+                        current_font,
+                        in_fonttbl,
+                        hidden,
+                        deleted,
+                        ucskip,
+                        upr_expect_ansi,
+                    ) = stack.pop()
+                out.append("}")
+                if (
+                    not in_fonttbl
+                    and not (hidden or deleted)
+                    and current_font is not None
+                    and (was_in_fonttbl or inner_font != current_font)
+                ):
+                    out.append(f"\\f{current_font} ")
+            continue
+
+        if char:
+            if (
+                pending_cjk_lead
+                and curskip == 0
+                and not (hidden or deleted)
+                and char in ("\\", "{", "}")
+                and _is_cjk_trail_ascii(ord(char))
+            ):
+                out.append(f"\\'{ord(char):02x}")
+                pending_cjk_lead = False
+                continue
+            pending_cjk_lead = False
+            if curskip > 0:
+                if char in ("~", "-", "_", "\\", "{", "}"):
+                    curskip -= 1
+                    if not (hidden or deleted):
+                        out.append("?")
+                    continue
+                curskip = 0
+            if char == "*" or not (hidden or deleted):
+                out.append(tok)
+            continue
+
+        if word:
+            pending_cjk_lead = False
+            w_low = word.lower()
+            if curskip > 0:
+                if w_low in (
+                    "emdash",
+                    "endash",
+                    "bullet",
+                    "lquote",
+                    "rquote",
+                    "ldblquote",
+                    "rdblquote",
+                    "emspace",
+                    "enspace",
+                    "qmspace",
+                ):
+                    curskip -= 1
+                    if not (hidden or deleted):
+                        out.append("?")
+                    continue
+                curskip = 0
+            if w_low == "ansicpg":
+                continue
+            if w_low == "upr":
+                upr_expect_ansi = True
+                continue
+            if w_low == "ud":
+                while out and out[-1].strip() == "":
+                    out.pop()
+                if out and out[-1] == "\\*":
+                    out.pop()
+                continue
+            if w_low == "v":
+                hidden = arg != "0"
+                continue
+            if w_low == "deleted":
+                deleted = arg != "0"
+                continue
+            if w_low == "plain":
+                current_font = default_font
+                hidden = False
+                deleted = False
+                if default_font is not None:
+                    out.append(f"\\f{default_font} ")
+                continue
+            if w_low == "deff" and arg is not None:
+                default_font = arg
+                current_font = arg
+                out.append(f"\\deff{arg}\\f{arg} ")
+                continue
+            if w_low == "fonttbl":
+                in_fonttbl = True
+                out.append(tok)
+                continue
+            if w_low == "f" and arg is not None:
+                current_font = arg
+                out.append(tok)
+                continue
+            if w_low == "fcharset" and arg is not None:
+                if current_font is not None:
+                    font_enc[current_font] = _striprtf.charset_map.get(int(arg), default_enc)
+                out.append(tok)
+                continue
+            if w_low == "uc" and arg is not None:
+                ucskip = max(0, int(arg))
+                out.append(tok)
+                continue
+            if w_low == "u" and arg is not None:
+                curskip = ucskip
+                if not (hidden or deleted):
+                    out.append(tok)
+                continue
+            if (
+                not (hidden or deleted)
+                or w_low in _striprtf.destinations
+                or w_low
+                in (
+                    "rtf",
+                    "fonttbl",
+                    "fcharset",
+                    "trowd",
+                    "cell",
+                    "nestcell",
+                    "row",
+                    "nestrow",
+                )
+            ):
+                out.append(tok)
+            continue
+
+        if _hex:
+            if curskip > 0:
+                curskip -= 1
+                pending_cjk_lead = False
+                if not (hidden or deleted):
+                    out.append(tok)
+                continue
+            if hidden or deleted:
+                pending_cjk_lead = False
+                continue
+            b_val = int(_hex, 16)
+            if pending_cjk_lead:
+                pending_cjk_lead = False
+            elif _is_cjk_lead(b_val):
+                pending_cjk_lead = True
+            out.append(tok)
+            continue
+
+        if tchar:
+            if curskip > 0:
+                curskip -= 1
+                pending_cjk_lead = False
+                if not (hidden or deleted):
+                    out.append(tok)
+                continue
+            if hidden or deleted:
+                pending_cjk_lead = False
+                continue
+            if pending_cjk_lead and _is_cjk_trail_ascii(ord(tchar)):
+                out.append(f"\\'{ord(tchar):02x}")
+                pending_cjk_lead = False
+                continue
+            pending_cjk_lead = False
+            out.append(tok)
+
+    return "".join(out)
+
+
 def _parse_rtf_doc(
     raw_bytes: bytes,
     *,
@@ -1240,20 +1509,7 @@ def _parse_rtf_doc(
     if raw_bytes.startswith(b"\xef\xbb\xbf"):
         raw_bytes = raw_bytes[3:]
 
-    # Skip any raw \binN byte runs before converting non-ASCII bytes to \'xx hex escapes
-    if b"\\bin" in raw_bytes:
-        out_b = bytearray()
-        i, n = 0, len(raw_bytes)
-        while i < n:
-            if raw_bytes[i : i + 4] == b"\\bin":
-                m = re.match(rb"\\bin(-?\d+) ?", raw_bytes[i : i + 32], re.IGNORECASE)
-                if m is not None:
-                    i = min(n, i + m.end() + max(0, int(m.group(1))))
-                    continue
-            out_b.append(raw_bytes[i])
-            i += 1
-        raw_bytes = bytes(out_b)
-
+    raw_bytes = _strip_rtf_bin_runs(raw_bytes)
     raw_head = raw_bytes[:4096].decode("latin-1", errors="ignore")
     default_enc = _resolve_rtf_default_encoding(raw_head, raw_bytes)
 
@@ -1262,55 +1518,9 @@ def _parse_rtf_doc(
         lambda m: f"\\'{m.group(0)[0]:02x}".encode("ascii"),
         raw_bytes,
     )
-    s = escaped.decode("ascii", errors="ignore")
-    # Remove \ansicpgN so striprtf uses our resolved default_enc (e.g. gb18030 for 936/54936, mac_roman for 10000)
-    s = re.sub(r"\\ansicpg\d+ ?", "", s)
-    # Convert escaped ASCII trail bytes (\\, \{, \}) immediately following a CJK lead byte into hex escapes
-    s = re.sub(
-        r"(\\'[89a-fA-F][0-9a-fA-F])\\([\\{}])",
-        lambda m: m.group(1) + f"\\'{ord(m.group(2)):02x}",
-        s,
-    )
-    # Convert 4-byte GB18030 digit trail bytes (0x30..0x39) between \'81..\'fe lead bytes into \'3x
-    s = re.sub(
-        r"(\\'[89a-fA-F][0-9a-fA-F])([0-9])(\\'[89a-fA-F][0-9a-fA-F])([0-9])",
-        lambda m: f"{m.group(1)}\\'{ord(m.group(2)):02x}{m.group(3)}\\'{ord(m.group(4)):02x}",
-        s,
-    )
-    if default_enc in ("gb18030", "cp932", "cp949", "cp950", "cp1361"):
-        s = re.sub(
-            r"(\\'[89a-fA-F][0-9a-fA-F])([\x40-\x5b\x5d-\x7a\x7c\x7e])",
-            lambda m: f"{m.group(1)}\\'{ord(m.group(2)):02x}",
-            s,
-        )
-    s = re.sub(r"\\fcharset(\d+)\s*\\f(\d+)", r"\\f\2\\fcharset\1", s)
-    m_deff = re.search(r"\\deff(\d+)(?![a-zA-Z0-9])", s[:4096])
-    if m_deff is not None:
-        deff_id = m_deff.group(1)
-        s = re.sub(r"\\deff(\d+)", r"\\deff\1\\f\1", s, count=1)
-        s = re.sub(r"\\plain(?![a-zA-Z])", f"\\\\plain\\\\f{deff_id}", s)
-    # Unwrap {\upr{ansi}{\*\ud unicode}} to retain the Unicode branch
-    s = re.sub(
-        r"\{\s*\\upr\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*\{\s*(?:\\\*\s*)?\\ud(?![a-zA-Z]) ?",
-        "{{",
-        s,
-        flags=re.IGNORECASE,
-    )
-    s = re.sub(r"\{\s*\\\*\s*\\ud(?![a-zA-Z]) ?", "{", s, flags=re.IGNORECASE)
-    # Normalize single-token control-word fallbacks after \uN so striprtf skips 1 placeholder character
-    s = re.sub(
-        r"(\\u-?\d+) ?\\(?:[~_-]|emdash|endash|bullet|[lr](?:dbl)?quote)(?![a-zA-Z]) ?",
-        r"\1?",
-        s,
-    )
-    # Strip hidden (\v) and tracked-deletion (\deleted) groups/runs
-    while re.search(r"\{\s*\\(?:v|deleted)(?![a-zA-Z0-9])[^{}]*\}", s):
-        s = re.sub(r"\{\s*\\(?:v|deleted)(?![a-zA-Z0-9])[^{}]*\}", "", s)
-    s = re.sub(
-        r"\\(?:v|deleted)(?![a-zA-Z0-9]) ?.*?(?=\\(?:v0|deleted0|plain|par|pard|row|cell)(?![a-zA-Z])|(?<!\\)\})",
-        "",
-        s,
-        flags=re.DOTALL,
+    s = _normalize_rtf_for_striprtf(
+        escaped.decode("ascii", errors="ignore"),
+        default_enc,
     )
 
     rendered = _striprtf.rtf_to_text(s, encoding=default_enc, errors="replace")
