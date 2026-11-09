@@ -328,6 +328,16 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
         extract_upload("cp932.doc", rtf_cp932_escaped_trail, max_chars=300_000).text.strip()
         == "表 and 表 and 表"
     )
+    rtf_gb18030_4byte = (
+        b"{\\rtf1\\ansi\\ansicpg1252{\\fonttbl{\\f0 Arial;}{\\f1\\fcharset134 SimSun;}}"
+        b"\\pard \\f0 caf\\'e9 {\\f1 "
+        + "清衡实验室𠀀".encode("gb18030")
+        + b"}\\par}"
+    )
+    assert (
+        extract_upload("gb4.doc", rtf_gb18030_4byte, max_chars=300_000).text.strip()
+        == "café 清衡实验室𠀀"
+    )
 
     # 3b. HTML-backed .doc declaring windows-1252 charset, UTF-8 BOM, UTF-16 BOM, rowspan/colspan tables, and GB2312 Word 2003 XML
     html_cp1252 = (
@@ -517,6 +527,47 @@ def test_doc_and_docx_upload_extraction(tmp_path) -> None:
     corpus_items = read_corpus_dir(tmp_path)
     loaded_keys = {meta["key"] for meta, _ in corpus_items}
     assert loaded_keys == {"note", "legacy", "modern"}
+
+    # 7. defusedxml blocks DTD/XXE in Word 2003 XML .doc and lxml.html handles headings/del/inline-block mixes
+    xxe_wordml = (
+        b'<?xml version="1.0"?>'
+        b'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        b'<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">'
+        b"<w:body><w:p><w:r><w:t>&xxe;</w:t></w:r></w:p></w:body></w:wordDocument>"
+    )
+    with pytest.raises(DocxValidationError) as exc_xxe_xml:
+        validate_and_load_docx("xxe.doc", xxe_wordml)
+    assert exc_xxe_xml.value.status == 415
+
+    html_mixed = (
+        "<html><head><title>Ignored</title><script>evil()</script></head>"
+        "<body><h2>章节标题</h2><div><b>前言</b>说明<p>正文<del>删除内容</del>保留内容<br>第二行</p>尾部说明</div>"
+        "<table><tr><td>第一段<div>第二段</div></td></tr></table></body></html>"
+    ).encode()
+    extracted_html_mixed = extract_upload("mixed.doc", html_mixed, max_chars=300_000)
+    assert "## 章节标题" in extracted_html_mixed.text
+    assert "前言说明" in extracted_html_mixed.text
+    assert "正文保留内容\n第二行" in extracted_html_mixed.text
+    assert "删除内容" not in extracted_html_mixed.text
+    assert "尾部说明" in extracted_html_mixed.text
+    parsed_html_mixed = validate_and_load_docx("mixed.doc", html_mixed)
+    assert extract_table_grid(iter_document_tables(parsed_html_mixed)[0]) == [["第一段\n第二段"]]
+
+    # 8. RTF edge cases: escaped backslashes before 'bin64', nested groups inside \v/\deleted, and CJK font under \ansicpg1252
+    rtf_edge = (
+        rb"{\rtf1\ansi\ansicpg1252\deff1{\fonttbl{\f0\fnil Arial;}{\f1\fcharset128 MS Gothic;}}"
+        rb"{\f0 Path C:\\bin64\\tool "
+        rb"before {\v secret {\b nested} still secret} after "
+        rb"{\deleted old {\i inner} gone}} "
+        rb"\'83e\'81@\'83X\'81[\par}"
+    )
+    extracted_rtf_edge = extract_upload("edge.doc", rtf_edge, max_chars=300_000)
+    assert r"Path C:\bin64\tool" in extracted_rtf_edge.text
+    assert "before after" in extracted_rtf_edge.text
+    assert "secret" not in extracted_rtf_edge.text
+    assert "nested" not in extracted_rtf_edge.text
+    assert "gone" not in extracted_rtf_edge.text
+    assert "テ スー" in extracted_rtf_edge.text
 
 
 async def test_worker_processes_pending_and_retries_to_failed() -> None:

@@ -370,6 +370,7 @@ async def test_malicious_or_invalid_docx_rejected(client: AsyncClient) -> None:
     assert doc_payload["stats"]["achievements_parsed"] == 5
     assert doc_payload["stats"]["facilities_parsed"] == 1
     assert doc_payload["stats"]["pii_dropped"] >= 9
+    assert doc_payload["job_id"]
 
 
 async def test_provision_hardcodes_member_role_and_preserves_existing_admin(
