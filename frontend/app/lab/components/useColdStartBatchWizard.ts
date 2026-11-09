@@ -455,16 +455,21 @@ export function useColdStartBatchWizard({
   function handleUpdateUploadItemAsOf(id: string, asOfTime: string) {
     if (parsing) return;
     setUploadItems((prev) =>
-      prev.map((it) =>
-        it.id === id
-          ? {
-              ...it,
-              asOfTime,
-              status: it.status === "error" ? "waiting" : it.status,
-              error: undefined,
-            }
-          : it,
-      ),
+      prev.map((it) => {
+        if (it.id !== id) return it;
+        const changed = it.asOfTime.trim() !== asOfTime.trim();
+        return {
+          ...it,
+          asOfTime,
+          status:
+            it.status === "error" || (it.status === "parsed" && changed)
+              ? "waiting"
+              : it.status,
+          jobId: changed ? undefined : it.jobId,
+          jobResponse: changed ? undefined : it.jobResponse,
+          error: undefined,
+        };
+      }),
     );
   }
 
@@ -501,8 +506,29 @@ export function useColdStartBatchWizard({
       while (nextIdx < itemsSnapshot.length) {
         const idx = nextIdx++;
         const item = itemsSnapshot[idx];
-        if (item.status === "parsed" && item.jobResponse && item.jobId) {
-          results[idx] = { index: idx, job: item.jobResponse };
+        const cachedAsOf = (
+          item.jobResponse?.as_of_time ||
+          item.jobResponse?.preview?.as_of_time ||
+          ""
+        ).trim();
+        if (
+          item.status === "parsed" &&
+          item.jobResponse &&
+          item.jobId &&
+          (!item.asOfTime || item.asOfTime === cachedAsOf)
+        ) {
+          results[idx] = {
+            index: idx,
+            job: item.asOfTime
+              ? {
+                  ...item.jobResponse,
+                  as_of_time: item.asOfTime,
+                  preview: item.jobResponse.preview
+                    ? { ...item.jobResponse.preview, as_of_time: item.asOfTime }
+                    : item.jobResponse.preview,
+                }
+              : item.jobResponse,
+          };
           continue;
         }
         setUploadItems((prev) =>
@@ -576,10 +602,24 @@ export function useColdStartBatchWizard({
       > = {};
       const nextSkipSigsMap: Record<string, Record<string, boolean>> = {};
 
+      const editedAsOfByJobId = new Map<string, string>();
+      for (let i = 0; i < itemsSnapshot.length; i++) {
+        const snap = itemsSnapshot[i];
+        const rJob = results[i]?.job;
+        const jid = rJob?.job_id || rJob?.id || snap.jobId;
+        if (jid && snap.asOfTime) {
+          editedAsOfByJobId.set(jid, snap.asOfTime);
+        }
+      }
+
       for (const job of normalizedJobs) {
         const jid = job.job_id;
         nextAsOfMap[jid] =
-          job.as_of_time || job.preview?.as_of_time || uploadAsOf.trim() || "";
+          editedAsOfByJobId.get(jid) ||
+          job.as_of_time ||
+          job.preview?.as_of_time ||
+          uploadAsOf.trim() ||
+          "";
         const ovForJob: Record<string, PersonOverrideState> = {};
         for (const p of job.preview?.people || []) {
           ovForJob[p.key] = {

@@ -892,3 +892,155 @@ async def test_batch_provision_preserves_affiliation_ambiguous_collision_boundar
         settings.oidc_issuer = orig_oidc
 
 
+async def test_batch_provision_rejects_conflicting_t1_with_shared_email_until_decided(
+    client: AsyncClient,
+) -> None:
+    """Two proposals with the same name and email but different T1 student IDs must not auto-match via email and must require an explicit decision."""
+    settings = get_settings()
+    orig_env = settings.app_env
+    orig_token = settings.bootstrap_token
+    orig_oidc = settings.oidc_issuer
+
+    try:
+        settings.app_env = "dev"
+        settings.bootstrap_token = None
+        settings.oidc_issuer = None
+
+        await _clear_all_users()
+
+        boot_resp = await client.post(
+            "/api/v1/auth/bootstrap-admin",
+            json={
+                "display_name": PI_NAME,
+                "email": PI_EMAIL,
+                "staff_no": PI_STAFF_NO,
+                "password": PI_PASSWORD,
+            },
+        )
+        assert boot_resp.status_code == 200, boot_resp.text
+        admin_token = boot_resp.json()["access_token"]
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        shared_email = "admin@lab.local"
+        docx_1 = _build_proposal_docx(
+            project_title="同邮箱异学号一",
+            applicant_name=PI_NAME,
+            applicant_email=PI_EMAIL,
+            applicant_title="教授",
+            fill_date="2023年3月10日",
+            members=[
+                ("王强", "2431101111", "硕士生", "软件学院", shared_email),
+            ],
+        )
+        docx_2 = _build_proposal_docx(
+            project_title="同邮箱异学号二",
+            applicant_name=PI_NAME,
+            applicant_email=PI_EMAIL,
+            applicant_title="教授",
+            fill_date="2024年3月10日",
+            members=[
+                ("王强", "2431102222", "博士生", "软件学院", shared_email),
+            ],
+        )
+
+        job_ids: list[str] = []
+        for idx, (raw_bytes, dt_str) in enumerate(
+            ((docx_1, "2023-03-10"), (docx_2, "2024-03-10")),
+            start=1,
+        ):
+            up = await client.post(
+                f"/api/v1/admin/imports?as_of_time={dt_str}",
+                headers=admin_headers,
+                files={
+                    "file": (
+                        f"t1_em_col_{idx}.docx",
+                        raw_bytes,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+            )
+            assert up.status_code == 200, up.text
+            job_ids.append(up.json()["id"])
+
+        res_resp = await client.post(
+            "/api/v1/admin/imports/batch/resolve",
+            headers=admin_headers,
+            json={"job_ids": job_ids},
+        )
+        assert res_resp.status_code == 200, res_resp.text
+        res_data = res_resp.json()
+        wq_clusters = [c for c in res_data["clusters"] if c["name"] == "王强"]
+        assert len(wq_clusters) == 2
+
+        # 1. Provisioning without an explicit decision must fail with 422 login_conflict_unresolved
+        fail_prov = await client.post(
+            "/api/v1/admin/imports/batch/provision",
+            headers=admin_headers,
+            json={
+                "job_ids": job_ids,
+                "initial_password": INITIAL_MEMBER_PW,
+                "include_password": True,
+            },
+        )
+        assert fail_prov.status_code == 422, fail_prov.text
+        assert fail_prov.json()["error"]["code"] == "login_conflict_unresolved"
+
+        # 2. Providing an explicit login_name decision keeps the two T1 members separate
+        j2_wq_key = next(
+            p["key"]
+            for p in res_data["jobs"][1]["preview"]["people"]
+            if p["name"] == "王强"
+        )
+        ok_prov = await client.post(
+            "/api/v1/admin/imports/batch/provision",
+            headers=admin_headers,
+            json={
+                "jobs": [
+                    {"job_id": job_ids[0], "as_of_time": "2023-03-10"},
+                    {
+                        "job_id": job_ids[1],
+                        "as_of_time": "2024-03-10",
+                        "people": [{"key": j2_wq_key, "login_name": "2431102222"}],
+                    },
+                ],
+                "initial_password": INITIAL_MEMBER_PW,
+                "include_password": True,
+            },
+        )
+        assert ok_prov.status_code == 200, ok_prov.text
+        ok_data = ok_prov.json()
+        assert ok_data["stats"]["users_created"] == 2
+
+        for m_jid in ok_data["merge_queue"]:
+            m_res = await client.post(
+                f"/api/v1/admin/imports/{m_jid}/merge",
+                headers=admin_headers,
+                json={"decisions": []},
+            )
+            assert m_res.status_code == 200, m_res.text
+
+        maker = get_sessionmaker()
+        async with maker() as session:
+            wq_people = list(
+                await session.scalars(
+                    select(LabPerson).where(LabPerson.name == "王强")
+                )
+            )
+            assert len(wq_people) == 2
+            titles_by_login: dict[str, str | None] = {}
+            for lp in wq_people:
+                assert lp.user_id is not None
+                u = await session.get(User, lp.user_id)
+                assert u is not None and u.login_name is not None
+                titles_by_login[u.login_name] = lp.title
+            assert titles_by_login == {
+                "2431101111": "硕士生",
+                "2431102222": "博士生",
+            }
+    finally:
+        settings.app_env = orig_env
+        settings.bootstrap_token = orig_token
+        settings.oidc_issuer = orig_oidc
+
+
+

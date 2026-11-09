@@ -400,6 +400,19 @@ async def provision_import_job(
                 or (ov.login_name is not None and ov.login_name.strip())
             )
         )
+        if (
+            bool(person.get("collision_resolved_in_batch"))
+            and not (ov and ov.link_user_id is not None)
+            and match_status == "conflict"
+        ):
+            cand_login_res = str(person.get("login_name") or "").strip().lower()
+            if cand_login_res and cand_login_res not in used_login_names:
+                person["match"] = {"status": "new"}
+                match_info = {"status": "new"}
+                match_status = "new"
+                warn_list = [w for w in warn_list if w != "LOGIN_CONFLICT"]
+                person["warnings"] = warn_list
+                p_warnings = [str(w) for w in warn_list]
 
         if match_status == "conflict" or "LOGIN_CONFLICT" in p_warnings:
             raise ProvisionError(
@@ -409,9 +422,14 @@ async def provision_import_job(
             )
         if (
             "BATCH_NAME_COLLISION" in p_warnings
-            and str(person.get("tier") or "T2") == "T2"
-            and bool(person.get("collision_ambiguous", True))
+            and bool(
+                person.get(
+                    "collision_ambiguous",
+                    str(person.get("tier") or "T2") == "T2",
+                )
+            )
             and not has_explicit_collision_decision
+            and not bool(person.get("collision_resolved_in_batch"))
         ):
             raise ProvisionError(
                 422,
@@ -469,6 +487,11 @@ async def provision_import_job(
 
     existing_person_fps = set(existing_people_by_fp.keys())
     existing_person_user_ids = set(existing_people_by_uid.keys())
+    used_user_emails: set[str] = {
+        u.email.strip().lower()
+        for u in existing_users
+        if u.email is not None and u.email.strip()
+    }
     existing_ach_fps = set(await session.scalars(select(LabAchievement.entity_fingerprint)))
     existing_proj_fps = set(await session.scalars(select(LabProject.entity_fingerprint)))
     existing_fac_fps = set(await session.scalars(select(LabFacility.entity_fingerprint)))
@@ -529,8 +552,15 @@ async def provision_import_job(
                 )
             else:
                 # Hardcode role="member" — never auto-assign admin!
+                user_email = (
+                    None
+                    if (p_email and p_email.lower() in used_user_emails)
+                    else p_email
+                )
+                if user_email:
+                    used_user_emails.add(user_email.lower())
                 new_user = User(
-                    email=p_email,
+                    email=user_email,
                     login_name=p_login,
                     display_name=pname,
                     password_hash=pw_hash,
@@ -552,7 +582,7 @@ async def provision_import_job(
                         "user_id": str(user_id),
                         "name": pname,
                         "login_name": p_login,
-                        "has_email": p_email is not None,
+                        "has_email": user_email is not None,
                         "suffixed": "LOGIN_NAME_SUFFIXED" in p_warnings,
                         "affiliation": p_aff,
                         "account_status": "new",

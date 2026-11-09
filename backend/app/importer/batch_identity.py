@@ -55,6 +55,7 @@ def _reset_sibling_injections(p: dict[str, Any]) -> None:
     p.pop("cluster_id", None)
     p.pop("provisioned_user_id", None)
     p.pop("collision_ambiguous", None)
+    p.pop("collision_resolved_in_batch", None)
     raw_warnings = p.get("warnings")
     warnings = [
         str(w)
@@ -485,6 +486,29 @@ def resolve_batch_identities(
         for cid, cl, cluster_sid, _sid_src, cluster_email, _em_src in metas_for_name:
             if cluster_sid or cluster_email:
                 is_ambiguous = False
+                for (
+                    other_cid,
+                    _other_cl,
+                    other_sid,
+                    _os_src,
+                    other_em,
+                    _oe_src,
+                ) in metas_for_name:
+                    if other_cid == cid:
+                        continue
+                    if cluster_sid and other_sid and cluster_sid == other_sid:
+                        is_ambiguous = True
+                        break
+                    if (
+                        cluster_email
+                        and other_em
+                        and cluster_email.lower() == other_em.lower()
+                    ):
+                        is_ambiguous = True
+                        break
+                    if not cluster_sid and other_sid and not other_em:
+                        is_ambiguous = True
+                        break
             else:
                 cl_affs = {o.norm_aff for o in cl if o.norm_aff}
                 if len(cl_affs) != 1:

@@ -426,14 +426,70 @@ async def batch_provision_imports(
                     )
 
     jobs_by_id = {j.id: j for j in jobs}
+    cluster_has_decision: dict[str, bool] = {}
     for cl in resolved["clusters"]:
         cid = str(cl.get("cluster_id") or "")
-        if not cid or str(cl.get("tier") or "T2") != "T2":
+        if not cid:
+            continue
+        has_dec = bool(cluster_custom_login_by_cid.get(cid))
+        if not has_dec:
+            for m_jid, m_key in cluster_members_by_cid.get(cid, []):
+                m_cfg = items_by_job_id.get(m_jid)
+                if m_cfg is not None:
+                    m_ov = next((ov for ov in m_cfg.people if ov.key == m_key), None)
+                    if m_ov is not None and not m_ov.exclude and m_ov.link_user_id is not None:
+                        has_dec = True
+                        break
+        cluster_has_decision[cid] = has_dec
+
+    for cl in resolved["clusters"]:
+        cid = str(cl.get("cluster_id") or "")
+        if not cid:
+            continue
+        cl_norm_name = norm(normalize_person_name(str(cl.get("name") or "")))
+        cl_sid = str(cl.get("student_id") or "").strip().lower() or None
+        cl_em = str(cl.get("email") or "").strip().lower() or None
+        conflicting_other_cids: list[str] = []
+        if cl_sid or cl_em:
+            for other in resolved["clusters"]:
+                other_cid = str(other.get("cluster_id") or "")
+                if not other_cid or other_cid == cid:
+                    continue
+                if norm(normalize_person_name(str(other.get("name") or ""))) != cl_norm_name:
+                    continue
+                other_sid = str(other.get("student_id") or "").strip().lower() or None
+                other_em = str(other.get("email") or "").strip().lower() or None
+                if (
+                    (cl_sid and other_sid and cl_sid == other_sid)
+                    or (cl_em and other_em and cl_em == other_em)
+                    or (not cl_sid and other_sid and not other_em)
+                ):
+                    conflicting_other_cids.append(other_cid)
+
+        if conflicting_other_cids and (
+            cluster_has_decision.get(cid, False)
+            or all(
+                cluster_has_decision.get(ocid, False)
+                for ocid in conflicting_other_cids
+            )
+        ):
+            for m_jid, m_key in cluster_members_by_cid.get(cid, []):
+                if m_jid in jobs_by_id:
+                    j_obj = jobs_by_id[m_jid]
+                    j_prev = dict(j_obj.preview or {})
+                    j_ppl = j_prev.get("people")
+                    if isinstance(j_ppl, list):
+                        for p in j_ppl:
+                            if isinstance(p, dict) and str(p.get("key") or p.get("temp_id") or "").strip() == m_key:
+                                p["collision_resolved_in_batch"] = True
+                                p["collision_ambiguous"] = False
+                        j_obj.preview = j_prev
+
+        if str(cl.get("tier") or "T2") not in ("T1", "T2", "T3"):
             continue
         custom_login = cluster_custom_login_by_cid.get(cid)
         if not custom_login:
             continue
-        cl_norm_name = norm(normalize_person_name(str(cl.get("name") or "")))
         if not cl_norm_name:
             continue
         target_cl = next(
