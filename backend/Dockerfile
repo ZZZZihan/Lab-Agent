@@ -1,3 +1,11 @@
+FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337 AS deps
+
+COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /uvx /usr/local/bin/
+
+WORKDIR /opt/lab-agent/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
 FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /uvx /usr/local/bin/
@@ -7,6 +15,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /usr/local/lib/python3.12/site-packages/pip* /usr/local/lib/python3.12/site-packages/setuptools* /usr/local/lib/python3.12/site-packages/wheel* \
     && groupadd -g 10001 labagent \
     && useradd -u 10001 -g 10001 -m -d /home/labagent -s /usr/sbin/nologin labagent
+
+COPY --from=deps /opt/lab-agent/backend/.venv /opt/lab-agent/backend/.venv
 
 WORKDIR /opt/lab-agent
 COPY backend/pyproject.toml backend/uv.lock backend/alembic.ini /opt/lab-agent/backend/
