@@ -1,5 +1,21 @@
 services:
+  postgres:
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  redis:
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  api-init:
+    image: ${LAB_AGENT_API_IMAGE:-lab-agent-api:local}
+
   api:
+    image: ${LAB_AGENT_API_IMAGE:-lab-agent-api:local}
     environment:
       LLM_PROVIDER: fake
       LLM_MODEL: fake-grounded-v1
@@ -16,6 +32,17 @@ services:
       EMBEDDING_REDACT: "false"
       EVIDENCE_SCORE_MIN: "0.30"
       RARE_COVERAGE_MIN: "0.35"
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 90
+
+  web:
+    image: ${LAB_AGENT_WEB_IMAGE:-lab-agent-web:local}
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 60
 
 secrets:
   magpie_key:

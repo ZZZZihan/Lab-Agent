@@ -248,7 +248,19 @@ fi
 # 4. Build and start containers
 echo "==> Starting Docker Compose stack..."
 COMPOSE_STARTED=true
-docker compose "${COMPOSE_FILES[@]}" up -d --build --wait --wait-timeout 600
+if [[ "${DEMO_NO_BUILD:-0}" == "1" ]]; then
+  docker compose "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 600
+elif [[ "$OFFLINE" == "true" ]]; then
+  docker compose "${COMPOSE_FILES[@]}" pull -q postgres redis &
+  pid_pull=$!
+  docker compose "${COMPOSE_FILES[@]}" build api web &
+  pid_build=$!
+  wait "$pid_build"
+  wait "$pid_pull"
+  docker compose "${COMPOSE_FILES[@]}" up -d --no-build --wait --wait-timeout 600
+else
+  docker compose "${COMPOSE_FILES[@]}" up -d --build --wait --wait-timeout 600
+fi
 
 # 5. Container-side LLM and embedding self-checks (real mode only)
 if [[ "$OFFLINE" != "true" ]]; then

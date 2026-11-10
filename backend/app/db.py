@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
@@ -10,31 +11,35 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+_engine_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_engine() -> AsyncEngine:
-    global _engine
+    global _engine, _sessionmaker, _engine_loop
+    try:
+        current_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if _engine is not None and _engine_loop is not current_loop:
+        _engine = None
+        _sessionmaker = None
     if _engine is None:
         settings = get_settings()
-        # Tests share one engine across fixtures. NullPool avoids handing a
-        # connection checked out on a finished loop back to the next test.
-        pool_kwargs: dict[str, object] = {"pool_pre_ping": True}
-        if settings.app_env == "test":
-            pool_kwargs = {"poolclass": NullPool}
-        _engine = create_async_engine(settings.database_url, **pool_kwargs)
+        _engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+        _engine_loop = current_loop
     return _engine
 
 
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     global _sessionmaker
+    engine = get_engine()
     if _sessionmaker is None:
-        _sessionmaker = async_sessionmaker(get_engine(), expire_on_commit=False)
+        _sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     return _sessionmaker
 
 
@@ -50,8 +55,9 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
 
 async def dispose_engine() -> None:
-    global _engine, _sessionmaker
+    global _engine, _sessionmaker, _engine_loop
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
+    _engine_loop = None

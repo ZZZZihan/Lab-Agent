@@ -23,6 +23,7 @@ DEMO_USERS = (
     ("zhou@lab.local", "周宁", "member", "LabAgent-Demo-2026-Zhou"),
     ("viewer@lab.local", "王敏", "viewer", "LabAgent-Demo-2026-Viewer"),
 )
+_DEMO_PASSWORD_HASHES: dict[str, str] = {}
 
 
 def _read_dir(path: Path) -> list[tuple[dict[str, str], str]]:
@@ -55,11 +56,15 @@ async def seed(*, include_lab_demo: bool = False) -> None:
             for email, name, role, password in DEMO_USERS:
                 user = await session.scalar(select(User).where(User.email == email))
                 if user is None:
+                    pw_hash = _DEMO_PASSWORD_HASHES.get(password)
+                    if pw_hash is None:
+                        pw_hash = hash_password(password)
+                        _DEMO_PASSWORD_HASHES[password] = pw_hash
                     user = User(
                         email=email,
                         display_name=name,
                         role=role,
-                        password_hash=hash_password(password),
+                        password_hash=pw_hash,
                         is_active=True,
                     )
                     session.add(user)

@@ -1,10 +1,14 @@
 .git
+.github
+docs
+backend/tests
 frontend/node_modules
 frontend/.next
 backend/.venv
 backend/.mypy_cache
 backend/.ruff_cache
 backend/.pytest_cache
+**/__pycache__
 agent-tools
 data
 *.pyc

@@ -30,6 +30,7 @@ services:
       retries: 20
 
   api-init:
+    image: ${LAB_AGENT_API_IMAGE:-lab-agent-api:local}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -44,6 +45,7 @@ services:
       - api_secrets:/run/lab-agent-secrets
 
   api:
+    image: ${LAB_AGENT_API_IMAGE:-lab-agent-api:local}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -90,6 +92,7 @@ services:
       start_period: 60s
 
   web:
+    image: ${LAB_AGENT_WEB_IMAGE:-lab-agent-web:local}
     build:
       context: .
       dockerfile: frontend/Dockerfile

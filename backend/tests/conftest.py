@@ -82,23 +82,41 @@ def migrated() -> None:
     asyncio.run(_reset_vector_col())
 
 
+_TABLES = (
+    "audit_events",
+    "messages",
+    "conversations",
+    "api_tokens",
+    "revoked_tokens",
+    "field_provenance",
+    "lab_facilities",
+    "lab_projects",
+    "lab_achievements",
+    "lab_people",
+    "import_jobs",
+    "embedding_index_meta",
+    "chunks",
+    "document_acl",
+    "documents",
+    "group_members",
+    "groups",
+    "users",
+)
+_EXISTS_SQL = text("SELECT " + " OR ".join(f"EXISTS (SELECT 1 FROM {t})" for t in _TABLES))
+_TRUNCATE_SQL = text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE")
+
+
 @pytest.fixture(autouse=True)
 async def clean_db() -> AsyncIterator[None]:
-    from app.db import dispose_engine, get_sessionmaker
+    from app.db import get_sessionmaker
     from app.llm import CAPTURED
 
-    # Each test may run on a fresh loop. Drop pooled asyncpg connections first.
-    await dispose_engine()
     maker = get_sessionmaker()
     async with maker() as session:
-        await session.execute(
-            text(
-                "TRUNCATE audit_events, messages, conversations, api_tokens, revoked_tokens, "
-                "lab_facilities, lab_projects, lab_achievements, lab_people, import_jobs, "
-                "embedding_index_meta, chunks, document_acl, documents, group_members, groups, users RESTART IDENTITY CASCADE"
-            )
-        )
-        await session.commit()
+        dirty = (await session.execute(_EXISTS_SQL)).scalar()
+        if dirty:
+            await session.execute(_TRUNCATE_SQL)
+            await session.commit()
     CAPTURED.clear()
     yield
     CAPTURED.clear()
