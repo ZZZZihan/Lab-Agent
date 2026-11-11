@@ -32,6 +32,7 @@ from app.routes_auth_bootstrap import (
     router as auth_bootstrap_router,
 )
 from app.routes_lab import router as lab_router
+from app.routes_lab_invoices import router as lab_invoices_router
 
 log = get_logger("api")
 
@@ -182,6 +183,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_bootstrap_router)
     app.include_router(admin_router)
     app.include_router(lab_router)
+    app.include_router(lab_invoices_router)
     install_exception_handler(app)
     return app
 

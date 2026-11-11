@@ -100,6 +100,7 @@ _TABLES = (
     "api_tokens",
     "revoked_tokens",
     "field_provenance",
+    "lab_invoices",
     "lab_facilities",
     "lab_projects",
     "lab_achievements",

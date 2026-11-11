@@ -1738,3 +1738,228 @@ export async function exportAuditCsv(
   );
   return { blob, filename };
 }
+
+export type InvoiceItem = {
+  id: string;
+  owner_id: string;
+  owner_name: string;
+  owner_email: string;
+  original_filename: string;
+  item_name: string;
+  raw_item_name: string | null;
+  total_amount: string;
+  invoice_date: string | null;
+  invoice_number: string | null;
+  note: string | null;
+  renamed_filename: string;
+  pdf_sha256: string;
+  pdf_size_bytes: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type InvoiceSummary = {
+  total_count: number;
+  total_amount: string;
+  owner_count: number;
+};
+
+export type InvoiceOwnerOption = {
+  id: string;
+  display_name: string;
+  email: string;
+};
+
+export type InvoiceListResponse = {
+  invoices: InvoiceItem[];
+  summary: InvoiceSummary;
+  owners: InvoiceOwnerOption[];
+};
+
+export type ParsedInvoicePreview = {
+  original_filename: string;
+  item_name: string;
+  raw_item_name: string | null;
+  total_amount: string;
+  invoice_date: string | null;
+  invoice_number: string | null;
+  renamed_filename: string;
+  pdf_sha256: string;
+  pdf_size_bytes: number;
+  warnings: string[];
+};
+
+export type InvoiceFilterParams = {
+  scope?: "mine" | "all";
+  owner_id?: string;
+  q?: string;
+  date_from?: string;
+  date_to?: string;
+};
+
+export async function parseInvoicePdf(file: File): Promise<ParsedInvoicePreview> {
+  const form = new FormData();
+  form.append("file", file);
+  return api<ParsedInvoicePreview>("lab/invoices/parse", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function uploadInvoicePdf(params: {
+  file: File;
+  item_name?: string;
+  total_amount?: string;
+  invoice_date?: string;
+  invoice_number?: string;
+  note?: string;
+}): Promise<{ invoice: InvoiceItem; warnings: string[] }> {
+  const form = new FormData();
+  form.append("file", params.file);
+  if (params.item_name !== undefined && params.item_name.trim()) {
+    form.append("item_name", params.item_name.trim());
+  }
+  if (params.total_amount !== undefined && params.total_amount.trim()) {
+    form.append("total_amount", params.total_amount.trim());
+  }
+  if (params.invoice_date !== undefined && params.invoice_date.trim()) {
+    form.append("invoice_date", params.invoice_date.trim());
+  }
+  if (params.invoice_number !== undefined && params.invoice_number.trim()) {
+    form.append("invoice_number", params.invoice_number.trim());
+  }
+  if (params.note !== undefined && params.note.trim()) {
+    form.append("note", params.note.trim());
+  }
+  return api<{ invoice: InvoiceItem; warnings: string[] }>("lab/invoices", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function listInvoices(
+  filters?: InvoiceFilterParams,
+  signal?: AbortSignal,
+): Promise<InvoiceListResponse> {
+  const params = new URLSearchParams();
+  if (filters?.scope) params.set("scope", filters.scope);
+  if (filters?.owner_id?.trim()) params.set("owner_id", filters.owner_id.trim());
+  if (filters?.q?.trim()) params.set("q", filters.q.trim());
+  if (filters?.date_from?.trim()) params.set("date_from", filters.date_from.trim());
+  if (filters?.date_to?.trim()) params.set("date_to", filters.date_to.trim());
+  const qs = params.toString();
+  const path = qs ? `lab/invoices?${qs}` : "lab/invoices";
+  return api<InvoiceListResponse>(path, signal ? { signal } : undefined);
+}
+
+export async function updateInvoice(
+  invoiceId: string,
+  body: {
+    item_name?: string;
+    total_amount?: string | number;
+    invoice_date?: string | null;
+    invoice_number?: string | null;
+    note?: string | null;
+  },
+): Promise<{ invoice: InvoiceItem }> {
+  return api<{ invoice: InvoiceItem }>(
+    `lab/invoices/${encodeURIComponent(invoiceId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export async function deleteInvoice(
+  invoiceId: string,
+): Promise<{ status: string; id: string }> {
+  return api<{ status: string; id: string }>(
+    `lab/invoices/${encodeURIComponent(invoiceId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function downloadInvoicePdf(
+  invoiceId: string,
+  fallbackFilename = "invoice.pdf",
+): Promise<{ blob: Blob; filename: string }> {
+  const path = `lab/invoices/${encodeURIComponent(invoiceId)}/download`;
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    fallbackFilename,
+  );
+  return { blob, filename };
+}
+
+export async function exportInvoicesZip(params: {
+  invoice_ids?: string[];
+  scope?: "mine" | "all";
+  owner_id?: string;
+  q?: string;
+  date_from?: string;
+  date_to?: string;
+}): Promise<{ blob: Blob; filename: string }> {
+  const path = "lab/invoices/export:zip";
+  const payload: Record<string, unknown> = {};
+  if (params.invoice_ids && params.invoice_ids.length > 0) {
+    payload.invoice_ids = params.invoice_ids;
+  }
+  if (params.scope) payload.scope = params.scope;
+  if (params.owner_id?.trim()) payload.owner_id = params.owner_id.trim();
+  if (params.q?.trim()) payload.q = params.q.trim();
+  if (params.date_from?.trim()) payload.date_from = params.date_from.trim();
+  if (params.date_to?.trim()) payload.date_to = params.date_to.trim();
+
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `发票重命名汇总_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.zip`,
+  );
+  return { blob, filename };
+}
+
+export async function exportInvoicesCsv(
+  filters?: InvoiceFilterParams,
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams();
+  if (filters?.scope) params.set("scope", filters.scope);
+  if (filters?.owner_id?.trim()) params.set("owner_id", filters.owner_id.trim());
+  if (filters?.q?.trim()) params.set("q", filters.q.trim());
+  if (filters?.date_from?.trim()) params.set("date_from", filters.date_from.trim());
+  if (filters?.date_to?.trim()) params.set("date_to", filters.date_to.trim());
+  const qs = params.toString();
+  const path = qs ? `lab/invoices/export:csv?${qs}` : "lab/invoices/export:csv";
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `发票汇总清单_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`,
+  );
+  return { blob, filename };
+}
