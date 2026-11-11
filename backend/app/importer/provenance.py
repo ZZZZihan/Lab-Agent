@@ -518,7 +518,11 @@ async def _refresh_and_validate_entity_fingerprint(
             )
         )
         if dup_id is not None:
-            if entity_type == "person" and getattr(entity, "user_id", None) is not None:
+            if entity_type == "person" and (
+                getattr(entity, "user_id", None) is not None
+                or getattr(entity, "signature_source", None) == "upload"
+                or getattr(entity, "signature_sha256", None) is not None
+            ):
                 return
             raise ProvisionError(
                 409,
@@ -2254,6 +2258,21 @@ async def execute_merge(
         nonlocal updated_fields_count, kept_fields_count, forced_fields_count
         prior_affiliation = getattr(entity, "affiliation", None)
         prior_email = getattr(entity, "email", None)
+        unforced_project_status = False
+
+        def _supersede_companion_status_source() -> None:
+            nonlocal unforced_project_status
+            if entity_type != "project":
+                return
+            unforced_project_status = True
+            for old_ss_mr in by_ef.get(("project", entity.id, "status_source"), []):
+                if (
+                    old_ss_mr.source_job_id == job.id
+                    and old_ss_mr.source_kind == "manual"
+                    and not old_ss_mr.superseded
+                ):
+                    old_ss_mr.superseded = True
+
         for field in MANAGED_FIELDS[entity_type]:
             inc_val = incoming_fields.get(field)
             if _is_blank(inc_val):
@@ -2292,6 +2311,13 @@ async def execute_merge(
             session.add(imp_row)
             f_rows.append(imp_row)
 
+            if (
+                entity_type == "project"
+                and field == "status_source"
+                and unforced_project_status
+            ):
+                imp_row.superseded = True
+
             explicit_decision = (
                 _lookup_decision(decisions_map, ch) if ch is not None else None
             )
@@ -2308,6 +2334,8 @@ async def execute_merge(
                 if _lookup_decision(decisions_map, synth_item) == "keep_current":
                     for old_mr in prior_job_manual_rows:
                         old_mr.superseded = True
+                    if field == "status":
+                        _supersede_companion_status_source()
                     imp_row.superseded = True
 
             if ch is not None:
@@ -2368,12 +2396,16 @@ async def execute_merge(
                         if explicit_decision == "keep_current":
                             for old_mr in prior_job_manual_rows:
                                 old_mr.superseded = True
+                            if field == "status":
+                                _supersede_companion_status_source()
                         if cat == "same_time_conflict":
                             imp_row.superseded = True
                 elif cat in ("updated", "fill_blank") and chosen_act == "keep_current":
                     if explicit_decision == "keep_current":
                         for old_mr in prior_job_manual_rows:
                             old_mr.superseded = True
+                        if field == "status":
+                            _supersede_companion_status_source()
                     imp_row.superseded = True
 
             if not imp_row.superseded:
@@ -2388,6 +2420,16 @@ async def execute_merge(
                 updated_fields_count += 1
             elif ch is not None:
                 kept_fields_count += 1
+
+        if entity_type == "project" and unforced_project_status:
+            ss_rows = by_ef.get(("project", entity.id, "status_source"), [])
+            ss_eff = effective_value(ss_rows)
+            ss_eff_val = ss_eff.value if ss_eff is not None else None
+            cur_ss_val = get_entity_json_value("project", entity, "status_source")
+            if ss_eff_val != cur_ss_val:
+                set_entity_field_from_json(
+                    "project", entity, "status_source", ss_eff_val
+                )
 
         old_fp = entity.entity_fingerprint
         await _refresh_and_validate_entity_fingerprint(

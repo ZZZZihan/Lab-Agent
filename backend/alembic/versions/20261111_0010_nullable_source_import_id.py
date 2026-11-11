@@ -9,16 +9,16 @@ down_revision = "20261110_0009"
 branch_labels = None
 depends_on = None
 
-_LAB_TABLES: tuple[tuple[str, str], ...] = (
-    ("lab_people", "person"),
-    ("lab_achievements", "achievement"),
-    ("lab_projects", "project"),
-    ("lab_facilities", "facility"),
+_LAB_TABLES: tuple[tuple[str, str, str, str], ...] = (
+    ("lab_people", "person", "people", "name"),
+    ("lab_achievements", "achievement", "achievements", "title"),
+    ("lab_projects", "project", "projects", "title"),
+    ("lab_facilities", "facility", "facilities", "name"),
 )
 
 
 def upgrade() -> None:
-    for table_name, _ in _LAB_TABLES:
+    for table_name, _, _, _ in _LAB_TABLES:
         op.execute(
             f"""
             DO $$
@@ -49,7 +49,10 @@ def upgrade() -> None:
 
     # Detach manual-only entities that were previously forced onto dummy v2.1-manual jobs
     # or onto unrelated import_jobs when created manually without source_import_id.
-    for table_name, entity_type in _LAB_TABLES:
+    # To avoid detaching pre-0008 legacy imported assets that later had only a blank field
+    # manually edited, require BOTH manual provenance on the primary identity field AND
+    # absence of the entity's fingerprint in the referenced import job's preview list.
+    for table_name, entity_type, preview_key, primary_field in _LAB_TABLES:
         op.execute(
             f"""
             UPDATE {table_name} AS t
@@ -68,7 +71,9 @@ def upgrade() -> None:
                     SELECT 1 FROM field_provenance fp
                     WHERE fp.entity_type = '{entity_type}'
                       AND fp.entity_id = t.id
+                      AND fp.field = '{primary_field}'
                       AND fp.source_kind = 'manual'
+                      AND fp.source_job_id IS NULL
                       AND fp.superseded = false
                   )
                   AND NOT EXISTS (
@@ -76,6 +81,19 @@ def upgrade() -> None:
                     WHERE fp.entity_type = '{entity_type}'
                       AND fp.entity_id = t.id
                       AND fp.source_kind <> 'manual'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM import_jobs j,
+                         jsonb_array_elements(
+                           CASE
+                             WHEN jsonb_typeof(j.preview -> '{preview_key}') = 'array'
+                             THEN j.preview -> '{preview_key}'
+                             ELSE '[]'::jsonb
+                           END
+                         ) AS elem
+                    WHERE j.id = t.source_import_id
+                      AND elem ->> 'fingerprint' = t.entity_fingerprint
                   )
                 )
               );
@@ -149,7 +167,7 @@ def downgrade() -> None:
         """
     )
 
-    for table_name, _ in _LAB_TABLES:
+    for table_name, _, _, _ in _LAB_TABLES:
         op.execute(
             f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {table_name}_source_import_id_fkey;"
         )

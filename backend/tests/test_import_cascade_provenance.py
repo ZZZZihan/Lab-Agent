@@ -67,9 +67,12 @@ def _build_proposal_docx(
     ):
         t2.rows[4].cells[c_idx].text = val
 
-    proj_lines = [
-        "（1）《基础智能阅卷平台构建》（AGE240005），万振凯（主持），全国教育科学规划课题，2024年1月立项，经费 120 万元，在研。"
-    ]
+    proj_line_base = (
+        "（1）《基础智能阅卷平台构建》（AGE240005），万振凯（主持），全国教育科学规划课题，2024.01—2025.12，经费 120 万元。"
+        if fill_date_str.startswith("2026")
+        else "（1）《基础智能阅卷平台构建》（AGE240005），万振凯（主持），全国教育科学规划课题，2024年1月立项，经费 120 万元，在研。"
+    )
+    proj_lines = [proj_line_base]
     if extra_grant_no:
         proj_lines.append(
             f"（2）《增量专项课题-{extra_grant_no}》（{extra_grant_no}），万振凯（主持），市级科研专项，2025年1月立项，经费 80 万元，在研。"
@@ -390,7 +393,15 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
         prov_after_preview = list(await session.scalars(select(FieldProvenance)))
         assert prov_after_preview == []
 
-    # 3. Verify force_adopt can be undone by re-merging the same job with explicit keep_current
+    # 3. Verify force_adopt can be undone by re-merging the same job with explicit keep_current,
+    #    including coupled project.status + project.status_source returning to inferred!
+    projs_initial = (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+        "projects"
+    ]
+    age_initial = next(p for p in projs_initial if p["grant_no"] == "AGE240005")
+    assert age_initial["status"] == "completed"
+    assert age_initial["status_source"] == "inferred"
+
     tutor_change = next(
         c
         for c in mp_data["changes"]
@@ -398,12 +409,19 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
         and c["entity_name"] == "万振凯"
         and c["field"] == "tutor_role"
     )
+    status_change = next(
+        c
+        for c in mp_data["changes"]
+        if c["entity_type"] == "project"
+        and c["field"] == "status"
+    )
     r_force = await client.post(
         f"/api/v1/admin/imports/{job_old['job_id']}/merge",
         headers=headers,
         json={
             "decisions": [
-                {"change_key": tutor_change["change_key"], "action": "force_adopt"}
+                {"change_key": tutor_change["change_key"], "action": "force_adopt"},
+                {"change_key": status_change["change_key"], "action": "force_adopt"},
             ]
         },
     )
@@ -413,13 +431,20 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
     ]
     wan_forced = next(p for p in ppl_forced if p["name"] == "万振凯")
     assert wan_forced["tutor_role"] == "硕士生导师"
+    projs_forced = (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+        "projects"
+    ]
+    age_forced = next(p for p in projs_forced if p["grant_no"] == "AGE240005")
+    assert age_forced["status"] == "ongoing"
+    assert age_forced["status_source"] == "explicit"
 
     r_unforce = await client.post(
         f"/api/v1/admin/imports/{job_old['job_id']}/merge",
         headers=headers,
         json={
             "decisions": [
-                {"change_key": tutor_change["change_key"], "action": "keep_current"}
+                {"change_key": tutor_change["change_key"], "action": "keep_current"},
+                {"change_key": status_change["change_key"], "action": "keep_current"},
             ]
         },
     )
@@ -429,6 +454,12 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
     ]
     wan_unforced = next(p for p in ppl_unforced if p["name"] == "万振凯")
     assert wan_unforced["tutor_role"] == "博士生导师"
+    projs_unforced = (
+        await client.get("/api/v1/lab/projects", headers=headers)
+    ).json()["projects"]
+    age_unforced = next(p for p in projs_unforced if p["grant_no"] == "AGE240005")
+    assert age_unforced["status"] == "completed"
+    assert age_unforced["status_source"] == "inferred"
 
     # 4. Verify DELETE /admin/imports/{job_id} blocks deletion if active FieldProvenance rows still reference job_id
     async with maker() as session:
@@ -485,3 +516,248 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
         assert len(achs_left) >= 1
         assert all(a.source_import_id is None for a in achs_left)
         assert all(f.source_import_id is None for f in facs_left)
+
+
+async def test_revert_preserves_uploaded_signature_person_on_duplicate_name_and_migration_keeps_legacy_imports(
+    client: AsyncClient,
+) -> None:
+    """Reverting a merge preserves an unlinked LabPerson with an uploaded signature even if clearing fields collides with a duplicate-name person's fingerprint; migration 0010 SQL preserves pre-0008 imported assets that only received blank-field manual edits."""
+    from datetime import UTC, date, datetime
+
+    from app.importer.fingerprint import person_fp, project_fp
+    from sqlalchemy import text
+
+    admin, headers = await _seed_admin_and_login(client)
+
+    job_base = await _upload_job(
+        client,
+        headers,
+        _build_proposal_docx(fill_date_str="2024 年 6 月 1 日", wan_title="副教授"),
+        "sig-base-2024.docx",
+        "2024-06-01",
+    )
+    assert (
+        await client.post(
+            f"/api/v1/admin/imports/{job_base['job_id']}/provision",
+            headers=headers,
+            json={"initial_password": INITIAL_PW},
+        )
+    ).status_code == 200
+
+    job_merge = await _upload_job(
+        client,
+        headers,
+        _build_proposal_docx(fill_date_str="2025 年 6 月 1 日", wan_title="教授"),
+        "sig-merge-2025.docx",
+        "2025-06-01",
+    )
+    assert (
+        await client.post(
+            f"/api/v1/admin/imports/{job_merge['job_id']}/merge",
+            headers=headers,
+            json={},
+        )
+    ).status_code == 200
+
+    maker = get_sessionmaker()
+    base_job_uuid = uuid.UUID(job_base["job_id"])
+    merge_job_uuid = uuid.UUID(job_merge["job_id"])
+
+    # 1. Seed two same-name unlinked LabPerson rows ("李重名"):
+    #    - existing_dup already holds the cleared fingerprint person_fp(tier="T3", login_name=None, name="李重名", affiliation=None)
+    #    - sig_person was created by job_merge with affiliation="天津天狮学院" (from job_merge) AND an uploaded signature (user_id=None)
+    cleared_fp = person_fp(
+        tier="T3", login_name=None, name="李重名", affiliation=None
+    )
+    aff_fp = person_fp(
+        tier="T3", login_name=None, name="李重名", affiliation="天津天狮学院"
+    )
+    sig_person_id = uuid.uuid4()
+    async with maker() as session:
+        existing_dup = LabPerson(
+            id=uuid.uuid4(),
+            user_id=None,
+            entity_fingerprint=cleared_fp,
+            name="李重名",
+            affiliation=None,
+            source_import_id=base_job_uuid,
+            as_of_time=date(2024, 6, 1),
+        )
+        sig_person = LabPerson(
+            id=sig_person_id,
+            user_id=None,
+            entity_fingerprint=aff_fp,
+            name="李重名",
+            affiliation="天津天狮学院",
+            signature_data=b"\x89PNG\r\n\x1a\n",
+            signature_mime="image/png",
+            signature_sha256="b" * 64,
+            signature_updated_at=datetime(2025, 6, 1, tzinfo=UTC),
+            signature_source="upload",
+            source_import_id=merge_job_uuid,
+            as_of_time=date(2025, 6, 1),
+        )
+        session.add_all([existing_dup, sig_person])
+        session.add_all(
+            [
+                FieldProvenance(
+                    entity_type="person",
+                    entity_id=sig_person_id,
+                    field="name",
+                    value="李重名",
+                    source_kind="import",
+                    source_job_id=merge_job_uuid,
+                    as_of_time=date(2025, 6, 1),
+                    recorded_by=admin.id,
+                    superseded=False,
+                ),
+                FieldProvenance(
+                    entity_type="person",
+                    entity_id=sig_person_id,
+                    field="affiliation",
+                    value="天津天狮学院",
+                    source_kind="import",
+                    source_job_id=merge_job_uuid,
+                    as_of_time=date(2025, 6, 1),
+                    recorded_by=admin.id,
+                    superseded=False,
+                ),
+            ]
+        )
+        await session.commit()
+
+    # Reverting job_merge clears affiliation on sig_person -> would collide with existing_dup's cleared_fp,
+    # so sig_person must keep its non-colliding fingerprint, preserve its uploaded signature, and detach source_import_id=None.
+    r_rev = await client.post(
+        f"/api/v1/admin/imports/{job_merge['job_id']}/revert",
+        headers=headers,
+    )
+    assert r_rev.status_code == 200, r_rev.text
+
+    async with maker() as session:
+        refreshed_sig = await session.get(LabPerson, sig_person_id)
+        assert refreshed_sig is not None
+        assert refreshed_sig.signature_source == "upload"
+        assert refreshed_sig.source_import_id is None
+        assert refreshed_sig.entity_fingerprint == aff_fp
+
+    # 2. Verify migration 0010 detachment predicate preserves pre-0008 legacy imported assets
+    #    that only received a manual edit on a previously blank field, while detaching manual-only creations.
+    legacy_ach_id: uuid.UUID
+    manual_wrong_proj_id = uuid.uuid4()
+    async with maker() as session:
+        legacy_ach = await session.scalar(
+            select(LabAchievement).where(
+                LabAchievement.source_import_id == base_job_uuid
+            )
+        )
+        assert legacy_ach is not None
+        legacy_ach_id = legacy_ach.id
+        # Simulate pre-0008 state: zero FieldProvenance rows initially, then manual edit on blank support_note
+        await session.execute(
+            delete(FieldProvenance).where(
+                FieldProvenance.entity_type == "achievement",
+                FieldProvenance.entity_id == legacy_ach_id,
+            )
+        )
+        session.add(
+            FieldProvenance(
+                entity_type="achievement",
+                entity_id=legacy_ach_id,
+                field="support_note",
+                value="补充基金标注",
+                source_kind="manual",
+                source_job_id=None,
+                as_of_time=date(2026, 1, 1),
+                recorded_by=admin.id,
+                superseded=False,
+            )
+        )
+
+        # Simulate pre-0010 manual creation wrongly attached to base_job_uuid
+        man_fp = project_fp(
+            grant_no="OLD-MAN-01",
+            title="旧版手工附着课题",
+            funder=None,
+        )
+        session.add(
+            LabProject(
+                id=manual_wrong_proj_id,
+                entity_fingerprint=man_fp,
+                title="旧版手工附着课题",
+                grant_no="OLD-MAN-01",
+                status="ongoing",
+                status_source="explicit",
+                raw_text="旧版手工附着课题",
+                source_import_id=base_job_uuid,
+                as_of_time=date(2026, 1, 1),
+            )
+        )
+        session.add(
+            FieldProvenance(
+                entity_type="project",
+                entity_id=manual_wrong_proj_id,
+                field="title",
+                value="旧版手工附着课题",
+                source_kind="manual",
+                source_job_id=None,
+                as_of_time=date(2026, 1, 1),
+                recorded_by=admin.id,
+                superseded=False,
+            )
+        )
+        await session.flush()
+
+        for table_name, entity_type, preview_key, primary_field in (
+            ("lab_achievements", "achievement", "achievements", "title"),
+            ("lab_projects", "project", "projects", "title"),
+        ):
+            await session.execute(
+                text(
+                    f"""
+                    UPDATE {table_name} AS t
+                    SET source_import_id = NULL
+                    WHERE t.source_import_id IS NOT NULL
+                      AND (
+                        '{entity_type}' <> 'person'
+                        AND EXISTS (
+                          SELECT 1 FROM field_provenance fp
+                          WHERE fp.entity_type = '{entity_type}'
+                            AND fp.entity_id = t.id
+                            AND fp.field = '{primary_field}'
+                            AND fp.source_kind = 'manual'
+                            AND fp.source_job_id IS NULL
+                            AND fp.superseded = false
+                        )
+                        AND NOT EXISTS (
+                          SELECT 1 FROM field_provenance fp
+                          WHERE fp.entity_type = '{entity_type}'
+                            AND fp.entity_id = t.id
+                            AND fp.source_kind <> 'manual'
+                        )
+                        AND NOT EXISTS (
+                          SELECT 1
+                          FROM import_jobs j,
+                               jsonb_array_elements(
+                                 CASE
+                                   WHEN jsonb_typeof(j.preview -> '{preview_key}') = 'array'
+                                   THEN j.preview -> '{preview_key}'
+                                   ELSE '[]'::jsonb
+                                 END
+                               ) AS elem
+                          WHERE j.id = t.source_import_id
+                            AND elem ->> 'fingerprint' = t.entity_fingerprint
+                        )
+                      );
+                    """
+                )
+            )
+        await session.commit()
+
+    async with maker() as session:
+        kept_ach = await session.get(LabAchievement, legacy_ach_id)
+        detached_proj = await session.get(LabProject, manual_wrong_proj_id)
+        assert kept_ach is not None
+        assert kept_ach.source_import_id == base_job_uuid
+        assert detached_proj is not None
+        assert detached_proj.source_import_id is None
