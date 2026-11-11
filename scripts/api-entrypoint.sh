@@ -24,7 +24,7 @@ cd /opt/lab-agent/backend
 alembic upgrade head
 if [ "${APP_ENV:-dev}" = "prod" ]; then
   echo "APP_ENV=prod: skipping demo seed"
-  python -m app.reindex --check
+  python -m app.reindex --init-empty
 else
   python -m app.reindex --apply --if-needed
   python -m app.seed

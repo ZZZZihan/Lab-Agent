@@ -81,6 +81,7 @@ def test_docker_compose_linux_embed_profile_structure(tmp_path: Path) -> None:
 
     modelfile = root / "docker" / "ollama" / "Modelfile.qwen3-embed"
     assert modelfile.is_file()
+    assert not (root / "docker" / "ollama" / "Modelfile.qwen3-embedding").exists()
     modelfile_text = modelfile.read_text(encoding="utf-8")
     assert "FROM qwen3-embedding:8b" in modelfile_text
     assert "PARAMETER num_ctx 8192" in modelfile_text
@@ -89,6 +90,8 @@ def test_docker_compose_linux_embed_profile_structure(tmp_path: Path) -> None:
     assert 'docker compose "${COMPOSE_FILES[@]}" up -d --wait --wait-timeout 600 embedder' in demo_sh
     assert 'docker compose "${COMPOSE_FILES[@]}" run --rm embedder-init' in demo_sh
     assert 'ollama_port="${OLLAMA_CONTAINER_PORT:-$(env_val OLLAMA_CONTAINER_PORT)}"' in demo_sh
+    assert "docker/ollama/Modelfile.qwen3-embed" in demo_sh
+    assert "Modelfile.qwen3-embedding" not in demo_sh
 
     if shutil.which("docker") is not None:
         key_file = tmp_path / "magpie.key"
@@ -181,6 +184,10 @@ def test_init_env_linux_embed_sets_container_embedding_base_url(
     assert parsed_linux["EMBEDDER"] == "openai_compatible"
     assert parsed_linux["EMBEDDING_BASE_URL"] == "http://embedder:11434/v1"
     assert parsed_linux["EMBEDDING_MODEL"] == "lab-agent-qwen3-embed"
+    assert (
+        parsed_linux["PUBLIC_ORIGIN"]
+        == "http://127.0.0.1:43123,http://localhost:43123"
+    )
 
     # 2. Default real-mode `init-env.sh` (without --linux-embed) sets host.docker.internal
     host_dir = tmp_path / "host_embed"
@@ -200,3 +207,37 @@ def test_init_env_linux_embed_sets_container_embedding_base_url(
         parsed_host["EMBEDDING_BASE_URL"]
         == "http://host.docker.internal:11434/v1"
     )
+    assert (
+        parsed_host["PUBLIC_ORIGIN"]
+        == "http://127.0.0.1:43123,http://localhost:43123"
+    )
+
+    # 3. Offline `init-env.sh --offline` also sets both loopback origins in PUBLIC_ORIGIN
+    offline_dir = tmp_path / "offline_embed"
+    offline_dir.mkdir()
+    res_offline = subprocess.run(
+        [str(init_env), "--offline"],
+        cwd=offline_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert res_offline.returncode == 0
+    parsed_offline = _parse_env_file(offline_dir / ".env")
+    assert (
+        parsed_offline["PUBLIC_ORIGIN"]
+        == "http://127.0.0.1:43123,http://localhost:43123"
+    )
+
+
+def test_pytest_isolates_upload_dir_and_bootstrap_token_file() -> None:
+    from app.config import get_settings
+
+    settings = get_settings()
+    root = repo_root().resolve()
+    upload_path = Path(settings.upload_dir).resolve()
+    token_path = Path(settings.bootstrap_token_file).resolve()
+    assert not upload_path.is_relative_to(root)
+    assert not token_path.is_relative_to(root)
+
