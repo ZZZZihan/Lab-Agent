@@ -792,26 +792,57 @@ test("proxy blocks X-Forwarded-Host / Host open redirects unless matching PUBLIC
   }
 });
 
-test("extractClientIp resists X-Forwarded-For left-most spoofing and honors TRUSTED_PROXY_HOPS", () => {
-  // Spoofed left-most IP before real public client + internal reverse proxy
-  const spoofedReq = new Request("http://127.0.0.1:43123/api/session", {
+test("extractClientIp preserves LAN client IPs and honors TRUSTED_PROXIES / TRUSTED_PROXY_HOPS", () => {
+  // 1. Default (edge-overwritten X-Forwarded-For) preserves distinct LAN client IPs behind internal proxy hops
+  const lanReqA = new Request("http://127.0.0.1:43123/api/session", {
+    headers: { "X-Forwarded-For": "192.168.1.50, 10.0.0.1" },
+  });
+  const lanReqB = new Request("http://127.0.0.1:43123/api/session", {
+    headers: { "X-Forwarded-For": "192.168.1.51, 10.0.0.1" },
+  });
+  assert.equal(bffModule.extractClientIp(lanReqA, {}), "192.168.1.50");
+  assert.equal(bffModule.extractClientIp(lanReqB, {}), "192.168.1.51");
+
+  // 2. TRUSTED_PROXIES (CIDRs / exact IPs) strips only configured proxy hops from right, blocking leftmost spoofing on both public and LAN networks
+  const spoofedPublicReq = new Request("http://127.0.0.1:43123/api/session", {
     headers: {
       "X-Forwarded-For": "1.2.3.4, 203.0.113.9, 10.0.0.1",
       "X-Real-IP": "1.2.3.4",
     },
   });
-  assert.equal(bffModule.extractClientIp(spoofedReq, {}), "203.0.113.9");
-
-  // TRUSTED_PROXY_HOPS=0 disables forwarded IP headers completely
   assert.equal(
-    bffModule.extractClientIp(spoofedReq, { TRUSTED_PROXY_HOPS: "0" }),
+    bffModule.extractClientIp(spoofedPublicReq, {
+      TRUSTED_PROXIES: "10.0.0.0/8, 127.0.0.1, ::1",
+    }),
+    "203.0.113.9",
+  );
+
+  const spoofedLanReq = new Request("http://127.0.0.1:43123/api/session", {
+    headers: {
+      "X-Forwarded-For": "8.8.8.8, 192.168.1.50, 10.0.0.1",
+    },
+  });
+  assert.equal(
+    bffModule.extractClientIp(spoofedLanReq, {
+      TRUSTED_PROXIES: "10.0.0.0/8, 127.0.0.1",
+    }),
+    "192.168.1.50",
+  );
+
+  // 3. TRUSTED_PROXY_HOPS=0 disables forwarded IP headers completely
+  assert.equal(
+    bffModule.extractClientIp(spoofedPublicReq, { TRUSTED_PROXY_HOPS: "0" }),
     null,
   );
 
-  // Explicit hop count selects exact hop from right
+  // 4. Explicit hop count selects exact hop from right
   assert.equal(
-    bffModule.extractClientIp(spoofedReq, { TRUSTED_PROXY_HOPS: "2" }),
+    bffModule.extractClientIp(spoofedPublicReq, { TRUSTED_PROXY_HOPS: "2" }),
     "203.0.113.9",
+  );
+  assert.equal(
+    bffModule.extractClientIp(spoofedLanReq, { TRUSTED_PROXY_HOPS: "2" }),
+    "192.168.1.50",
   );
 
   // IPv6 bracket+port and IPv4-mapped IPv6 normalization
