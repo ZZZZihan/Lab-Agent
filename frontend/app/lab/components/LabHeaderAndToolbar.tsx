@@ -301,6 +301,7 @@ export function LabHeaderAndToolbar({ ctx }: { ctx: LabPageContext }) {
                   <option value="">全部状态</option>
                   <option value="ongoing">在研</option>
                   <option value="completed">已结题</option>
+                  <option value="unknown">未注明</option>
                 </select>
               ) : null}
               {activeTab === "achievements" ? (
@@ -315,7 +316,9 @@ export function LabHeaderAndToolbar({ ctx }: { ctx: LabPageContext }) {
                   <option value="paper">论文</option>
                   <option value="patent">发明专利</option>
                   <option value="software">软件著作权</option>
+                  <option value="award">科研奖励/奖项</option>
                   <option value="book">学术专著</option>
+                  <option value="other">其他成果</option>
                 </select>
               ) : null}
               <Button

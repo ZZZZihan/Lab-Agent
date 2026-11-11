@@ -10,6 +10,7 @@ import {
   currentUser,
   formatLabBatch,
   generateRequestId,
+  getSystemHealth,
   parseBackendError,
   type BasketItem,
   type ChatEvent,
@@ -56,12 +57,14 @@ export default function ChatPage() {
   const [canvasNotice, setCanvasNotice] = useState<string | null>(null);
   const [activeEvidence, setActiveEvidence] =
     useState<ActiveEvidenceSelection | null>(null);
+  const [embeddingDim, setEmbeddingDim] = useState<number | null>(null);
 
   const activeSelectionRef = useRef<string | null>(null);
   const historyRequestIdRef = useRef(0);
   const listRequestIdRef = useRef(0);
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const uiLocked = busy || loadingHistory || deletingId !== null;
 
@@ -143,8 +146,23 @@ export default function ChatPage() {
         // Ignore overview load error
       });
 
+    getSystemHealth()
+      .then((h) => {
+        if (!cancelled && typeof h.embedding_dim === "number" && h.embedding_dim > 0) {
+          setEmbeddingDim(h.embedding_dim);
+        }
+      })
+      .catch(() => {
+        // Ignore health load error
+      });
+
     return () => {
       cancelled = true;
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
+      if (noticeTimerRef.current) {
+        clearTimeout(noticeTimerRef.current);
+      }
     };
   }, []);
 
@@ -290,12 +308,18 @@ export default function ChatPage() {
     }
   }
 
+  function stopStreaming() {
+    streamAbortRef.current?.abort();
+  }
+
   async function ask(question: string) {
     const text = question.trim();
     if (!text || busy || loadingHistory || deletingId !== null) return;
     historyRequestIdRef.current += 1;
     const id = generateRequestId();
     const targetConversationId = activeSelectionRef.current;
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
     setDraft("");
     setBusy(true);
     setActiveEvidence(null);
@@ -310,6 +334,7 @@ export default function ChatPage() {
         phase: t.asking,
       },
     ]);
+    let resolvedConvId: string | undefined;
     try {
       const payload: { message: string; conversation_id?: string } = {
         message: text,
@@ -321,6 +346,7 @@ export default function ChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
       if (!response.ok || !response.body) {
         let message = response.status === 401 ? t.noSession : t.error;
@@ -340,9 +366,11 @@ export default function ChatPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let resolvedConvId: string | undefined;
       const apply = (event: ChatEvent) => {
-        if (event.type === "done" && event.conversation_id) {
+        if (
+          (event.type === "conversation" || event.type === "done") &&
+          event.conversation_id
+        ) {
           resolvedConvId = event.conversation_id;
           activeSelectionRef.current = event.conversation_id;
           setConversationId(event.conversation_id);
@@ -415,18 +443,36 @@ export default function ChatPage() {
           }),
         );
       };
+      const consumeBlock = (block: string) => {
+        const dataLines = block
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+        if (dataLines.length === 0) return;
+        const rawJson = dataLines.join("\n");
+        if (!rawJson) return;
+        try {
+          apply(JSON.parse(rawJson) as ChatEvent);
+        } catch {
+          // Ignore incomplete/non-JSON comment or keepalive frame
+        }
+      };
       while (true) {
         const chunk = await reader.read();
-        if (chunk.done) break;
+        if (chunk.done) {
+          buffer += decoder.decode();
+          break;
+        }
         buffer += decoder.decode(chunk.value, { stream: true });
-        const blocks = buffer.split("\n\n");
+        const blocks = buffer.split(/\r?\n\r?\n/);
         buffer = blocks.pop() || "";
         for (const block of blocks) {
-          const dataLine = block
-            .split("\n")
-            .find((line) => line.startsWith("data:"));
-          if (!dataLine) continue;
-          apply(JSON.parse(dataLine.slice(5).trim()) as ChatEvent);
+          consumeBlock(block);
+        }
+      }
+      if (buffer.trim()) {
+        for (const block of buffer.split(/\r?\n\r?\n/)) {
+          consumeBlock(block);
         }
       }
       setTurns((current) =>
@@ -437,13 +483,39 @@ export default function ChatPage() {
       if (resolvedConvId) {
         await loadConversations();
       }
-    } catch {
-      setTurns((current) =>
-        current.map((turn) =>
-          turn.id === id ? { ...turn, pending: false, error: t.error } : turn,
-        ),
-      );
+    } catch (err) {
+      const isAbort =
+        controller.signal.aborted ||
+        (err instanceof Error && err.name === "AbortError");
+      const knownConvId = resolvedConvId || targetConversationId || undefined;
+      if (isAbort && !knownConvId) {
+        setTurns((current) => current.filter((turn) => turn.id !== id));
+        setDraft((cur) => cur || text);
+        void loadConversations();
+      } else {
+        if (knownConvId) {
+          activeSelectionRef.current = knownConvId;
+          setConversationId(knownConvId);
+        }
+        setTurns((current) =>
+          current.map((turn) =>
+            turn.id === id
+              ? {
+                  ...turn,
+                  pending: false,
+                  ...(isAbort ? {} : { error: t.error }),
+                }
+              : turn,
+          ),
+        );
+        if (resolvedConvId) {
+          await loadConversations();
+        }
+      }
     } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+      }
       setBusy(false);
     }
   }
@@ -723,9 +795,11 @@ export default function ChatPage() {
           draft={draft}
           busy={busy}
           uiLocked={uiLocked}
+          embeddingDim={embeddingDim}
           activeEvidence={activeEvidence}
           onDraftChange={setDraft}
           onAsk={(q) => void ask(q)}
+          onStop={stopStreaming}
           onSelectConversation={(id) => void selectConversation(id)}
           onStartNewConversation={startNewConversation}
           onDeleteConversation={(id) => void handleDeleteConversation(id)}

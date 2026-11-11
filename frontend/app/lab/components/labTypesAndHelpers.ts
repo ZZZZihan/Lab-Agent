@@ -288,6 +288,13 @@ export function extractProjectYear(proj: LabProjectItem): number | null {
   return null;
 }
 
+export function isRecentAchievementYear(
+  year: number | null | undefined,
+  minYear: number,
+): boolean {
+  return typeof year === "number" && Number.isFinite(year) && year >= minYear;
+}
+
 export function triggerBlobDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   try {

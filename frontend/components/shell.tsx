@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -16,8 +16,36 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "cn";
-import { ApiError, api, changePassword, currentUser, logout, type User } from "@/lib/api";
+import {
+  ApiError,
+  changePassword,
+  currentUser,
+  getSystemHealth,
+  logout,
+  resetClientAuthCache,
+  type HealthResponse,
+  type User,
+} from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { validatePasswordClient } from "@/lib/security";
+
+export type ShellContextValue = {
+  user: User | null;
+  calibrated: boolean | null;
+  health: HealthResponse | null;
+  refreshUser: () => Promise<User | null>;
+};
+
+const ShellContext = createContext<ShellContextValue>({
+  user: null,
+  calibrated: null,
+  health: null,
+  refreshUser: async () => null,
+});
+
+export function useShell(): ShellContextValue {
+  return useContext(ShellContext);
+}
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { t, toggle } = useI18n();
@@ -26,6 +54,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [calibrated, setCalibrated] = useState<boolean | null>(null);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
 
   const [pwOpen, setPwOpen] = useState(false);
   const [oldPw, setOldPw] = useState("");
@@ -34,10 +63,29 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [pwError, setPwError] = useState("");
   const [pwSaving, setPwSaving] = useState(false);
 
+  const refreshUser = useCallback(async () => {
+    const found = await currentUser({ force: true });
+    setUser(found);
+    return found;
+  }, []);
+
   useEffect(() => {
+    const handleLogoutEvent = () => {
+      resetClientAuthCache();
+    };
+    window.addEventListener("lab-auth-logout", handleLogoutEvent);
+    return () => {
+      window.removeEventListener("lab-auth-logout", handleLogoutEvent);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     currentUser()
       .then((found) => {
+        if (cancelled) return;
         if (!found) {
+          resetClientAuthCache();
           window.dispatchEvent(new Event("lab-auth-logout"));
           router.replace("/login");
           return;
@@ -50,18 +98,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
           }
         }
         setReady(true);
-        api<{ calibrated?: boolean }>("health")
-          .then((health) => {
-            setCalibrated(health.calibrated ?? null);
+        getSystemHealth()
+          .then((h) => {
+            if (cancelled) return;
+            setHealth(h);
+            setCalibrated(h.calibrated ?? null);
           })
           .catch(() => {
+            if (cancelled) return;
             setCalibrated(null);
           });
       })
       .catch(() => {
+        if (cancelled) return;
+        resetClientAuthCache();
         window.dispatchEvent(new Event("lab-auth-logout"));
         router.replace("/login");
       });
+    return () => {
+      cancelled = true;
+    };
   }, [router, pathname]);
 
   const links = [
@@ -81,7 +137,16 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   async function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();
+    if (pwSaving) return;
     setPwError("");
+    const pwErr = validatePasswordClient(newPw, {
+      email: bindEmail.trim() || user?.email,
+      oldPassword: oldPw,
+    });
+    if (pwErr) {
+      setPwError(pwErr);
+      return;
+    }
     setPwSaving(true);
     try {
       const updated = await changePassword(oldPw, newPw, bindEmail);
@@ -97,11 +162,17 @@ export function Shell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  const shellCtx = useMemo<ShellContextValue>(
+    () => ({ user, calibrated, health, refreshUser }),
+    [user, calibrated, health, refreshUser],
+  );
+
   const isChatCanvas = pathname.startsWith("/chat");
   const containerMaxW = isChatCanvas ? "max-w-7xl" : "max-w-5xl";
 
   return (
-    <div className="min-h-screen bg-[#FAF9F6] text-stone-900 dark:bg-[#181816] dark:text-stone-100">
+    <ShellContext.Provider value={shellCtx}>
+      <div className="min-h-screen bg-[#FAF9F6] text-stone-900 dark:bg-[#181816] dark:text-stone-100">
       <header className="border-b border-stone-200/80 bg-[#FAF9F6]/90 backdrop-blur-xs dark:border-stone-800 dark:bg-[#181816]/90">
         <div
           className={`mx-auto flex w-full ${containerMaxW} flex-wrap items-center gap-3 px-4 py-3`}
@@ -240,6 +311,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </form>
         </DialogContent>
       </Dialog>
-    </div>
+      </div>
+    </ShellContext.Provider>
   );
 }

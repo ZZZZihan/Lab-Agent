@@ -91,6 +91,7 @@ export type TokenUsage = {
 
 /**
  * SSE event contract emitted by POST /api/v1/chat/stream:
+ * - conversation:   { conversation_id }
  * - status:         { phase }
  * - tool:           { name, status }
  * - retrieval:      { mode, coverage, elapsed_ms, hits[], refused }
@@ -103,6 +104,7 @@ export type TokenUsage = {
  */
 export type ChatEvent = {
   type:
+    | "conversation"
     | "status"
     | "tool"
     | "retrieval"
@@ -220,6 +222,7 @@ export function handleAuthRedirect(err: ApiError, path?: string): void {
     if (path === "auth/change-password" && err.code === "invalid_credentials") {
       return;
     }
+    resetClientAuthCache();
     window.dispatchEvent(new Event("lab-auth-logout"));
     if (pathname !== "/login") {
       void fetch("/api/session", { method: "DELETE" }).catch(() => undefined);
@@ -269,7 +272,55 @@ export type BootstrapAdminPayload = {
   setup_token?: string;
 };
 
+export type HealthResponse = {
+  status?: string;
+  calibrated?: boolean;
+  embedding_model?: string;
+  embedding_dim?: number;
+  retrieval_mode?: string;
+  oidc_mode?: boolean;
+};
+
+const SESSION_CACHE_TTL_MS = 5_000;
+const HEALTH_CACHE_TTL_MS = 30_000;
+
 let cachedOidcModePromise: Promise<boolean> | null = null;
+let cachedUserEntry: { user: User; expiresAt: number } | null = null;
+let inflightUserPromise: Promise<User | null> | null = null;
+let cachedHealthEntry: { health: HealthResponse; expiresAt: number } | null =
+  null;
+let inflightHealthPromise: Promise<HealthResponse> | null = null;
+let invalidationGen = 0;
+let authWriteGen = 0;
+let userFetchSeq = 0;
+let healthFetchSeq = 0;
+
+function writeCachedCurrentUser(user: User | null): void {
+  if (user) {
+    cachedUserEntry = {
+      user,
+      expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+    };
+  } else {
+    cachedUserEntry = null;
+  }
+}
+
+function commitAuthenticatedUser(user: User): void {
+  authWriteGen += 1;
+  inflightUserPromise = null;
+  writeCachedCurrentUser(user);
+}
+
+export function resetClientAuthCache(): void {
+  invalidationGen += 1;
+  authWriteGen += 1;
+  cachedUserEntry = null;
+  inflightUserPromise = null;
+  cachedHealthEntry = null;
+  inflightHealthPromise = null;
+  cachedOidcModePromise = null;
+}
 
 export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
   const response = await fetch("/api/bootstrap-status", { cache: "no-store" });
@@ -285,20 +336,65 @@ export function resolveOidcMode(user?: User | null): Promise<boolean> {
   if (typeof user?.oidc_mode === "boolean") {
     return Promise.resolve(user.oidc_mode);
   }
+  if (
+    cachedHealthEntry &&
+    Date.now() < cachedHealthEntry.expiresAt &&
+    typeof cachedHealthEntry.health.oidc_mode === "boolean"
+  ) {
+    return Promise.resolve(cachedHealthEntry.health.oidc_mode);
+  }
   if (!cachedOidcModePromise) {
-    cachedOidcModePromise = getBootstrapStatus()
+    const req = getBootstrapStatus()
       .then((res) => Boolean(res.oidc_mode))
       .catch((err) => {
-        cachedOidcModePromise = null;
+        if (cachedOidcModePromise === req) {
+          cachedOidcModePromise = null;
+        }
         throw err;
       });
+    cachedOidcModePromise = req;
   }
   return cachedOidcModePromise;
+}
+
+export async function getSystemHealth(options?: {
+  force?: boolean;
+}): Promise<HealthResponse> {
+  if (
+    !options?.force &&
+    cachedHealthEntry &&
+    Date.now() < cachedHealthEntry.expiresAt
+  ) {
+    return cachedHealthEntry.health;
+  }
+  if (!options?.force && inflightHealthPromise) {
+    return inflightHealthPromise;
+  }
+  const startInvalidationGen = invalidationGen;
+  const seq = ++healthFetchSeq;
+  const req = api<HealthResponse>("health")
+    .then((health) => {
+      if (startInvalidationGen === invalidationGen && seq === healthFetchSeq) {
+        cachedHealthEntry = {
+          health,
+          expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
+        };
+      }
+      return health;
+    })
+    .finally(() => {
+      if (inflightHealthPromise === req) {
+        inflightHealthPromise = null;
+      }
+    });
+  inflightHealthPromise = req;
+  return req;
 }
 
 export async function bootstrapAdmin(
   payload: BootstrapAdminPayload,
 ): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const response = await fetch("/api/session/bootstrap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -306,18 +402,52 @@ export async function bootstrapAdmin(
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(body.user);
+  }
   return body.user;
 }
 
-export async function currentUser(): Promise<User | null> {
-  const response = await fetch("/api/session", { cache: "no-store" });
-  if (response.status === 401) return null;
-  if (!response.ok) throw await parseError(response);
-  const body = (await response.json()) as { user: User };
-  return body.user;
+export async function currentUser(options?: {
+  force?: boolean;
+}): Promise<User | null> {
+  if (
+    !options?.force &&
+    cachedUserEntry &&
+    Date.now() < cachedUserEntry.expiresAt
+  ) {
+    return cachedUserEntry.user;
+  }
+  if (!options?.force && inflightUserPromise) {
+    return inflightUserPromise;
+  }
+  const startWriteGen = authWriteGen;
+  const seq = ++userFetchSeq;
+  const req = (async () => {
+    const response = await fetch("/api/session", { cache: "no-store" });
+    if (response.status === 401) {
+      if (startWriteGen === authWriteGen && seq === userFetchSeq) {
+        cachedUserEntry = null;
+      }
+      return null;
+    }
+    if (!response.ok) throw await parseError(response);
+    const body = (await response.json()) as { user: User };
+    if (startWriteGen === authWriteGen && seq === userFetchSeq) {
+      writeCachedCurrentUser(body.user);
+    }
+    return body.user;
+  })().finally(() => {
+    if (inflightUserPromise === req) {
+      inflightUserPromise = null;
+    }
+  });
+  inflightUserPromise = req;
+  return req;
 }
 
 export async function login(identifier: string, password: string): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const response = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -325,6 +455,9 @@ export async function login(identifier: string, password: string): Promise<User>
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(body.user);
+  }
   return body.user;
 }
 
@@ -333,6 +466,7 @@ export async function changePassword(
   new_password: string,
   email?: string,
 ): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const res = await api<{ status: string; user: User }>("auth/change-password", {
     method: "POST",
     body: JSON.stringify({
@@ -341,11 +475,16 @@ export async function changePassword(
       ...(email && email.trim() ? { email: email.trim() } : {}),
     }),
   });
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(res.user);
+  }
   return res.user;
 }
 
 export async function logout(): Promise<void> {
+  resetClientAuthCache();
   await fetch("/api/session", { method: "DELETE" });
+  resetClientAuthCache();
 }
 
 export type FieldProvenanceSummary = {
@@ -1556,6 +1695,46 @@ export async function exportAllLabAssets(
   const filename = parseFilenameFromDisposition(
     response.headers.get("content-disposition"),
     format === "docx" ? "lab-assets.docx" : "lab-assets.md",
+  );
+  return { blob, filename };
+}
+
+export type AuditFilterParams = {
+  action?: string;
+  actor_id?: string;
+  resource_type?: string;
+  resource_id?: string;
+  since?: string;
+  until?: string;
+};
+
+export async function exportAuditCsv(
+  filters?: AuditFilterParams,
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams();
+  if (filters?.action?.trim()) params.set("action", filters.action.trim());
+  if (filters?.actor_id?.trim()) params.set("actor_id", filters.actor_id.trim());
+  if (filters?.resource_type?.trim()) {
+    params.set("resource_type", filters.resource_type.trim());
+  }
+  if (filters?.resource_id?.trim()) {
+    params.set("resource_id", filters.resource_id.trim());
+  }
+  if (filters?.since?.trim()) params.set("since", filters.since.trim());
+  if (filters?.until?.trim()) params.set("until", filters.until.trim());
+  const qs = params.toString();
+  const path = qs ? `audit/export.csv?${qs}` : "audit/export.csv";
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `audit-${new Date().toISOString().slice(0, 10)}.csv`,
   );
   return { blob, filename };
 }

@@ -1,8 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useState } from "react";
+import { Children, type ReactNode, useMemo, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
+import { cn } from "cn";
 import { type Citation, type LabPersonItem } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -58,6 +61,8 @@ function renderInlineCitations(
   });
 }
 
+const REMARK_PLUGINS = [remarkGfm];
+
 function EditorialProse({
   answer,
   turnId,
@@ -71,12 +76,141 @@ function EditorialProse({
   activeEvidence: ActiveEvidenceSelection | null;
   onSelectCitation: (turnId: string, citeIndex: number, citation?: Citation) => void;
 }) {
-  const paragraphs = answer
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+  const trimmed = answer.trim();
 
-  if (paragraphs.length === 0) {
+  const components = useMemo<Components>(() => {
+    const withCitations = (children: ReactNode): ReactNode =>
+      Children.map(children, (child) =>
+        typeof child === "string"
+          ? renderInlineCitations(
+              child,
+              turnId,
+              citations,
+              activeEvidence,
+              onSelectCitation,
+            )
+          : child,
+      );
+
+    return {
+      p: ({ children }) => (
+        <p className="whitespace-pre-wrap leading-[1.75]">
+          {withCitations(children)}
+        </p>
+      ),
+      h1: ({ children }) => (
+        <h3 className="mt-4 font-display text-lg font-semibold text-stone-900 first:mt-0 dark:text-stone-100">
+          {withCitations(children)}
+        </h3>
+      ),
+      h2: ({ children }) => (
+        <h3 className="mt-4 font-display text-base font-semibold text-stone-900 first:mt-0 dark:text-stone-100">
+          {withCitations(children)}
+        </h3>
+      ),
+      h3: ({ children }) => (
+        <h4 className="mt-3 font-display text-[15px] font-semibold text-stone-900 first:mt-0 dark:text-stone-100">
+          {withCitations(children)}
+        </h4>
+      ),
+      h4: ({ children }) => (
+        <h5 className="mt-2.5 text-sm font-semibold text-stone-900 first:mt-0 dark:text-stone-100">
+          {withCitations(children)}
+        </h5>
+      ),
+      ul: ({ className, children }) => (
+        <ul className={cn("list-disc space-y-1.5 pl-5", className)}>
+          {children}
+        </ul>
+      ),
+      ol: ({ start, className, children }) => (
+        <ol
+          start={start}
+          className={cn("list-decimal space-y-1.5 pl-5", className)}
+        >
+          {children}
+        </ol>
+      ),
+      li: ({ className, children }) => (
+        <li className={cn("leading-[1.7]", className)}>
+          {withCitations(children)}
+        </li>
+      ),
+      strong: ({ children }) => (
+        <strong className="font-semibold text-stone-900 dark:text-stone-100">
+          {withCitations(children)}
+        </strong>
+      ),
+      em: ({ children }) => <em className="italic">{withCitations(children)}</em>,
+      del: ({ children }) => (
+        <del className="line-through">{withCitations(children)}</del>
+      ),
+      blockquote: ({ children }) => (
+        <blockquote className="border-l-2 border-primary/40 pl-3.5 text-stone-600 italic dark:border-emerald-400/40 dark:text-stone-300">
+          {withCitations(children)}
+        </blockquote>
+      ),
+      a: ({ href, children }) => (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-medium text-primary underline underline-offset-2 dark:text-emerald-300"
+        >
+          {withCitations(children)}
+        </a>
+      ),
+      pre: ({ children }) => (
+        <pre className="overflow-x-auto rounded-lg border border-stone-200/90 bg-stone-100/80 p-3 font-mono text-xs leading-relaxed text-stone-800 dark:border-stone-800 dark:bg-stone-900/80 dark:text-stone-200">
+          {children}
+        </pre>
+      ),
+      code: ({ className, children }) => {
+        const isBlock = Boolean(
+          (className && className.includes("language-")) ||
+            String(children).includes("\n"),
+        );
+        if (isBlock) {
+          return <code className={className}>{children}</code>;
+        }
+        return (
+          <code className="rounded bg-stone-200/70 px-1.5 py-0.5 font-mono text-[13px] text-stone-800 dark:bg-stone-800 dark:text-stone-200">
+            {children}
+          </code>
+        );
+      },
+      table: ({ children }) => (
+        <div className="overflow-x-auto rounded-lg border border-stone-200/90 dark:border-stone-800">
+          <table className="w-full border-collapse text-left text-xs">
+            {children}
+          </table>
+        </div>
+      ),
+      thead: ({ children }) => (
+        <thead className="border-b border-stone-200/90 bg-stone-100/70 text-stone-700 dark:border-stone-800 dark:bg-stone-900/60 dark:text-stone-300">
+          {children}
+        </thead>
+      ),
+      th: ({ style, children }) => (
+        <th style={style} className="px-3 py-2 font-semibold">
+          {withCitations(children)}
+        </th>
+      ),
+      td: ({ style, children }) => (
+        <td
+          style={style}
+          className="border-t border-stone-200/70 px-3 py-2 align-top dark:border-stone-800/80"
+        >
+          {withCitations(children)}
+        </td>
+      ),
+      hr: () => (
+        <hr className="border-stone-200/80 dark:border-stone-800" />
+      ),
+    };
+  }, [turnId, citations, activeEvidence, onSelectCitation]);
+
+  if (!trimmed) {
     return null;
   }
 
@@ -85,17 +219,9 @@ function EditorialProse({
       lang="zh"
       className="max-w-[68ch] space-y-3.5 text-[15px] leading-[1.75] text-stone-800 dark:text-stone-200"
     >
-      {paragraphs.map((para, pIdx) => (
-        <p key={pIdx} className="whitespace-pre-wrap">
-          {renderInlineCitations(
-            para,
-            turnId,
-            citations,
-            activeEvidence,
-            onSelectCitation,
-          )}
-        </p>
-      ))}
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
+        {trimmed}
+      </ReactMarkdown>
     </div>
   );
 }

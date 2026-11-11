@@ -17,6 +17,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api, currentUser, type User } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import {
+  isValidLoginNameClient,
+  validatePasswordClient,
+} from "@/lib/security";
 
 type AdminUser = {
   id: string;
@@ -33,9 +37,11 @@ export default function AdminUsersPage() {
   const [me, setMe] = useState<User | null>(null);
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [error, setError] = useState("");
+  const [busyUserId, setBusyUserId] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createEmail, setCreateEmail] = useState("");
+  const [createLoginName, setCreateLoginName] = useState("");
   const [createName, setCreateName] = useState("");
   const [createRole, setCreateRole] = useState<"admin" | "member" | "viewer">("member");
   const [createSecret, setCreateSecret] = useState("");
@@ -82,20 +88,43 @@ export default function AdminUsersPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
+    if (creating) return;
     setCreateError("");
+    const trimmedEmail = createEmail.trim();
+    const trimmedLogin = createLoginName.trim().toLowerCase();
+    const trimmedName = createName.trim();
+    if (!trimmedEmail && !trimmedLogin) {
+      setCreateError("请至少填写邮箱地址或登录名");
+      return;
+    }
+    if (trimmedLogin && !isValidLoginNameClient(trimmedLogin)) {
+      setCreateError(
+        "登录名需由 3–64 位小写字母、数字、点、下划线或连字符组成，且不能使用保留词",
+      );
+      return;
+    }
+    const pwErr = validatePasswordClient(createSecret, {
+      email: trimmedEmail || null,
+    });
+    if (pwErr) {
+      setCreateError(pwErr);
+      return;
+    }
     setCreating(true);
     try {
       await api("admin/users", {
         method: "POST",
         body: JSON.stringify({
-          email: createEmail,
-          display_name: createName,
+          ...(trimmedEmail ? { email: trimmedEmail } : {}),
+          ...(trimmedLogin ? { login_name: trimmedLogin } : {}),
+          display_name: trimmedName,
           role: createRole,
           password: createSecret,
         }),
       });
       setCreateOpen(false);
       setCreateEmail("");
+      setCreateLoginName("");
       setCreateName("");
       setCreateRole("member");
       setCreateSecret("");
@@ -108,7 +137,9 @@ export default function AdminUsersPage() {
   }
 
   async function handleRoleChange(target: AdminUser, newRole: string) {
+    if (busyUserId !== null) return;
     setError("");
+    setBusyUserId(target.id);
     try {
       await api(`admin/users/${target.id}`, {
         method: "PATCH",
@@ -117,11 +148,15 @@ export default function AdminUsersPage() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setBusyUserId(null);
     }
   }
 
   async function handleToggleActive(target: AdminUser) {
+    if (busyUserId !== null) return;
     setError("");
+    setBusyUserId(target.id);
     try {
       await api(`admin/users/${target.id}`, {
         method: "PATCH",
@@ -130,13 +165,22 @@ export default function AdminUsersPage() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setBusyUserId(null);
     }
   }
 
   async function handleResetSecret(e: React.FormEvent) {
     e.preventDefault();
-    if (!resetTarget) return;
+    if (!resetTarget || resetting) return;
     setResetError("");
+    const pwErr = validatePasswordClient(resetSecret, {
+      email: resetTarget.email,
+    });
+    if (pwErr) {
+      setResetError(pwErr);
+      return;
+    }
     setResetting(true);
     try {
       await api(`admin/users/${resetTarget.id}/password`, {
@@ -186,6 +230,7 @@ export default function AdminUsersPage() {
               <thead className="border-b border-border bg-muted/40 text-xs text-muted-foreground">
                 <tr>
                   <th className="px-4 py-3 font-medium">{t.displayName}</th>
+                  <th className="px-4 py-3 font-medium">{t.loginName}</th>
                   <th className="px-4 py-3 font-medium">{t.email}</th>
                   <th className="px-4 py-3 font-medium">{t.role}</th>
                   <th className="px-4 py-3 font-medium">{t.userStatus}</th>
@@ -195,16 +240,22 @@ export default function AdminUsersPage() {
               <tbody className="divide-y divide-border">
                 {users.map((u) => {
                   const isSelf = me?.id === u.id;
+                  const isRowBusy = busyUserId === u.id;
                   return (
                     <tr key={u.id}>
                       <td className="px-4 py-3 font-medium">{u.display_name}</td>
-                      <td className="px-4 py-3 font-mono text-xs">{u.email || u.login_name || "—"}</td>
+                      <td className="px-4 py-3 font-mono text-xs">
+                        {u.login_name || "—"}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs">
+                        {u.email || "—"}
+                      </td>
                       <td className="px-4 py-3">
                         <select
                           aria-label={`${u.display_name} ${t.role}`}
                           value={u.role}
-                          disabled={isSelf}
-                          onChange={(e) => handleRoleChange(u, e.target.value)}
+                          disabled={isSelf || isRowBusy}
+                          onChange={(e) => void handleRoleChange(u, e.target.value)}
                           className="rounded-md border border-input bg-background px-2.5 py-1 text-xs disabled:opacity-50"
                         >
                           <option value="admin">{t.roleAdmin}</option>
@@ -222,14 +273,15 @@ export default function AdminUsersPage() {
                           <Button
                             variant="outline"
                             size="sm"
-                            disabled={isSelf}
-                            onClick={() => handleToggleActive(u)}
+                            disabled={isSelf || isRowBusy}
+                            onClick={() => void handleToggleActive(u)}
                           >
                             {u.is_active ? t.deactivateUser : t.activateUser}
                           </Button>
                           <Button
                             variant="outline"
                             size="sm"
+                            disabled={isRowBusy}
                             onClick={() => {
                               setResetTarget(u);
                               setResetSecret("");
@@ -256,22 +308,33 @@ export default function AdminUsersPage() {
             </DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4">
               <div className="space-y-1.5">
-                <Label htmlFor="create-email">{t.email}</Label>
-                <Input
-                  id="create-email"
-                  type="email"
-                  required
-                  value={createEmail}
-                  onChange={(e) => setCreateEmail(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
                 <Label htmlFor="create-name">{t.displayName}</Label>
                 <Input
                   id="create-name"
                   required
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="create-login-name">{t.loginName}</Label>
+                <Input
+                  id="create-login-name"
+                  placeholder="例如：2024010001 或 zhangsan"
+                  value={createLoginName}
+                  onChange={(e) => setCreateLoginName(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t.loginNameOptionalHint}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="create-email">{t.email}</Label>
+                <Input
+                  id="create-email"
+                  type="email"
+                  value={createEmail}
+                  onChange={(e) => setCreateEmail(e.target.value)}
                 />
               </div>
               <div className="space-y-1.5">
@@ -295,6 +358,7 @@ export default function AdminUsersPage() {
                   id="create-secret"
                   type="password"
                   required
+                  minLength={12}
                   value={createSecret}
                   onChange={(e) => setCreateSecret(e.target.value)}
                 />
@@ -341,6 +405,7 @@ export default function AdminUsersPage() {
                   id="reset-secret"
                   type="password"
                   required
+                  minLength={12}
                   value={resetSecret}
                   onChange={(e) => setResetSecret(e.target.value)}
                 />

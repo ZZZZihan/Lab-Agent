@@ -2470,6 +2470,8 @@ async def test_conversation_history_continuation_and_other_user_returns_404(
     first_events = _events(first_resp.text)
     first_done = next(ev for ev in first_events if ev["type"] == "done")
     conv_id = str(first_done["conversation_id"])
+    assert first_events[0]["type"] == "conversation"
+    assert str(first_events[0]["conversation_id"]) == conv_id
 
     # Continuing the conversation with conversation_id appends to the same conversation
     second_resp = await client.post(
@@ -2514,6 +2516,121 @@ async def test_conversation_history_continuation_and_other_user_returns_404(
 
     other_del = await client.delete(f"/api/v1/conversations/{conv_id}", headers=zhou)
     assert other_del.status_code == 404
+
+
+async def test_admin_create_update_user_login_name_and_audit_resource_type_filter(
+    client: AsyncClient,
+    people: dict[str, dict[str, str]],
+) -> None:
+    import csv
+    import io
+
+    del people
+    admin = await _login(client, "admin@lab.local")
+    strong_pw = "Student#2026_Valid"
+
+    # 1. Reserved or malformed login_name rejected with 400 invalid_login_name
+    reserved_resp = await client.post(
+        "/api/v1/admin/users",
+        json={
+            "login_name": "admin",
+            "display_name": "保留名测试",
+            "role": "member",
+            "password": strong_pw,
+        },
+        headers=admin,
+    )
+    assert reserved_resp.status_code == 400
+    assert reserved_resp.json()["error"]["code"] == "invalid_login_name"
+
+    # 2. Email-less student account created via suffixed login_name (e.g. zhangsan2) and can sign in
+    create_resp = await client.post(
+        "/api/v1/admin/users",
+        json={
+            "login_name": "zhangsan2",
+            "display_name": "张三（二）",
+            "role": "member",
+            "password": strong_pw,
+        },
+        headers=admin,
+    )
+    assert create_resp.status_code == 200, create_resp.text
+    created = create_resp.json()
+    uid = created["id"]
+    assert created["email"] is None
+    assert created["login_name"] == "zhangsan2"
+
+    dup_resp = await client.post(
+        "/api/v1/admin/users",
+        json={
+            "login_name": "ZHANGSAN2",
+            "display_name": "重复张三",
+            "role": "member",
+            "password": strong_pw,
+        },
+        headers=admin,
+    )
+    assert dup_resp.status_code == 409
+    assert dup_resp.json()["error"]["code"] == "login_name_exists"
+
+    login_resp = await client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "zhangsan2", "password": strong_pw},
+    )
+    assert login_resp.status_code == 200
+
+    # 3. Cannot clear login_name on an account without email; can rename to another valid login_name
+    clear_resp = await client.patch(
+        f"/api/v1/admin/users/{uid}",
+        json={"login_name": ""},
+        headers=admin,
+    )
+    assert clear_resp.status_code == 400
+    assert clear_resp.json()["error"]["code"] == "invalid_login_name"
+
+    rename_resp = await client.patch(
+        f"/api/v1/admin/users/{uid}",
+        json={"login_name": "2024010099"},
+        headers=admin,
+    )
+    assert rename_resp.status_code == 200, rename_resp.text
+    assert rename_resp.json()["login_name"] == "2024010099"
+
+    # 4. Audit list & CSV export support resource_type filtering and do not leak login_name PII in detail
+    audit_resp = await client.get(
+        f"/api/v1/audit?resource_type=user&resource_id={uid}",
+        headers=admin,
+    )
+    assert audit_resp.status_code == 200
+    events = audit_resp.json()["events"]
+    assert len(events) >= 2
+    assert all(ev["resource_type"] == "user" and ev["resource_id"] == uid for ev in events)
+    detail_blob = json.dumps([ev["detail"] for ev in events], ensure_ascii=False)
+    assert "zhangsan2" not in detail_blob
+    assert "2024010099" not in detail_blob
+
+    csv_resp = await client.get(
+        f"/api/v1/audit/export.csv?resource_type=user&resource_id={uid}",
+        headers=admin,
+    )
+    assert csv_resp.status_code == 200
+    csv_rows = list(csv.DictReader(io.StringIO(csv_resp.text)))
+    assert len(csv_rows) == len(events)
+    assert all(r["resource_type"] == "user" and r["resource_id"] == uid for r in csv_rows)
+
+    pat_resp = await client.post(
+        "/api/v1/tokens",
+        json={"name": "audit-filter-token", "expires_in_days": 7},
+        headers=admin,
+    )
+    assert pat_resp.status_code in (200, 201), pat_resp.text
+    token_audit = await client.get(
+        "/api/v1/audit?resource_type=api_token",
+        headers=admin,
+    )
+    assert token_audit.status_code == 200
+    token_events = token_audit.json()["events"]
+    assert any(ev["action"] == "token_create" and ev["resource_type"] == "api_token" for ev in token_events)
 
 
 
