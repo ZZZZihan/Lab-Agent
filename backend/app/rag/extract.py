@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+from app.importer.pii import scrub_free_text
 from app.importer.reader import DocxValidationError, extract_word_text
 
 
@@ -78,10 +79,11 @@ def extract_upload(filename: str, payload: bytes, max_chars: int) -> Extracted:
         text = _extract_pdf(payload)
     elif suffix in {".doc", ".docx"}:
         try:
-            text = extract_word_text(filename or f"upload{suffix}", payload)
+            raw_word = extract_word_text(filename or f"upload{suffix}", payload)
         except DocxValidationError as exc:
             code = "unsupported_type" if exc.status == 415 else "doc_invalid"
             raise UploadRejected(exc.status, code, exc.message) from exc
+        text, _ = scrub_free_text(raw_word)
         source_format = detect_pasted_format(text)
     else:
         raise UploadRejected(415, "unsupported_type", "只支持 .md / .txt / .pdf / .doc / .docx")

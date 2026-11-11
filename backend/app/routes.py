@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hmac
 import io
@@ -42,6 +43,7 @@ from app.auth import (
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.importer.people import clean_email, name_to_pinyin, normalize_person_name
+from app.importer.pii import escape_csv_cell
 from app.llm import LLM
 from app.maintenance import purge_document, scrub_missing_document_citations
 from app.models import (
@@ -514,7 +516,8 @@ async def change_password(
 ) -> dict[str, object]:
     settings = _settings(request)
     user = await _user(session, actor)
-    if not verify_password(user.password_hash, body.old_password):
+    old_ok = await asyncio.to_thread(verify_password, user.password_hash, body.old_password)
+    if not old_ok:
         raise APIError(401, "invalid_credentials", "当前口令不正确")
     if body.new_password == body.old_password:
         raise APIError(400, "invalid_password", "新口令不能与旧口令相同")
@@ -523,7 +526,7 @@ async def change_password(
     target_email = user.email
     if body.email is not None and body.email.strip():
         cleaned = clean_email(body.email)
-        if cleaned is None:
+        if cleaned is None or len(cleaned) > 320:
             raise APIError(400, "invalid_email", "邮箱格式不正确")
         existing = await session.scalar(
             select(User).where(User.email == cleaned, User.id != user.id)
@@ -534,13 +537,13 @@ async def change_password(
         email_bound = True
 
     try:
-        validate_password(body.new_password, target_email)
+        validate_password(body.new_password, target_email, settings=settings)
     except ValueError as exc:
         raise APIError(400, "invalid_password", str(exc)) from exc
 
     if email_bound and target_email is not None:
         user.email = target_email
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
     user.must_change_password_by = None
     if credentials is not None and not settings.oidc_issuer:
         decoded = decode_unverified_for_logout(credentials.credentials)
@@ -798,12 +801,13 @@ async def upload_document(
 
     original_filename: str | None = None
     if has_file and file is not None:
-        payload = await file.read()
+        payload = await file.read(settings.max_upload_bytes + 1)
         if len(payload) > settings.max_upload_bytes:
             raise APIError(413, "file_too_large", "文件超过 5 MB")
         original_filename = (file.filename or "").strip()[:255] or None
         try:
-            extracted = extract_upload(
+            extracted = await asyncio.to_thread(
+                extract_upload,
                 original_filename or "",
                 payload,
                 settings.max_document_chars,
@@ -820,7 +824,8 @@ async def upload_document(
         source_format = detect_pasted_format(raw_input)
         pseudo_name = "pasted.md" if source_format == "markdown" else "pasted.txt"
         try:
-            extracted = extract_upload(
+            extracted = await asyncio.to_thread(
+                extract_upload,
                 pseudo_name,
                 byte_payload,
                 settings.max_document_chars,
@@ -1270,8 +1275,6 @@ async def chat_stream(
     request_id = getattr(request.state, "request_id", None)
 
     async def events() -> AsyncIterator[str]:
-        import asyncio
-
         queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
 
         async def emit(event: dict[str, object]) -> None:
@@ -1452,20 +1455,8 @@ async def delete_conversation(
     await session.commit()
     return {"status": "deleted"}
 
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
-
-
 def _escape_csv_cell(value: object) -> str:
-    if value is None:
-        return ""
-    text_val = str(value)
-    if not text_val:
-        return ""
-    if text_val.startswith(_CSV_FORMULA_PREFIXES) or text_val.lstrip().startswith(
-        _CSV_FORMULA_PREFIXES
-    ):
-        return f"'{text_val}"
-    return text_val
+    return escape_csv_cell(value)
 
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:

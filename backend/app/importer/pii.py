@@ -22,6 +22,23 @@ _UUID_RE = re.compile(
 _HEX64_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])")
 
 PII_REPLACEMENT = "[已脱敏]"
+_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r", "\n")
+_CSV_LEADING_CTRL_RE = re.compile(r"^[\x00-\x20]+")
+
+
+def escape_csv_cell(value: object) -> str:
+    """Neutralize spreadsheet formula/DDE injection prefixes in exported CSV cells."""
+    if value is None:
+        return ""
+    text_val = str(value)
+    if not text_val:
+        return ""
+    stripped = _CSV_LEADING_CTRL_RE.sub("", text_val)
+    if text_val.startswith(_CSV_DANGEROUS_PREFIXES) or stripped.startswith(
+        _CSV_DANGEROUS_PREFIXES
+    ):
+        return f"'{text_val}"
+    return text_val
 
 
 class PIILeakError(RuntimeError):

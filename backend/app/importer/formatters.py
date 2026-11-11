@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from app.importer.pii import assert_no_pii
+from app.importer.pii import assert_no_pii, scrub_free_text
 
 ACHIEVEMENT_KIND_LABELS: dict[str, str] = {
     "report": "研究报告/资政报告",
@@ -191,7 +191,8 @@ def render_lab_profile_markdown(
     relationship_note: str | None = None,
 ) -> str:
     """Render canonical Markdown document for RAG indexing (`lab-profile-{job_id}`)."""
-    title_str = project_title or "课题组资料库档案"
+    raw_title = scrub_free_text(project_title)[0].strip() if project_title else ""
+    title_str = raw_title or "课题组资料库档案"
     as_of_str = (
         as_of_time.isoformat()
         if isinstance(as_of_time, date)
@@ -201,10 +202,10 @@ def render_lab_profile_markdown(
     ongoing_projects = [p for p in projects if str(_get(p, "status")) == "ongoing"]
     completed_projects = [p for p in projects if str(_get(p, "status")) == "completed"]
 
-    rel_text = relationship_note
+    rel_text = scrub_free_text(relationship_note)[0].strip() if relationship_note else None
     if not rel_text:
         for proj in projects:
-            rn = str(_get(proj, "relationship_note") or "").strip()
+            rn = scrub_free_text(str(_get(proj, "relationship_note") or ""))[0].strip()
             if rn:
                 rel_text = rn
                 break

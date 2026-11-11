@@ -31,7 +31,7 @@ from app.importer.formatters import (
     format_project_application,
     render_lab_profile_markdown,
 )
-from app.importer.pii import assert_no_pii
+from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
 from app.models import (
     ImportJob,
     LabAchievement,
@@ -82,7 +82,14 @@ async def batch_format_lab_assets(
                 missing=exc.missing,
             )
         combined = str(res["combined_text"] or "")
-        assert_no_pii(combined)
+        try:
+            assert_no_pii(combined)
+        except PIILeakError:
+            return _lab_v22_error(
+                422,
+                "PII_DETECTED",
+                "格式化内容包含未脱敏敏感信息（身份证号或电话号码），已阻断输出",
+            )
         items_out: list[dict[str, object]] = res["items"]  # type: ignore[assignment]
         return {
             "items": items_out,
@@ -173,7 +180,14 @@ async def batch_format_lab_assets(
     else:
         items = list(raw_lines)
     text_out = "\n".join(items)
-    assert_no_pii(text_out)
+    try:
+        assert_no_pii(text_out)
+    except PIILeakError as exc:
+        raise APIError(
+            422,
+            "pii_detected",
+            "格式化内容包含未脱敏敏感信息（身份证号或电话号码），已阻断输出",
+        ) from exc
     return {
         "tab": body.tab,
         "count": len(items),
@@ -240,23 +254,32 @@ async def export_lab_assets(
         preview = dict(latest_job.preview or {})
         raw_cover = preview.get("cover")
         cover_dict = raw_cover if isinstance(raw_cover, dict) else {}
-        project_title = (
+        raw_proj_title = (
             str(cover_dict.get("project_title") or "").strip()
             or latest_job.original_filename
             or project_title
         )
-        rel_note = str(preview.get("relationship_note") or "").strip() or None
+        project_title = scrub_free_text(raw_proj_title)[0].strip() or project_title
+        raw_rel = str(preview.get("relationship_note") or "").strip()
+        rel_note = (scrub_free_text(raw_rel)[0].strip() or None) if raw_rel else None
 
-    md = render_lab_profile_markdown(
-        project_title=project_title,
-        as_of_time=as_of_date,
-        people=people,
-        projects=projects,
-        achievements=achievements,
-        facilities=facilities,
-        relationship_note=rel_note,
-    )
-    assert_no_pii(md)
+    try:
+        md = render_lab_profile_markdown(
+            project_title=project_title,
+            as_of_time=as_of_date,
+            people=people,
+            projects=projects,
+            achievements=achievements,
+            facilities=facilities,
+            relationship_note=rel_note,
+        )
+        assert_no_pii(md)
+    except PIILeakError as exc:
+        raise APIError(
+            422,
+            "pii_detected",
+            "导出内容包含未脱敏敏感信息（身份证号或电话号码），已阻断导出",
+        ) from exc
 
     if fmt == "md":
         return Response(
@@ -298,7 +321,14 @@ async def export_lab_assets(
         doc.add_paragraph(rel_note)
 
     all_doc_text = "\n".join(p.text for p in doc.paragraphs)
-    assert_no_pii(all_doc_text)
+    try:
+        assert_no_pii(all_doc_text)
+    except PIILeakError as exc:
+        raise APIError(
+            422,
+            "pii_detected",
+            "导出内容包含未脱敏敏感信息（身份证号或电话号码），已阻断导出",
+        ) from exc
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -332,21 +362,24 @@ async def download_people_signatures_zip(
     except BasketError as exc:
         return _lab_v22_error(exc.status, exc.code, exc.message)
 
-    for sig_item in included_signatures:
-        await write_audit(
-            settings=_settings(request),
-            actor_id=user.id,
-            action="lab.signature.read",
-            resource_type="lab_person",
-            resource_id=sig_item["person_id"],
-            request_id=getattr(request.state, "request_id", None),
-            ip=_client_ip(request),
-            detail={
-                "person_id": sig_item["person_id"],
-                "sha256": sig_item["sha256"],
-                "channel": "zip",
-            },
-        )
+    if included_signatures:
+        for sig_item in included_signatures:
+            await write_audit(
+                settings=_settings(request),
+                actor_id=user.id,
+                action="lab.signature.read",
+                resource_type="lab_person",
+                resource_id=sig_item["person_id"],
+                request_id=getattr(request.state, "request_id", None),
+                ip=_client_ip(request),
+                detail={
+                    "person_id": sig_item["person_id"],
+                    "sha256": sig_item["sha256"],
+                    "channel": "zip",
+                },
+                session=session,
+            )
+        await session.commit()
 
     content_disp = build_rfc5987_content_disposition(
         "lab-signatures.zip",
@@ -396,23 +429,27 @@ async def export_selected_basket_docx(
             missing=exc.missing,
         )
 
-    for sig_item in embedded_signatures:
-        await write_audit(
-            settings=_settings(request),
-            actor_id=user.id,
-            action="lab.signature.read",
-            resource_type="lab_person",
-            resource_id=sig_item["person_id"],
-            request_id=getattr(request.state, "request_id", None),
-            ip=_client_ip(request),
-            detail={
-                "person_id": sig_item["person_id"],
-                "sha256": sig_item["sha256"],
-                "channel": "docx_export",
-            },
-        )
+    if embedded_signatures:
+        for sig_item in embedded_signatures:
+            await write_audit(
+                settings=_settings(request),
+                actor_id=user.id,
+                action="lab.signature.read",
+                resource_type="lab_person",
+                resource_id=sig_item["person_id"],
+                request_id=getattr(request.state, "request_id", None),
+                ip=_client_ip(request),
+                detail={
+                    "person_id": sig_item["person_id"],
+                    "sha256": sig_item["sha256"],
+                    "channel": "docx_export",
+                },
+                session=session,
+            )
+        await session.commit()
 
-    doc_title_safe = sanitize_filename_part(body.title or "课题申报素材汇编")
+    scrubbed_fname_title, _ = scrub_free_text(body.title or "课题申报素材汇编")
+    doc_title_safe = sanitize_filename_part(scrubbed_fname_title or "课题申报素材汇编")
     content_disp = build_rfc5987_content_disposition(
         "proposal-materials.docx",
         f"{doc_title_safe}.docx",

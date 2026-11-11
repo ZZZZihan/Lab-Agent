@@ -51,8 +51,11 @@ SURNAME_PINYIN_OVERRIDES: dict[str, str] = {
 
 def normalize_person_name(raw_name: str) -> str:
     cleaned = unicodedata.normalize("NFKC", raw_name or "")
-    cleaned = re.sub(r"[​-‏﻿\s]+", "", cleaned)
-    return cleaned
+    cleaned = re.sub(r"[•‧・∙⋅]", "·", cleaned)
+    cleaned = re.sub(r"[​-‏﻿]+", "", cleaned)
+    cleaned = re.sub(r"(?<=[A-Za-z])\s+(?=[A-Za-z])", "\x00", cleaned)
+    cleaned = re.sub(r"\s+", "", cleaned).replace("\x00", " ")
+    return cleaned.strip("· ")
 
 
 def clean_email(raw_email: str | None) -> str | None:
@@ -76,9 +79,9 @@ def name_to_pinyin(raw_name: str) -> str:
     elif name[0] in SURNAME_PINYIN_OVERRIDES:
         prefix = SURNAME_PINYIN_OVERRIDES[name[0]]
         rest = name[1:]
-    rest_syllables = lazy_pinyin(rest, style=Style.NORMAL, errors="ignore") if rest else []
+    rest_syllables = lazy_pinyin(rest, style=Style.NORMAL, errors="default") if rest else []
     combined = (prefix + "".join(rest_syllables)).lower()
-    return re.sub(r"[^a-z0-9]", "", combined)
+    return re.sub(r"[^a-z]", "", combined)[:56]
 
 
 def decide_login_identity(

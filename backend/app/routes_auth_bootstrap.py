@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import unicodedata
@@ -180,9 +181,11 @@ async def bootstrap_admin(
         staff_login = lowered_staff
 
     try:
-        validate_password(body.password, valid_email)
+        validate_password(body.password, valid_email, settings=settings)
     except ValueError as exc:
         raise APIError(422, "password_policy_violation", str(exc)) from exc
+
+    pw_hash = await asyncio.to_thread(hash_password, body.password)
 
     async with get_sessionmaker()() as session:
         await session.execute(text("SELECT pg_advisory_xact_lock(2026110901)"))
@@ -234,7 +237,7 @@ async def bootstrap_admin(
             email=valid_email,
             login_name=staff_login,
             display_name=clean_name,
-            password_hash=hash_password(body.password),
+            password_hash=pw_hash,
             role="admin",
             is_active=True,
             must_change_password_by=None,

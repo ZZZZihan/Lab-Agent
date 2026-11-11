@@ -17,7 +17,6 @@ from app.importer.fingerprint import achievement_fp, facility_fp
 from app.importer.formatters import (
     ACHIEVEMENT_KIND_LABELS,
 )
-from app.importer.pii import assert_no_pii
 from app.importer.provenance import (
     ACHIEVEMENT_MANAGED_FIELDS,
     FACILITY_MANAGED_FIELDS,
@@ -47,6 +46,7 @@ from app.routes_lab_schemas import (
     AchievementBody,
     FacilityBody,
     RestoreImportedBody,
+    _assert_outbound_no_pii,
     _require_lab_editor,
     _resolve_source_import_id,
     _scrub_str,
@@ -130,7 +130,7 @@ async def create_lab_achievement(
     serialized_ach = _serialize_achievement(
         achievement, provenance=prov_map.get(achievement.id)
     )
-    assert_no_pii(serialized_ach)
+    _assert_outbound_no_pii(serialized_ach)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -246,7 +246,7 @@ async def update_lab_achievement(
     serialized_ach = _serialize_achievement(
         achievement, provenance=prov_map.get(achievement.id)
     )
-    assert_no_pii(serialized_ach)
+    _assert_outbound_no_pii(serialized_ach)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -366,7 +366,7 @@ async def create_lab_facility(
     await session.flush()
     prov_map = await build_provenance_map(session, "facility", [facility])
     serialized_fac = _serialize_facility(facility, provenance=prov_map.get(facility.id))
-    assert_no_pii(serialized_fac)
+    _assert_outbound_no_pii(serialized_fac)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -458,7 +458,7 @@ async def update_lab_facility(
     await session.flush()
     prov_map = await build_provenance_map(session, "facility", [facility])
     serialized_fac = _serialize_facility(facility, provenance=prov_map.get(facility.id))
-    assert_no_pii(serialized_fac)
+    _assert_outbound_no_pii(serialized_fac)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -600,7 +600,7 @@ async def restore_lab_entity_imported(
         serialized = _serialize_achievement(entity, provenance=prov_map.get(entity.id))
     else:
         serialized = _serialize_facility(entity, provenance=prov_map.get(entity.id))
-    assert_no_pii(serialized)
+    _assert_outbound_no_pii(serialized)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,

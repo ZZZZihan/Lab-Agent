@@ -30,6 +30,7 @@ from app.importer.matching import (
 from app.importer.matching import (
     normalize_person_name as normalize_dossier_name,
 )
+from app.importer.pii import PIILeakError, assert_no_pii
 from app.importer.signature import validate_signature_image
 from app.models import (
     LabAchievement,
@@ -207,7 +208,7 @@ async def get_person_dossier(
     person_payload["can_edit"] = can_edit
     person_payload["name_ambiguous"] = name_ambiguous
 
-    return {
+    dossier_payload: dict[str, object] = {
         "person": person_payload,
         "can_edit": can_edit,
         "name_ambiguous": name_ambiguous,
@@ -231,6 +232,15 @@ async def get_person_dossier(
             "achievements": outputs_truncated,
         },
     }
+    try:
+        assert_no_pii(dossier_payload)
+    except PIILeakError:
+        return _lab_v22_error(
+            422,
+            "PII_DETECTED",
+            "成员档案包含未脱敏敏感信息（身份证号或电话号码），已阻断输出",
+        )
+    return dossier_payload
 
 
 def _etag_matches(header_val: str | None, sha256_hex: str) -> bool:
@@ -290,7 +300,9 @@ async def download_person_signature(
                 "sha256": person.signature_sha256,
                 "channel": "single",
             },
+            session=session,
         )
+        await session.commit()
         return Response(
             status_code=304,
             headers={
@@ -308,25 +320,29 @@ async def download_person_signature(
             "存储中的电子签名数据异常",
         )
 
+    person_id_str = str(person.id)
+    person_name = person.name
     await write_audit(
         settings=_settings(request),
         actor_id=user.id,
         action="lab.signature.read",
         resource_type="lab_person",
-        resource_id=str(person.id),
+        resource_id=person_id_str,
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "person_id": str(person.id),
+            "person_id": person_id_str,
             "sha256": check.sha256,
             "channel": "single",
         },
+        session=session,
     )
+    await session.commit()
 
     ext = MIME_TO_EXT.get(check.mime, "bin")
-    safe_name = sanitize_filename_part(person.name)
+    safe_name = sanitize_filename_part(person_name)
     content_disp = build_rfc5987_content_disposition(
-        f"signature-{person.id}.{ext}",
+        f"signature-{person_id_str}.{ext}",
         f"{safe_name}_签名.{ext}",
     )
     headers = {
@@ -353,6 +369,7 @@ async def upload_person_signature(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, object] | JSONResponse:
     user = await _user(session, actor)
+    actor_user_id = user.id
     uid = _parse_person_uuid(person_id)
     if uid is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
@@ -364,7 +381,7 @@ async def upload_person_signature(
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
 
     if actor.role != "admin" and (
-        person_pre.user_id is None or person_pre.user_id != user.id
+        person_pre.user_id is None or person_pre.user_id != actor_user_id
     ):
         return _lab_v22_error(
             403,
@@ -398,6 +415,9 @@ async def upload_person_signature(
                 "INVALID_CONTENT_LENGTH",
                 "非法的 Content-Length 请求头",
             )
+
+    # Release the read-only DB transaction before streaming client upload bytes.
+    await session.rollback()
 
     body_chunks: list[bytes] = []
     total_received = 0
@@ -473,7 +493,7 @@ async def upload_person_signature(
     )
     if person is None:
         return _lab_v22_error(404, "NOT_FOUND", "成员档案不存在")
-    if actor.role != "admin" and (person.user_id is None or person.user_id != user.id):
+    if actor.role != "admin" and (person.user_id is None or person.user_id != actor_user_id):
         return _lab_v22_error(
             403,
             "FORBIDDEN",
@@ -495,16 +515,17 @@ async def upload_person_signature(
     person.signature_updated_at = now_utc
     person.signature_source = "upload"
     await session.flush()
+    person_id_out = str(person.id)
     await write_audit(
         settings=_settings(request),
-        actor_id=user.id,
+        actor_id=actor_user_id,
         action="lab.signature.upload",
         resource_type="lab_person",
-        resource_id=str(person.id),
+        resource_id=person_id_out,
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "person_id": str(person.id),
+            "person_id": person_id_out,
             "sha256": check.sha256,
             "size": check.size,
             "mime": check.mime,
@@ -515,13 +536,13 @@ async def upload_person_signature(
     )
     await session.commit()
     return {
-        "person_id": str(person.id),
+        "person_id": person_id_out,
         "has_signature": True,
         "signature_mime": check.mime,
         "signature_sha256": check.sha256,
         "signature_updated_at": now_utc.isoformat(),
         "signature_source": "upload",
-        "signature_url": f"/api/v1/lab/people/{person.id}/signature",
+        "signature_url": f"/api/v1/lab/people/{person_id_out}/signature",
         "width": check.width,
         "height": check.height,
         "size": check.size,

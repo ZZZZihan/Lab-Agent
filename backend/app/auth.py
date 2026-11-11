@@ -40,13 +40,25 @@ UNUSABLE_PASSWORD_HASH = "!unusable"
 _DEMO_PREFIX = "labagent-demo-" + "2026-"
 
 
-def validate_password(password: str, email: str | None = None) -> None:
-    """Enforce password policy: >=12 chars, not a demo password, no email local part, >=3 char classes."""
+def validate_password(
+    password: str,
+    email: str | None = None,
+    *,
+    settings: Settings | None = None,
+) -> None:
+    """Enforce password policy: >=12 chars, not a demo/default prod password, no email local part, >=3 char classes."""
     if len(password) < 12:
         raise ValueError("密码长度至少为 12 个字符")
     lowered = password.lower()
     if lowered.startswith(_DEMO_PREFIX):
         raise ValueError("不能使用演示账号密码")
+    if (
+        settings is not None
+        and settings.app_env == "prod"
+        and settings.import_default_password
+        and password.strip() == settings.import_default_password
+    ):
+        raise ValueError("生产环境禁止使用默认公开初始口令")
     if email:
         local_part = email.split("@", 1)[0].strip().lower()
         if local_part and local_part in lowered:

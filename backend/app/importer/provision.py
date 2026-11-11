@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import csv
 import io
@@ -33,7 +34,7 @@ from app.importer.people import (
     is_valid_login_name,
     normalize_person_name,
 )
-from app.importer.pii import assert_no_pii
+from app.importer.pii import assert_no_pii, escape_csv_cell, scrub_free_text
 from app.importer.signature import persist_import_signatures
 from app.models import (
     Chunk,
@@ -48,8 +49,6 @@ from app.models import (
 )
 from app.rag.embedder import Embedder
 from app.rag.ingest import upsert_source
-
-_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 class ProvisionError(Exception):
@@ -81,14 +80,7 @@ class ProvisionRequest(BaseModel):
 
 
 def _escape_csv(value: object) -> str:
-    if value is None:
-        return ""
-    s = str(value)
-    if not s:
-        return ""
-    if s.startswith(_CSV_DANGEROUS_PREFIXES) or s.lstrip().startswith(_CSV_DANGEROUS_PREFIXES):
-        return f"'{s}"
-    return s
+    return escape_csv_cell(value)
 
 
 def render_roster_text(
@@ -202,8 +194,39 @@ async def provision_import_job(
     settings: Settings,
     embedder: Embedder,
     sync_rag: bool = True,
+    precomputed_password_hash: str | None = None,
 ) -> dict[str, object]:
     """Execute account provisioning, lab asset persistence, and RAG profile indexing."""
+    oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
+    if settings.app_env == "prod" and not oidc_mode:
+        if not body.initial_password or not body.initial_password.strip():
+            raise ProvisionError(
+                422,
+                "initial_password_required",
+                "生产环境下开号必须填写自定义初始口令，禁止使用默认公开口令",
+            )
+        if body.initial_password.strip() == settings.import_default_password:
+            raise ProvisionError(
+                422,
+                "password_policy_violation",
+                "生产环境禁止使用默认公开初始口令",
+            )
+
+    initial_password = (
+        body.initial_password.strip()
+        if body.initial_password and body.initial_password.strip()
+        else settings.import_default_password
+    )
+
+    pw_hash = precomputed_password_hash
+    if pw_hash is None:
+        if oidc_mode:
+            pw_hash = await asyncio.to_thread(
+                hash_password, f"OIDC-Only-{uuid.uuid4().hex}#99"
+            )
+        elif len(initial_password) >= 12:
+            pw_hash = await asyncio.to_thread(hash_password, initial_password)
+
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     job = await session.scalar(
         select(ImportJob).where(ImportJob.id == job_id).with_for_update()
@@ -446,22 +469,19 @@ async def provision_import_job(
                 )
         active_people.append(person)
 
-    oidc_mode = bool(settings.oidc_issuer and settings.oidc_issuer.strip())
-    initial_password = (
-        body.initial_password.strip()
-        if body.initial_password and body.initial_password.strip()
-        else settings.import_default_password
-    )
-
     if not oidc_mode:
         # Validate initial_password for every new account before touching DB
+        try:
+            validate_password(initial_password, None, settings=settings)
+        except ValueError as exc:
+            raise ProvisionError(422, "password_policy_violation", str(exc)) from exc
         for person in active_people:
             raw_match = person.get("match")
             match_info = raw_match if isinstance(raw_match, dict) else {}
             if str(match_info.get("status") or "new") == "new":
                 p_email = str(person.get("email") or "").strip().lower() or None
                 try:
-                    validate_password(initial_password, p_email)
+                    validate_password(initial_password, p_email, settings=settings)
                 except ValueError as exc:
                     raise ProvisionError(422, "password_policy_violation", str(exc)) from exc
 
@@ -504,17 +524,18 @@ async def provision_import_job(
     existing_roster_items: list[dict[str, object]] = []
     inserted_people: list[LabPerson] = []
     linked_existing_people: list[LabPerson] = []
+    pending_existing_links: list[tuple[LabPerson, uuid.UUID]] = []
     imported_people_by_key: dict[str, LabPerson] = {}
     ambiguous_person_keys: set[str] = set()
     inserted_achievements: list[LabAchievement] = []
     inserted_projects: list[LabProject] = []
     inserted_facilities: list[LabFacility] = []
 
-    pw_hash = (
-        hash_password(f"OIDC-Only-{uuid.uuid4().hex}#99")
-        if oidc_mode
-        else hash_password(initial_password)
-    )
+    if pw_hash is None:
+        pw_hash = await asyncio.to_thread(
+            hash_password,
+            f"OIDC-Only-{uuid.uuid4().hex}#99" if oidc_mode else initial_password,
+        )
 
     try:
         for person in active_people:
@@ -559,7 +580,9 @@ async def provision_import_job(
                 )
                 if user_email:
                     used_user_emails.add(user_email.lower())
+                user_id = uuid.uuid4()
                 new_user = User(
+                    id=user_id,
                     email=user_email,
                     login_name=p_login,
                     display_name=pname,
@@ -569,8 +592,6 @@ async def provision_import_job(
                     must_change_password_by=None if oidc_mode else deadline_utc,
                 )
                 session.add(new_user)
-                await session.flush()
-                user_id = new_user.id
                 users_created += 1
                 person["match"] = {
                     **match_info,
@@ -654,7 +675,7 @@ async def provision_import_job(
                         and user_id is not None
                         and user_id not in existing_person_user_ids
                     ):
-                        matched_existing_lp.user_id = user_id
+                        pending_existing_links.append((matched_existing_lp, user_id))
                         existing_person_user_ids.add(user_id)
                         existing_people_by_uid[user_id] = matched_existing_lp
                         linked_existing_people.append(matched_existing_lp)
@@ -684,13 +705,20 @@ async def provision_import_job(
                     as_of_time=as_of_date,
                     source_import_id=job.id,
                 )
-                session.add(new_person)
                 inserted_people.append(new_person)
                 existing_people_by_fp[fp_val] = new_person
                 existing_people_by_uid[user_id] = new_person
                 if pkey:
                     imported_people_by_key[pkey] = new_person
                 people_inserted += 1
+
+        # Flush newly created User rows in a single batch BEFORE adding/updating LabPerson FK references.
+        if users_created:
+            await session.flush()
+        for lp_obj, linked_uid in pending_existing_links:
+            lp_obj.user_id = linked_uid
+        if inserted_people:
+            session.add_all(inserted_people)
 
         # Achievements
         ach_inserted = 0
@@ -1174,12 +1202,14 @@ async def sync_lab_profile_rag(
         preview: dict[str, Any] = dict(target_job.preview or {})
         raw_cover = preview.get("cover")
         cover_dict: dict[str, Any] = raw_cover if isinstance(raw_cover, dict) else {}
-        project_title = (
+        raw_proj_title = (
             str(cover_dict.get("project_title") or "").strip()
             or target_job.original_filename
             or "课题组资料库档案"
         )
-        rel_note = str(preview.get("relationship_note") or "").strip() or None
+        project_title = scrub_free_text(raw_proj_title)[0].strip() or "课题组资料库档案"
+        raw_rel = str(preview.get("relationship_note") or "").strip()
+        rel_note = (scrub_free_text(raw_rel)[0].strip() or None) if raw_rel else None
         as_of_date = target_job.as_of_time or fallback_as_of
         doc_key = f"lab-profile-{target_job.id}"
         source = f"import-{target_job.id.hex[:24]}"

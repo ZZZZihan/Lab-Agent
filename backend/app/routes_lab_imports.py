@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date
 from typing import Annotated, Any
@@ -15,6 +16,7 @@ from app.audit import scrub_audit_str, write_audit
 from app.auth import Actor
 from app.db import get_session
 from app.importer.fingerprint import achievement_fp, facility_fp
+from app.importer.llm_reparse import LLMReparseError, reparse_preview_payload_with_llm
 from app.importer.parser import parse_proposal_docx, reparse_preview_payload
 from app.importer.people import assign_people_identities
 from app.importer.pii import PIILeakError, assert_no_pii
@@ -48,6 +50,7 @@ from app.routes_admin import _require_admin
 from app.routes_lab_schemas import (
     ReparseImportBody,
     UpdateImportPreviewBody,
+    _assert_outbound_no_pii,
     _recompute_inferred_projects,
     _scrub_obj,
     _scrub_str,
@@ -84,13 +87,21 @@ async def parse_proposal_upload(
                 "基准日期格式无效，请使用 YYYY-MM-DD",
             ) from exc
 
-    raw_bytes = await file.read()
+    max_file_bytes = max(1, int(settings.import_max_file_mb)) * 1024 * 1024
+    raw_bytes = await file.read(max_file_bytes + 1)
+    if len(raw_bytes) > max_file_bytes:
+        raise APIError(
+            413,
+            "import_file_too_large",
+            f"文件大小超过 {settings.import_max_file_mb}MB 上限",
+        )
     filename = (file.filename or "proposal.docx").strip()
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
 
     try:
-        parsed_bundle: dict[str, Any] = parse_proposal_docx(
+        parsed_bundle: dict[str, Any] = await asyncio.to_thread(
+            parse_proposal_docx,
             filename,
             raw_bytes,
             existing_users=existing_users,
@@ -225,7 +236,9 @@ async def get_import_job(
     job = await session.get(ImportJob, job_id)
     if job is None:
         raise APIError(404, "not_found", "导入任务不存在")
-    return _serialize_import_job(job, include_preview=True)
+    serialized = _serialize_import_job(job, include_preview=True)
+    _assert_outbound_no_pii(serialized)
+    return serialized
 
 
 @router.delete("/admin/imports/{job_id}")
@@ -523,13 +536,28 @@ async def reparse_import_job(
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
 
-    preview, recomputed_stats = reparse_preview_payload(
-        preview,
-        as_of_date=job.as_of_time,
-        mode=effective_mode,
-        existing_users=existing_users,
-        existing_people=existing_people,
-    )
+    if effective_mode == "llm":
+        try:
+            preview, recomputed_stats = await reparse_preview_payload_with_llm(
+                preview,
+                as_of_date=job.as_of_time,
+                settings=_settings(request),
+                llm_obj=getattr(request.app.state, "llm", None),
+                existing_users=existing_users,
+                existing_people=existing_people,
+            )
+        except LLMReparseError as exc:
+            status_code = 422 if exc.code == "llm_reparse_unavailable" else 502
+            raise APIError(status_code, exc.code, exc.message) from exc
+    else:
+        preview, recomputed_stats = await asyncio.to_thread(
+            reparse_preview_payload,
+            preview,
+            as_of_date=job.as_of_time,
+            mode=effective_mode,
+            existing_users=existing_users,
+            existing_people=existing_people,
+        )
     parser_ver = str(preview.get("parser_version") or "v2.1-fsm")
     job.parser_version = parser_ver
     job.preview = preview
