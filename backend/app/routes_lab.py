@@ -16,7 +16,6 @@ from app.auth import Actor
 from app.db import get_session
 from app.importer.fingerprint import person_fp, project_fp
 from app.importer.people import clean_email, normalize_person_name
-from app.importer.pii import assert_no_pii
 from app.importer.provenance import (
     PERSON_MANAGED_FIELDS,
     PROJECT_MANAGED_FIELDS,
@@ -48,6 +47,7 @@ from app.routes_lab_imports import router as imports_router
 from app.routes_lab_schemas import (
     ProjectBody,
     UpdatePersonBody,
+    _assert_outbound_no_pii,
     _require_lab_editor,
     _resolve_source_import_id,
     _scrub_str,
@@ -159,9 +159,11 @@ async def list_lab_people(
             or needle in (p.bio or "").lower()
         ]
     prov_map = await build_provenance_map(session, "person", rows)
-    return {
+    out_people: dict[str, object] = {
         "people": [_serialize_person(p, provenance=prov_map.get(p.id)) for p in rows]
     }
+    _assert_outbound_no_pii(out_people)
+    return out_people
 
 
 @router.get("/lab/projects")
@@ -194,9 +196,11 @@ async def list_lab_projects(
             or needle in (p.relationship_note or "").lower()
         ]
     prov_map = await build_provenance_map(session, "project", rows)
-    return {
+    out_projects: dict[str, object] = {
         "projects": [_serialize_project(p, provenance=prov_map.get(p.id)) for p in rows]
     }
+    _assert_outbound_no_pii(out_projects)
+    return out_projects
 
 
 @router.get("/lab/achievements")
@@ -230,11 +234,13 @@ async def list_lab_achievements(
             or needle in (a.raw_text or "").lower()
         ]
     prov_map = await build_provenance_map(session, "achievement", rows)
-    return {
+    out_achievements: dict[str, object] = {
         "achievements": [
             _serialize_achievement(a, provenance=prov_map.get(a.id)) for a in rows
         ]
     }
+    _assert_outbound_no_pii(out_achievements)
+    return out_achievements
 
 
 @router.get("/lab/facilities")
@@ -264,11 +270,13 @@ async def list_lab_facilities(
             or needle in (f.raw_text or "").lower()
         ]
     prov_map = await build_provenance_map(session, "facility", rows)
-    return {
+    out_facilities: dict[str, object] = {
         "facilities": [
             _serialize_facility(f, provenance=prov_map.get(f.id)) for f in rows
         ]
     }
+    _assert_outbound_no_pii(out_facilities)
+    return out_facilities
 
 
 
@@ -437,7 +445,7 @@ async def update_lab_person(
 
     prov_map = await build_provenance_map(session, "person", [person])
     serialized_person = _serialize_person(person, provenance=prov_map.get(person.id))
-    assert_no_pii(serialized_person)
+    _assert_outbound_no_pii(serialized_person)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -557,7 +565,7 @@ async def create_lab_project(
     await session.flush()
     prov_map = await build_provenance_map(session, "project", [project])
     serialized_proj = _serialize_project(project, provenance=prov_map.get(project.id))
-    assert_no_pii(serialized_proj)
+    _assert_outbound_no_pii(serialized_proj)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,
@@ -715,7 +723,7 @@ async def update_lab_project(
     await session.flush()
     prov_map = await build_provenance_map(session, "project", [project])
     serialized_proj = _serialize_project(project, provenance=prov_map.get(project.id))
-    assert_no_pii(serialized_proj)
+    _assert_outbound_no_pii(serialized_proj)
 
     doc_key, _ = await sync_lab_profile_rag(
         session,

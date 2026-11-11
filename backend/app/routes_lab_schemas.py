@@ -23,7 +23,7 @@ from app.importer.formatters import (
     format_project_application,
 )
 from app.importer.people import normalize_person_name
-from app.importer.pii import scrub_free_text
+from app.importer.pii import PIILeakError, assert_no_pii, scrub_free_text
 from app.importer.provenance import (
     fallback_entity_provenance_summary,
 )
@@ -199,6 +199,20 @@ def _scrub_str(val: str | None) -> str | None:
         return None
     scrubbed, _ = scrub_free_text(val)
     return scrubbed.strip() or None
+
+
+def _assert_outbound_no_pii(
+    payload: str | dict[str, object] | list[object],
+) -> None:
+    """Enforce zero unredacted PII on outbound API payloads (422 pii_detected)."""
+    try:
+        assert_no_pii(payload)
+    except PIILeakError as exc:
+        raise APIError(
+            422,
+            "pii_detected",
+            "输出内容包含未脱敏敏感信息（身份证号或电话号码），已阻断输出",
+        ) from exc
 
 
 def _scrub_obj(obj: Any) -> Any:

@@ -25,6 +25,12 @@ from app.importer.formatters import (
     format_person_application,
     format_project_application,
 )
+from app.importer.pii import (
+    PIILeakError,
+    assert_no_pii,
+    escape_csv_cell,
+    scrub_free_text,
+)
 from app.importer.signature import validate_signature_image
 from app.models import LabAchievement, LabFacility, LabPerson, LabProject
 
@@ -41,7 +47,6 @@ MIME_TO_EXT: dict[str, str] = {
 
 SAFE_FILENAME_CHAR_RE = re.compile(r"[^一-龥A-Za-z0-9_-]+")
 XML_ILLEGAL_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")
-_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 def sanitize_xml_text(text: str | None) -> str:
@@ -75,16 +80,7 @@ class BasketError(Exception):
 
 
 def _escape_csv_cell(value: object) -> str:
-    if value is None:
-        return ""
-    s = str(value)
-    if not s:
-        return ""
-    if s.startswith(_CSV_DANGEROUS_PREFIXES) or s.lstrip().startswith(
-        _CSV_DANGEROUS_PREFIXES
-    ):
-        return f"'{s}"
-    return s
+    return escape_csv_cell(value)
 
 
 def sanitize_filename_part(raw_name: str | None) -> str:
@@ -593,7 +589,8 @@ async def build_selected_docx(
     internal_items: list[dict[str, Any]] = batch_res["_internal_items"]  # type: ignore[assignment]
     sections: list[dict[str, Any]] = batch_res["_sections"]  # type: ignore[assignment]
 
-    doc_title = sanitize_xml_text(title).strip() or "课题申报素材汇编"
+    scrubbed_title, _ = scrub_free_text(sanitize_xml_text(title))
+    doc_title = scrubbed_title.strip() or "课题申报素材汇编"
     shanghai_today = datetime.now(UTC).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
     doc = docx.Document()
@@ -699,6 +696,20 @@ async def build_selected_docx(
             except Exception:
                 row_cells[3].text = "（签名数据异常，已跳过）"
                 warnings_count += 1
+
+    doc_text_parts = [p.text for p in doc.paragraphs]
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                doc_text_parts.append(cell.text)
+    try:
+        assert_no_pii("\n".join(doc_text_parts))
+    except PIILeakError as exc:
+        raise BasketError(
+            422,
+            "PII_DETECTED",
+            "导出内容包含未脱敏敏感信息（身份证号或电话号码），已阻断导出",
+        ) from exc
 
     out_buf = io.BytesIO()
     doc.save(out_buf)

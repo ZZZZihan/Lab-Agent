@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import bisect
 import codecs
+import contextlib
 import hashlib
 import io
 import posixpath
 import re
 import struct
+import threading
 import unicodedata
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -38,39 +41,64 @@ MAX_EMBEDDED_IMAGE_READ_BYTES = 2_097_152 + 1  # Read up to 2 MiB + 1 byte to tr
 MAX_IMPORT_IMAGE_COUNT = 64
 MAX_IMPORT_DEDUP_IMAGE_BYTES = 32 * 1024 * 1024  # 32 MiB
 
-# Configure striprtf table/structure markers using Unicode Private Use Area codepoints so user text never collides
+# Configure striprtf table/structure markers using Unicode Private Use Area codepoints so user text never collides,
+# without mutating striprtf module globals outside scoped _patched_striprtf() calls.
 _RTF_PAR_TOK = "\uf00d"
 _RTF_CELL_TOK = "\uf007"
 _RTF_ROW_TOK = "\uf01e"
 _RTF_TROWD_TOK = "\uf01d"
 
-_striprtf.charset_map[134] = "gb18030"
-_striprtf.HYPERLINKS = re.compile(r"(?!x)(x)(x)")
-_striprtf.FONTTABLE = re.compile(
+_RTF_LOCK = threading.RLock()
+_ORIG_STRIPRTF_CHARSET_MAP = dict(_striprtf.charset_map)
+_ORIG_STRIPRTF_HYPERLINKS = _striprtf.HYPERLINKS
+_ORIG_STRIPRTF_FONTTABLE = _striprtf.FONTTABLE
+_ORIG_STRIPRTF_SPECIALCHARS = dict(_striprtf.specialchars)
+_ORIG_STRIPRTF_DESTINATIONS = frozenset(_striprtf.destinations)
+
+_RTF_CHARSET_MAP: dict[int, str] = {**_ORIG_STRIPRTF_CHARSET_MAP, 134: "gb18030"}
+_RTF_HYPERLINKS = re.compile(r"(?!x)(x)(x)")
+_RTF_FONTTABLE = re.compile(
     r"\\f(\d+)(?:[^{};]|\{[^{}]*\})*?\\fcharset(\d+)(?:[^{};]|\{[^{}]*\})*?([^;{}]+);"
 )
-_striprtf.specialchars.update(
-    {
-        "par": _RTF_PAR_TOK,
-        "sect": _RTF_PAR_TOK,
-        "page": _RTF_PAR_TOK,
-        "line": "\n",
-        "cell": _RTF_CELL_TOK,
-        "nestcell": _RTF_CELL_TOK,
-        "row": _RTF_ROW_TOK,
-        "nestrow": _RTF_ROW_TOK,
-        "trowd": _RTF_TROWD_TOK,
-        "-": "",
-        "_": "-",
-        "zwj": "\u200d",
-        "zwnj": "\u200c",
-        "ltrmark": "\u200e",
-        "rtlmark": "\u200f",
-        "zwbo": "\u200b",
-        "zwnbo": "\ufeff",
-    }
-)
-_striprtf.destinations = _striprtf.destinations - {"ud", "upr"}
+_RTF_SPECIALCHARS: dict[str, str] = {
+    **_ORIG_STRIPRTF_SPECIALCHARS,
+    "par": _RTF_PAR_TOK,
+    "sect": _RTF_PAR_TOK,
+    "page": _RTF_PAR_TOK,
+    "line": "\n",
+    "cell": _RTF_CELL_TOK,
+    "nestcell": _RTF_CELL_TOK,
+    "row": _RTF_ROW_TOK,
+    "nestrow": _RTF_ROW_TOK,
+    "trowd": _RTF_TROWD_TOK,
+    "-": "",
+    "_": "-",
+    "zwj": "\u200d",
+    "zwnj": "\u200c",
+    "ltrmark": "\u200e",
+    "rtlmark": "\u200f",
+    "zwbo": "\u200b",
+    "zwnbo": "\ufeff",
+}
+_RTF_DESTINATIONS = _ORIG_STRIPRTF_DESTINATIONS - {"ud", "upr"}
+
+
+@contextlib.contextmanager
+def _patched_striprtf() -> Iterator[None]:
+    with _RTF_LOCK:
+        _striprtf.charset_map = _RTF_CHARSET_MAP
+        _striprtf.HYPERLINKS = _RTF_HYPERLINKS
+        _striprtf.FONTTABLE = _RTF_FONTTABLE
+        _striprtf.specialchars = _RTF_SPECIALCHARS
+        _striprtf.destinations = _RTF_DESTINATIONS
+        try:
+            yield
+        finally:
+            _striprtf.charset_map = dict(_ORIG_STRIPRTF_CHARSET_MAP)
+            _striprtf.HYPERLINKS = _ORIG_STRIPRTF_HYPERLINKS
+            _striprtf.FONTTABLE = _ORIG_STRIPRTF_FONTTABLE
+            _striprtf.specialchars = dict(_ORIG_STRIPRTF_SPECIALCHARS)
+            _striprtf.destinations = _ORIG_STRIPRTF_DESTINATIONS
 
 
 @dataclass(frozen=True)
@@ -1274,8 +1302,8 @@ def _normalize_rtf_for_striprtf(s: str, default_enc: str) -> str:
             s = re.sub(r"(\\rtf\d*)", r"\1" + synth_tbl, s, count=1)
             font_tbl_str = synth_tbl
     font_enc: dict[str, str] = {}
-    for f_id, f_cs, _ in _striprtf.FONTTABLE.findall(font_tbl_str):
-        font_enc[f_id] = _striprtf.charset_map.get(int(f_cs), default_enc)
+    for f_id, f_cs, _ in _RTF_FONTTABLE.findall(font_tbl_str):
+        font_enc[f_id] = _RTF_CHARSET_MAP.get(int(f_cs), default_enc)
 
     m_deff = re.search(r"\\deff(-?\d+)(?![a-zA-Z0-9])", s[:4096])
     default_font: str | None = m_deff.group(1) if m_deff is not None else None
@@ -1426,7 +1454,7 @@ def _normalize_rtf_for_striprtf(s: str, default_enc: str) -> str:
                 continue
             if w_low == "fcharset" and arg is not None:
                 if current_font is not None:
-                    font_enc[current_font] = _striprtf.charset_map.get(int(arg), default_enc)
+                    font_enc[current_font] = _RTF_CHARSET_MAP.get(int(arg), default_enc)
                 out.append(tok)
                 continue
             if w_low == "uc" and arg is not None:
@@ -1440,7 +1468,7 @@ def _normalize_rtf_for_striprtf(s: str, default_enc: str) -> str:
                 continue
             if (
                 not (hidden or deleted)
-                or w_low in _striprtf.destinations
+                or w_low in _RTF_DESTINATIONS
                 or w_low
                 in (
                     "rtf",
@@ -1523,7 +1551,8 @@ def _parse_rtf_doc(
         default_enc,
     )
 
-    rendered = _striprtf.rtf_to_text(s, encoding=default_enc, errors="replace")
+    with _patched_striprtf():
+        rendered = _striprtf.rtf_to_text(s, encoding=default_enc, errors="replace")
     rendered = rendered.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
 
     # Convert in-cell paragraph breaks (_RTF_PAR_TOK inside a table row before _RTF_ROW_TOK) into \n
@@ -1758,21 +1787,30 @@ def validate_and_load_docx(
                         "import_uncompressed_too_large",
                         f"文档解压后大小超过 {max_uncompressed_mb}MB 安全上限",
                     )
-                try:
-                    DefusedET.fromstring(
-                        zf.read("word/document.xml"),
-                        forbid_dtd=True,
-                        forbid_entities=True,
-                        forbid_external=True,
-                    )
-                except DefusedXmlException as exc:
-                    raise DocxValidationError(
-                        415,
-                        "import_unsupported_format",
-                        "文档包含不安全的 XML 实体声明",
-                    ) from exc
-                except Exception:
-                    pass
+                for info in zf.infolist():
+                    lower_entry = info.filename.lower()
+                    if not lower_entry.endswith((".xml", ".rels")):
+                        continue
+                    try:
+                        DefusedET.fromstring(
+                            zf.read(info.filename),
+                            forbid_dtd=True,
+                            forbid_entities=True,
+                            forbid_external=True,
+                        )
+                    except DefusedXmlException as exc:
+                        raise DocxValidationError(
+                            415,
+                            "import_unsupported_format",
+                            "文档包含不安全的 XML 实体声明",
+                        ) from exc
+                    except Exception as exc:
+                        if info.filename == "word/document.xml":
+                            raise DocxValidationError(
+                                422,
+                                "import_parse_failed",
+                                "无法解析 .docx 文档结构",
+                            ) from exc
         except DocxValidationError:
             raise
         except zipfile.BadZipFile as exc:
@@ -2244,11 +2282,13 @@ def _parse_document_media_rels(zf: zipfile.ZipFile) -> dict[str, str]:
 
 def extract_body_blocks_and_images(
     raw_bytes: bytes,
+    *,
+    max_uncompressed_mb: int = 50,
 ) -> tuple[list[BodyBlock], list[EmbeddedImage]]:
     """Extract ordered `<w:body>` blocks and all embedded images with coordinates from `.docx` or `.doc` bytes."""
     if len(raw_bytes) < 4 or raw_bytes[:4] != ZIP_MAGIC:
         if _looks_like_legacy_doc_bytes(raw_bytes):
-            parsed = _parse_legacy_doc(raw_bytes)
+            parsed = _parse_legacy_doc(raw_bytes, max_uncompressed_mb=max_uncompressed_mb)
             return parsed.body_blocks, parsed.embedded_images
         return [], []
 
@@ -2430,9 +2470,20 @@ def extract_embedded_images(raw_bytes: bytes) -> list[EmbeddedImage]:
     return [img for img in images if not img.quota_exceeded]
 
 
-def extract_word_text(filename: str, raw_bytes: bytes) -> str:
+def extract_word_text(
+    filename: str,
+    raw_bytes: bytes,
+    *,
+    max_file_mb: int = 20,
+    max_uncompressed_mb: int = 50,
+) -> str:
     """Extract readable plain/markdown text (paragraphs and tables) from `.doc` or `.docx` bytes."""
-    doc = validate_and_load_docx(filename, raw_bytes)
+    doc = validate_and_load_docx(
+        filename,
+        raw_bytes,
+        max_file_mb=max_file_mb,
+        max_uncompressed_mb=max_uncompressed_mb,
+    )
     if isinstance(doc, ParsedLegacyDoc):
         blocks_out: list[str] = []
         for b in doc.body_blocks:

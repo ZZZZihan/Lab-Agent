@@ -50,6 +50,15 @@ def achievement_fp(
     return fp("ach", kind, "raw", norm(raw_text)[:200])
 
 
+_REDACTED_TOKEN_RE = re.compile(r"(?:已脱敏|redacted)", re.IGNORECASE)
+
+
+def is_redacted_placeholder(value: str | None) -> bool:
+    if not value:
+        return False
+    return bool(_REDACTED_TOKEN_RE.search(value))
+
+
 def project_fp(
     *,
     grant_no: str | None,
@@ -57,7 +66,12 @@ def project_fp(
     funder: str | None,
     warnings: list[str] | None = None,
 ) -> str:
-    if grant_no and "GRANT_NO_REDACTED" not in (warnings or []):
+    if (
+        grant_no
+        and norm(grant_no)
+        and not is_redacted_placeholder(grant_no)
+        and "GRANT_NO_REDACTED" not in (warnings or [])
+    ):
         return fp("proj", "grant", norm(grant_no))
     return fp("proj", "title", norm(title)[:120], norm(funder))
 

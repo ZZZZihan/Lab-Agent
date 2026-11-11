@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
@@ -13,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
-from app.auth import Actor
+from app.auth import Actor, hash_password
 from app.db import get_session
 from app.importer.batch_identity import resolve_batch_identities
 from app.importer.fingerprint import norm
@@ -193,6 +194,19 @@ async def batch_provision_imports(
                 "initial_password_required",
                 "生产环境下批量开号必须填写自定义初始口令，禁止使用默认公开口令",
             )
+
+    resolved_initial_pw = (
+        body.initial_password.strip()
+        if body.initial_password and body.initial_password.strip()
+        else settings.import_default_password
+    )
+    batch_pw_hash: str | None = None
+    if oidc_mode:
+        batch_pw_hash = await asyncio.to_thread(
+            hash_password, f"OIDC-Only-{uuid.uuid4().hex}#99"
+        )
+    elif len(resolved_initial_pw) >= 12:
+        batch_pw_hash = await asyncio.to_thread(hash_password, resolved_initial_pw)
 
     await session.execute(text("SELECT pg_advisory_xact_lock(2026111008)"))
     jobs: list[ImportJob] = []
@@ -573,6 +587,7 @@ async def batch_provision_imports(
                 settings=settings,
                 embedder=embedder,
                 sync_rag=False,
+                precomputed_password_hash=batch_pw_hash,
             )
         except ProvisionError as exc:
             await session.rollback()

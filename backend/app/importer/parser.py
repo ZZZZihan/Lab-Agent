@@ -9,11 +9,18 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.importer.fingerprint import achievement_fp, facility_fp, norm, project_fp
+from app.importer.fingerprint import (
+    achievement_fp,
+    facility_fp,
+    is_redacted_placeholder,
+    norm,
+    project_fp,
+)
 from app.importer.people import assign_people_identities, normalize_person_name
 from app.importer.pii import assert_no_pii, is_pii_id_or_phone, scrub_free_text
 from app.importer.reader import (
     DocxValidationError,
+    ParsedLegacyDoc,
     extract_body_blocks_and_images,
     extract_table_grid,
     iter_document_tables,
@@ -27,7 +34,32 @@ from app.models import LabPerson, User
 
 PARSER_VERSION = "v2.1-hybrid"
 
-CN_NAME_RE = re.compile(r"^[一-龥·]{2,10}$")
+CJK_IDEOGRAPH_CLASS = r"㐀-䶿一-鿿豈-﫿\U00020000-\U000323af"
+CN_NAME_RE = re.compile(
+    rf"^(?:[{CJK_IDEOGRAPH_CLASS}]{{2,20}}(?:·[{CJK_IDEOGRAPH_CLASS}]{{1,20}}){{0,3}}"
+    rf"|[{CJK_IDEOGRAPH_CLASS}]{{1,20}}(?:·[{CJK_IDEOGRAPH_CLASS}]{{1,20}}){{1,3}}"
+    r"|[^\W\d_][^\W\d_ .'-]{0,62}[^\W\d_.]\.?)$"
+)
+NON_PERSON_NAME_LABELS: frozenset[str] = frozenset(
+    {
+        "姓名",
+        "成员姓名",
+        "项目组成员",
+        "主要参加者",
+        "主要参与者",
+        "申请人",
+        "项目申请人",
+        "课题负责人",
+        "项目负责人",
+        "负责人",
+        "无",
+        "空",
+        "略",
+        "合计",
+        "签字",
+        "盖章",
+    }
+)
 SKIP_ROW_KEYWORDS = ("合计", "签字", "盖章", "以下空白", "申请资助经费", "预计完成时间")
 
 ANCHOR_RE = re.compile(
@@ -40,7 +72,7 @@ ITEM_SPLIT_RE = re.compile(
 )
 
 GRANT_NO_AFTER_TITLE_RE = re.compile(
-    r"^[（(]\s*([A-Za-z0-9一-龥][A-Za-z0-9一-龥_-]{2,24})\s*[)）]"
+    rf"^[（(]\s*([A-Za-z0-9{CJK_IDEOGRAPH_CLASS}][A-Za-z0-9{CJK_IDEOGRAPH_CLASS}_-]{{2,24}})\s*[)）]"
 )
 GRANT_NO_INLINE_RE = re.compile(
     r"(?:批准号|项目编号|编号|立项号)?[:：]?\s*"
@@ -170,7 +202,13 @@ def parse_proposal_docx(
         existing_people=existing_people,
     )
 
-    body_blocks, embedded_images = extract_body_blocks_and_images(raw_bytes)
+    if isinstance(doc, ParsedLegacyDoc):
+        body_blocks, embedded_images = doc.body_blocks, doc.embedded_images
+    else:
+        body_blocks, embedded_images = extract_body_blocks_and_images(
+            raw_bytes,
+            max_uncompressed_mb=max_uncompressed_mb,
+        )
     signatures, sig_blobs, sig_warnings = bind_proposal_signatures(
         people=people,
         grids=grids,
@@ -232,6 +270,19 @@ def parse_proposal_docx(
     }
 
 
+def _scrub_reparse_obj(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return scrub_free_text(obj)[0]
+    if isinstance(obj, dict):
+        return {
+            k: (v if str(k).startswith("_") else _scrub_reparse_obj(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_scrub_reparse_obj(it) for it in obj]
+    return obj
+
+
 def reparse_preview_payload(
     preview: dict[str, Any],
     *,
@@ -241,6 +292,7 @@ def reparse_preview_payload(
     existing_people: list[LabPerson] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Re-run extraction on `source_snapshot` (or fallback `raw_text`) and refresh identities."""
+    preview = _scrub_reparse_obj(preview)
     snapshot = preview.get("source_snapshot")
     if isinstance(snapshot, dict):
         raw_cover = snapshot.get("cover")
@@ -511,6 +563,37 @@ MEMBER_HEADER_MAP: dict[str, str] = {
 }
 
 
+_FORM_HEADER_LABELS_LOWER: frozenset[str] = (
+    frozenset(lbl.lower() for lbl in NON_PERSON_NAME_LABELS)
+    | frozenset(APPLICANT_KV_MAP.keys())
+    | frozenset(normalize_label(k).lower() for k in MEMBER_HEADER_MAP)
+)
+
+
+def _is_plausible_person_name(raw_name: str) -> bool:
+    name = normalize_person_name(raw_name)
+    if not (2 <= len(name) <= 64):
+        return False
+    lbl = normalize_label(name).lower()
+    if (
+        name in NON_PERSON_NAME_LABELS
+        or lbl in _FORM_HEADER_LABELS_LOWER
+        or any(kw in name for kw in SKIP_ROW_KEYWORDS)
+    ):
+        return False
+    if any(ch.isdigit() for ch in name):
+        return False
+    if not name[0].isalpha() or not (name[-1].isalpha() or name[-1] == "."):
+        return False
+    alpha_count = 0
+    for ch in name:
+        if ch.isalpha():
+            alpha_count += 1
+        elif ch not in " ·.'-":
+            return False
+    return alpha_count >= 2
+
+
 def _is_member_header_row(row: list[str]) -> bool:
     labels = [normalize_label(c) for c in row if c.strip()]
     if any(lbl in ("男", "女") for lbl in labels):
@@ -598,7 +681,8 @@ def _extract_people(
 
         applicant["warnings"] = applicant_warnings
         applicant["source"] = {"table_index": tbl_idx, "row_index": applicant_row_idx}
-        if applicant.get("name"):
+        app_name = str(applicant.get("name") or "")
+        if _is_plausible_person_name(app_name):
             people.append(applicant)
 
         # 2) Parse Member table rows starting at header_row_idx + 1
@@ -675,7 +759,7 @@ def _extract_people(
                         member[target] = val
 
                 raw_name = str(member.get("name") or "")
-                if not raw_name or not CN_NAME_RE.match(raw_name):
+                if not _is_plausible_person_name(raw_name):
                     continue
                 member["warnings"] = mem_warnings
                 people.append(member)
@@ -898,11 +982,11 @@ def _parse_achievement_item(raw_item: str, *, index: int) -> dict[str, object]:
     item_warnings: list[str] = []
 
     m_lead = re.match(
-        r"^([一-龥·]{2,10})\s*(?:[（(]第一[)）])?\s*[:：]\s*(.+)$",
+        rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,10}})\s*(?:[（(]第一[)）])?\s*[:：]\s*(.+)$",
         first_sentence,
     )
     if m_lead:
-        first_author = normalize_person_name(m_lead.group(1))
+        first_author = normalize_person_name(m_lead.group(1))[:64]
         authors_text = first_author
         remainder = m_lead.group(2).strip()
         parts = [p.strip() for p in re.split(r"[，,]", remainder) if p.strip()]
@@ -940,9 +1024,9 @@ def _parse_achievement_item(raw_item: str, *, index: int) -> dict[str, object]:
             title = first_sentence[:200]
             parse_quality = "raw"
             item_warnings.append("ACHIEVEMENT_RAW")
-        m_author = re.match(r"^([一-龥·]{2,6})", first_sentence)
+        m_author = re.match(rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})", first_sentence)
         if m_author:
-            first_author = normalize_person_name(m_author.group(1))
+            first_author = normalize_person_name(m_author.group(1))[:64]
             authors_text = first_author
         years = re.findall(r"((?:19|20)\d{2})", first_sentence)
         if years:
@@ -1002,6 +1086,12 @@ def _parse_project_item(
         m_inline = GRANT_NO_INLINE_RE.search(text)
         if m_inline:
             grant_no = m_inline.group(1).strip()
+    if grant_no and is_redacted_placeholder(grant_no):
+        grant_no = None
+        if "GRANT_NO_REDACTED" not in item_warnings:
+            item_warnings.append("GRANT_NO_REDACTED")
+    elif grant_no:
+        grant_no = grant_no[:64]
 
     after_title = after_title.lstrip("，,。；; ")
     segments = [
@@ -1018,19 +1108,19 @@ def _parse_project_item(
     for seg in segments:
         if pi_name is None:
             m_host = re.match(
-                r"^(?:主持人|负责人)?[:：]?\s*([一-龥·]{2,6})\s*(?:[（(]?主持[)）]?|负责人)$",
+                rf"^(?:主持人|负责人)?[:：]?\s*([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})\s*(?:[（(]?主持[)）]?|负责人)$",
                 seg,
             )
             if m_host:
-                pi_name = normalize_person_name(m_host.group(1))
+                pi_name = normalize_person_name(m_host.group(1))[:64]
                 lab_role = "host"
                 continue
             m_part = re.match(
-                r"^([一-龥·]{2,6})\s*[（(]?(?:参与|参加)[)）]?$",
+                rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})\s*[（(]?(?:参与|参加)[)）]?$",
                 seg,
             )
             if m_part:
-                pi_name = normalize_person_name(m_part.group(1))
+                pi_name = normalize_person_name(m_part.group(1))[:64]
                 lab_role = "participant"
                 continue
 
@@ -1072,7 +1162,7 @@ def _parse_project_item(
             )
             and len(seg) >= 2
         ):
-            funder = seg
+            funder = seg[:255]
 
     status = "unknown"
     status_source = "inferred"
@@ -1124,33 +1214,75 @@ def _extract_facilities(
             if not any(k in joined for k in ("设备费", "计算加速设备", "服务器", "算力", "实验环境")):
                 continue
             # Check if this is a budget table row like ['直接费用', '3', '设备费', '8.00', '用于...']
-            if any(normalize_label(c) == "设备费" for c in row):
-                raw_desc = row[-1] if len(row) >= 3 else joined
+            equip_indices = [
+                idx for idx, c in enumerate(row) if normalize_label(c) == "设备费"
+            ]
+            if equip_indices:
+                equip_idx = equip_indices[0]
+                raw_desc = (
+                    row[-1]
+                    if (len(row) >= 3 and len(row) - 1 > equip_idx)
+                    else joined
+                )
                 scrubbed_desc, cnt = scrub_free_text(raw_desc)
                 pii_total += cnt
                 value_wan: str | None = None
-                for c in row:
-                    if re.match(r"^\d+(?:\.\d+)?$", c.strip()):
+                saw_zero_amount = False
+                amount_cells = (
+                    row[equip_idx + 1 : -1]
+                    if len(row) - 1 > equip_idx + 1
+                    else row[equip_idx + 1 :]
+                )
+                for c in amount_cells:
+                    m_amt = re.match(r"^(\d+(?:\.\d+)?)\s*(?:万元|万)?$", c.strip())
+                    if m_amt:
                         try:
-                            dec = Decimal(c.strip())
+                            dec = Decimal(m_amt.group(1))
                             if dec > 0:
                                 value_wan = f"{dec:.2f}"
+                                break
+                            saw_zero_amount = True
                         except InvalidOperation:
                             pass
-                name = "人工智能计算加速设备及配套部件"
-                m_name = re.search(r"所需的([^；;。，,]+)", scrubbed_desc)
-                if m_name:
-                    name = m_name.group(1).strip()
-                usage: str | None = scrubbed_desc
-                m_usage = re.search(r"用于(.+?)所需的", scrubbed_desc)
-                if m_usage:
-                    usage = m_usage.group(1).strip()
+                desc_clean = scrubbed_desc.strip()
+                if (value_wan is None and saw_zero_amount) or (
+                    desc_clean in ("", "无", "无。", "-", "—", "/", "0", "0.00")
+                    or any(
+                        neg in desc_clean
+                        for neg in ("无新购", "无购置", "不购置", "不新购", "无需购置")
+                    )
+                ):
+                    continue
                 category = (
                     "compute"
                     if any(k in scrubbed_desc for k in ("计算", "算力", "推理", "微调", "GPU"))
                     else "equipment"
                 )
                 spec = re.split(r"[；;]", scrubbed_desc)[0].strip()
+                m_name = re.search(r"所需的([^；;。，,]+)", scrubbed_desc)
+                m_verb_name = (
+                    None
+                    if m_name
+                    else re.search(
+                        r"(?:购置|采购|配置|配备)([^；;。，,]{2,30})", scrubbed_desc
+                    )
+                )
+                if m_name and m_name.group(1).strip():
+                    name = m_name.group(1).strip()
+                elif m_verb_name and m_verb_name.group(1).strip():
+                    name = m_verb_name.group(1).strip()
+                elif 2 <= len(spec) <= 30:
+                    name = spec
+                else:
+                    name = (
+                        "计算与实验支撑设备"
+                        if category == "compute"
+                        else "科研仪器与支撑设备"
+                    )
+                usage: str | None = scrubbed_desc
+                m_usage = re.search(r"用于(.+?)所需的", scrubbed_desc)
+                if m_usage:
+                    usage = m_usage.group(1).strip()
                 fp_val = facility_fp(category=category, name=name, spec=spec)
                 if fp_val not in seen_fps:
                     seen_fps.add(fp_val)

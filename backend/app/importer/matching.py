@@ -20,7 +20,7 @@ PARTICIPANT_CLAUSE_RE = re.compile(
     r"(?:主要参与人|参与人员|参与成员|课题组成员|项目组成员|参与人|参加人|成员)\s*[:：]\s*([^。；;\n]+)"
 )
 PARTICIPANT_INLINE_RE = re.compile(
-    r"([一-龥·•．⋅∙・\s、，,]{2,40}?)\s*[（(]?(?:参与|参加)[)）]?(?=[，,。；;\s]|$)"
+    r"([㐀-䶿一-鿿豈-﫿\U00020000-\U000323af·•．⋅∙・\s、，,]{2,40}?)\s*[（(]?(?:参与|参加)[)）]?(?=[，,。；;\s]|$)"
 )
 
 NOISE_TOKENS: frozenset[str] = frozenset(
@@ -75,8 +75,7 @@ def normalize_person_name(raw: str | None) -> str:
         text = TRAILING_PAREN_RE.sub("", text)
         text = TRAILING_MARK_RE.sub("", text)
 
-    text = "".join(ch.lower() if ch.isascii() else ch for ch in text)
-    return text
+    return text.lower()
 
 
 def split_names(raw: str | None) -> list[str]:

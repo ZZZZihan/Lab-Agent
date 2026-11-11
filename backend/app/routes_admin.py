@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from typing import Annotated
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit import write_audit
 from app.auth import Actor, hash_password, validate_password
 from app.db import get_session
+from app.importer.people import clean_email
 from app.models import Group, GroupMember, User
 from app.routes import APIError, _actor, _client_ip, _settings
 
@@ -134,17 +136,18 @@ async def create_user(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, object]:
     await _require_admin(request, actor, operation="create_user")
-    email = body.email.strip().lower()
+    settings = _settings(request)
+    email = clean_email(body.email)
     display_name = body.display_name.strip()
     role = body.role.strip()
-    if not email or "@" not in email:
+    if email is None or len(email) > 320:
         raise APIError(400, "invalid_email", "请输入有效的邮箱地址")
-    if not display_name:
-        raise APIError(400, "invalid_display_name", "姓名不能为空")
+    if not display_name or len(display_name) > 120:
+        raise APIError(400, "invalid_display_name", "姓名不能为空且不超过 120 个字符")
     if role not in ALLOWED_ROLES:
         raise APIError(400, "invalid_role", "角色必须是 admin、member 或 viewer")
     try:
-        validate_password(body.password, email)
+        validate_password(body.password, email, settings=settings)
     except ValueError as exc:
         raise APIError(400, "weak_password", str(exc)) from exc
 
@@ -152,18 +155,19 @@ async def create_user(
     if existing is not None:
         raise APIError(409, "email_exists", "该邮箱已存在")
 
+    pw_hash = await asyncio.to_thread(hash_password, body.password)
     user = User(
         email=email,
         display_name=display_name,
         role=role,
-        password_hash=hash_password(body.password),
+        password_hash=pw_hash,
         is_active=True,
     )
     session.add(user)
     await session.flush()
     serialized = _serialize_user(user)
     await write_audit(
-        settings=_settings(request),
+        settings=settings,
         actor_id=actor.id,
         action="user_created",
         resource_type="user",
@@ -201,8 +205,8 @@ async def update_user(
 
     if body.display_name is not None:
         new_name = body.display_name.strip()
-        if not new_name:
-            raise APIError(400, "invalid_display_name", "姓名不能为空")
+        if not new_name or len(new_name) > 120:
+            raise APIError(400, "invalid_display_name", "姓名不能为空且不超过 120 个字符")
         if new_name != user.display_name:
             user.display_name = new_name
             changed_fields.append("display_name")
@@ -257,16 +261,17 @@ async def reset_user_password(
     if user is None:
         raise APIError(404, "not_found", "用户不存在")
 
+    settings = _settings(request)
     try:
-        validate_password(body.password, user.email)
+        validate_password(body.password, user.email, settings=settings)
     except ValueError as exc:
         raise APIError(400, "weak_password", str(exc)) from exc
 
-    user.password_hash = hash_password(body.password)
+    user.password_hash = await asyncio.to_thread(hash_password, body.password)
     user.must_change_password_by = None
     await session.flush()
     await write_audit(
-        settings=_settings(request),
+        settings=settings,
         actor_id=actor.id,
         action="user_password_reset",
         resource_type="user",
