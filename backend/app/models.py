@@ -367,8 +367,10 @@ class LabPerson(Base):
     signature_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
     as_of_time: Mapped[date] = mapped_column(Date)
-    source_import_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    source_import_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -402,8 +404,10 @@ class LabAchievement(Base):
     parse_quality: Mapped[str] = mapped_column(String(16), default="structured")
     entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
     as_of_time: Mapped[date] = mapped_column(Date)
-    source_import_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    source_import_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -441,8 +445,10 @@ class LabProject(Base):
     raw_text: Mapped[str] = mapped_column(Text)
     entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
     as_of_time: Mapped[date] = mapped_column(Date)
-    source_import_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    source_import_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -463,8 +469,10 @@ class LabFacility(Base):
     raw_text: Mapped[str] = mapped_column(Text)
     entity_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
     as_of_time: Mapped[date] = mapped_column(Date)
-    source_import_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("import_jobs.id", ondelete="CASCADE")
+    source_import_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

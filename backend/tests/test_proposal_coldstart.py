@@ -1368,8 +1368,8 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_bad_link.status_code == 409
     assert r_bad_link.json()["error"]["code"] == "import_not_provisioned"
 
-    # Creating manual project, achievement, facility without explicit source_import_id creates
-    # a safe `provisioned` placeholder job rather than attaching to `parsed_job_id`
+    # Creating manual project, achievement, facility without explicit source_import_id keeps
+    # `source_import_id=None` without fabricating a dummy ImportJob or attaching to `parsed_job_id`
     r_man_proj = await client.post(
         "/api/v1/lab/projects",
         json={
@@ -1384,7 +1384,7 @@ async def test_codex_review_regressions(client: AsyncClient) -> None:
     assert r_man_proj.status_code == 200, r_man_proj.text
     man_proj_id = r_man_proj.json()["project"]["id"]
     placeholder_doc_key = r_man_proj.json()["rag_doc_key"]
-    assert r_man_proj.json()["project"]["source_import_id"] != parsed_job_id
+    assert r_man_proj.json()["project"]["source_import_id"] is None
 
     r_man_ach = await client.post(
         "/api/v1/lab/achievements",
