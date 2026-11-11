@@ -2176,23 +2176,33 @@ async def execute_merge(
         d.change_key: d.action for d in body.decisions
     }
 
-    # Verify all same_time_conflict items have an explicit decision
-    for ch in changes_list:
-        if ch.get("category") == "same_time_conflict":
-            chosen = _lookup_decision(decisions_map, ch)
-            if chosen not in ("adopt_incoming", "keep_current", "force_adopt"):
-                raise ProvisionError(
-                    422,
-                    "merge_conflict_unresolved",
-                    f"同时间冲突字段尚未裁决: {ch.get('change_key')}",
-                )
-
     change_by_ef: dict[tuple[str, uuid.UUID, str], dict[str, object]] = {}
     for ch in changes_list:
         etype = str(ch.get("entity_type") or "")
         eid = uuid.UUID(str(ch["entity_id"]))
         fld = str(ch.get("field") or "")
         change_by_ef[(etype, eid, fld)] = ch
+
+    # Verify all same_time_conflict items have an explicit decision
+    for ch in changes_list:
+        if ch.get("category") == "same_time_conflict":
+            chosen = _lookup_decision(decisions_map, ch)
+            if (
+                chosen not in ("adopt_incoming", "keep_current", "force_adopt")
+                and ch.get("entity_type") == "project"
+                and ch.get("field") == "status_source"
+            ):
+                companion_status_ch = change_by_ef.get(
+                    ("project", uuid.UUID(str(ch["entity_id"])), "status")
+                )
+                if companion_status_ch is not None:
+                    chosen = _lookup_decision(decisions_map, companion_status_ch)
+            if chosen not in ("adopt_incoming", "keep_current", "force_adopt"):
+                raise ProvisionError(
+                    422,
+                    "merge_conflict_unresolved",
+                    f"同时间冲突字段尚未裁决: {ch.get('change_key')}",
+                )
 
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(
@@ -2258,6 +2268,9 @@ async def execute_merge(
         nonlocal updated_fields_count, kept_fields_count, forced_fields_count
         prior_affiliation = getattr(entity, "affiliation", None)
         prior_email = getattr(entity, "email", None)
+        forced_project_status = False
+        adopted_project_status = False
+        kept_project_status = False
         unforced_project_status = False
 
         def _supersede_companion_status_source() -> None:
@@ -2265,13 +2278,13 @@ async def execute_merge(
             if entity_type != "project":
                 return
             unforced_project_status = True
-            for old_ss_mr in by_ef.get(("project", entity.id, "status_source"), []):
+            for old_ss_r in by_ef.get(("project", entity.id, "status_source"), []):
                 if (
-                    old_ss_mr.source_job_id == job.id
-                    and old_ss_mr.source_kind == "manual"
-                    and not old_ss_mr.superseded
+                    old_ss_r.source_job_id == job.id
+                    and old_ss_r.source_kind in ("manual", "import")
+                    and not old_ss_r.superseded
                 ):
-                    old_ss_mr.superseded = True
+                    old_ss_r.superseded = True
 
         for field in MANAGED_FIELDS[entity_type]:
             inc_val = incoming_fields.get(field)
@@ -2314,14 +2327,45 @@ async def execute_merge(
             if (
                 entity_type == "project"
                 and field == "status_source"
-                and unforced_project_status
+                and forced_project_status
+            ):
+                for old_r in prior_job_rows:
+                    old_r.superseded = True
+                await session.flush()
+                continue
+
+            if (
+                entity_type == "project"
+                and field == "status_source"
+                and adopted_project_status
+            ):
+                for old_mr in prior_job_manual_rows:
+                    old_mr.superseded = True
+                for old_r in prior_job_rows:
+                    old_r.superseded = True
+                await session.flush()
+                eff = effective_value(f_rows)
+                eff_val = eff.value if eff is not None else None
+                if eff_val != cur_val:
+                    set_entity_field_from_json(entity_type, entity, field, eff_val)
+                    updated_fields_count += 1
+                continue
+
+            if (
+                entity_type == "project"
+                and field == "status_source"
+                and (unforced_project_status or kept_project_status)
             ):
                 imp_row.superseded = True
+                for old_r in prior_job_rows:
+                    old_r.superseded = True
+                await session.flush()
+                continue
 
             explicit_decision = (
                 _lookup_decision(decisions_map, ch) if ch is not None else None
             )
-            if ch is None and prior_job_manual_rows:
+            if ch is None and (prior_job_manual_rows or prior_job_rows):
                 synth_item: dict[str, object] = {
                     "change_key": f"{entity_type}:{entity.id}:{field}",
                     "fingerprint_key": f"{entity_type}:{entity.entity_fingerprint}:{field}",
@@ -2334,6 +2378,8 @@ async def execute_merge(
                 if _lookup_decision(decisions_map, synth_item) == "keep_current":
                     for old_mr in prior_job_manual_rows:
                         old_mr.superseded = True
+                    for old_r in prior_job_rows:
+                        old_r.superseded = True
                     if field == "status":
                         _supersede_companion_status_source()
                     imp_row.superseded = True
@@ -2392,7 +2438,17 @@ async def execute_merge(
                             ).append(ss_man_row)
                             incoming_fields["status_source"] = "explicit"
                             entity.status_source = "explicit"
+                            forced_project_status = True
+                    elif chosen_act == "adopt_incoming":
+                        if (
+                            cat == "same_time_conflict"
+                            and entity_type == "project"
+                            and field == "status"
+                        ):
+                            adopted_project_status = True
                     elif chosen_act == "keep_current":
+                        if entity_type == "project" and field == "status":
+                            kept_project_status = True
                         if explicit_decision == "keep_current":
                             for old_mr in prior_job_manual_rows:
                                 old_mr.superseded = True
@@ -2400,17 +2456,22 @@ async def execute_merge(
                                 _supersede_companion_status_source()
                         if cat == "same_time_conflict":
                             imp_row.superseded = True
-                elif cat in ("updated", "fill_blank") and chosen_act == "keep_current":
-                    if explicit_decision == "keep_current":
-                        for old_mr in prior_job_manual_rows:
-                            old_mr.superseded = True
-                        if field == "status":
-                            _supersede_companion_status_source()
-                    imp_row.superseded = True
+                elif cat in ("updated", "fill_blank"):
+                    if chosen_act == "adopt_incoming":
+                        if entity_type == "project" and field == "status":
+                            adopted_project_status = True
+                    elif chosen_act == "keep_current":
+                        if entity_type == "project" and field == "status":
+                            kept_project_status = True
+                        if explicit_decision == "keep_current":
+                            for old_mr in prior_job_manual_rows:
+                                old_mr.superseded = True
+                            if field == "status":
+                                _supersede_companion_status_source()
+                        imp_row.superseded = True
 
-            if not imp_row.superseded:
-                for old_r in prior_job_rows:
-                    old_r.superseded = True
+            for old_r in prior_job_rows:
+                old_r.superseded = True
 
             await session.flush()
             eff = effective_value(f_rows)

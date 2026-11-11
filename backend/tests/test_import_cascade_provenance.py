@@ -461,6 +461,125 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
     assert age_unforced["status"] == "completed"
     assert age_unforced["status_source"] == "inferred"
 
+    # 3b. Equal-date (same_time_conflict) force_adopt -> keep_current also supersedes prior same-job import rows
+    job_same = await _upload_job(
+        client,
+        headers,
+        _build_proposal_docx(
+            fill_date_str="2025 年 6 月 1 日",
+            project_title="同日期不同本子冲突测试",
+            wan_title="教授",
+            wan_tutor="硕士生导师",
+        ),
+        "same-2026.docx",
+        "2026-06-01",
+    )
+    mp_same = (
+        await client.post(
+            f"/api/v1/admin/imports/{job_same['job_id']}/merge-preview",
+            headers=headers,
+            json={"as_of_time": "2026-06-01"},
+        )
+    ).json()
+    same_tutor_ch = next(
+        c
+        for c in mp_same["changes"]
+        if c["entity_type"] == "person"
+        and c["entity_name"] == "万振凯"
+        and c["field"] == "tutor_role"
+    )
+    same_status_ch = next(
+        c
+        for c in mp_same["changes"]
+        if c["entity_type"] == "project"
+        and c["field"] == "status"
+    )
+    assert same_tutor_ch["category"] == "same_time_conflict"
+    assert same_status_ch["category"] == "same_time_conflict"
+    other_same_conflicts = [
+        {"change_key": c["change_key"], "action": "keep_current"}
+        for c in mp_same["changes"]
+        if c["category"] == "same_time_conflict"
+        and c["change_key"]
+        not in {same_tutor_ch["change_key"], same_status_ch["change_key"]}
+    ]
+
+    r_same_force = await client.post(
+        f"/api/v1/admin/imports/{job_same['job_id']}/merge",
+        headers=headers,
+        json={
+            "as_of_time": "2026-06-01",
+            "decisions": [
+                {"change_key": same_tutor_ch["change_key"], "action": "force_adopt"},
+                {"change_key": same_status_ch["change_key"], "action": "force_adopt"},
+                *other_same_conflicts,
+            ],
+        },
+    )
+    assert r_same_force.status_code == 200, r_same_force.text
+    wan_same_forced = next(
+        p
+        for p in (await client.get("/api/v1/lab/people", headers=headers)).json()[
+            "people"
+        ]
+        if p["name"] == "万振凯"
+    )
+    age_same_forced = next(
+        p
+        for p in (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+            "projects"
+        ]
+        if p["grant_no"] == "AGE240005"
+    )
+    assert wan_same_forced["tutor_role"] == "硕士生导师"
+    assert age_same_forced["status"] == "ongoing"
+    assert age_same_forced["status_source"] == "explicit"
+
+    mp_same_re = (
+        await client.post(
+            f"/api/v1/admin/imports/{job_same['job_id']}/merge-preview",
+            headers=headers,
+            json={"as_of_time": "2026-06-01"},
+        )
+    ).json()
+    other_same_re = [
+        {"change_key": c["change_key"], "action": "keep_current"}
+        for c in mp_same_re["changes"]
+        if c["category"] == "same_time_conflict"
+        and c["change_key"]
+        not in {same_tutor_ch["change_key"], same_status_ch["change_key"]}
+    ]
+    r_same_unforce = await client.post(
+        f"/api/v1/admin/imports/{job_same['job_id']}/merge",
+        headers=headers,
+        json={
+            "as_of_time": "2026-06-01",
+            "decisions": [
+                {"change_key": same_tutor_ch["change_key"], "action": "keep_current"},
+                {"change_key": same_status_ch["change_key"], "action": "keep_current"},
+                *other_same_re,
+            ],
+        },
+    )
+    assert r_same_unforce.status_code == 200, r_same_unforce.text
+    wan_same_unforced = next(
+        p
+        for p in (await client.get("/api/v1/lab/people", headers=headers)).json()[
+            "people"
+        ]
+        if p["name"] == "万振凯"
+    )
+    age_same_unforced = next(
+        p
+        for p in (await client.get("/api/v1/lab/projects", headers=headers)).json()[
+            "projects"
+        ]
+        if p["grant_no"] == "AGE240005"
+    )
+    assert wan_same_unforced["tutor_role"] == "博士生导师"
+    assert age_same_unforced["status"] == "completed"
+    assert age_same_unforced["status_source"] == "inferred"
+
     # 4. Verify DELETE /admin/imports/{job_id} blocks deletion if active FieldProvenance rows still reference job_id
     async with maker() as session:
         j_old_row = await session.get(ImportJob, uuid.UUID(job_old["job_id"]))
@@ -488,7 +607,7 @@ async def test_entity_delete_cleans_up_field_provenance_and_merge_preview_is_rea
     try:
         r_list = await client.get("/api/v1/admin/imports", headers=headers)
         assert r_list.status_code == 200, r_list.text
-        assert len(r_list.json()["imports"]) == 2
+        assert len(r_list.json()["imports"]) == 3
     finally:
         event.remove(sync_engine, "before_cursor_execute", _on_cursor)
 
