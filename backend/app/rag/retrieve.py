@@ -141,11 +141,29 @@ async def search_knowledge(
     vector = await embedder.embed_query(query)
     if settings.resolved_embedding_index in {"hnsw", "hnsw_prefix"}:
         ef_search = min(max(int(pool) * 2, 100), 1000)
-        await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
-        await session.execute(text("SET LOCAL random_page_cost = 1.0"))
-        await session.execute(text("SET LOCAL plan_cache_mode = force_custom_plan"))
         if await get_pgvector_version(session) >= (0, 8):
-            await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+            await session.execute(
+                text(
+                    """
+                    SELECT set_config('hnsw.ef_search', :ef_search, true),
+                           set_config('random_page_cost', '1.0', true),
+                           set_config('plan_cache_mode', 'force_custom_plan', true),
+                           set_config('hnsw.iterative_scan', 'relaxed_order', true)
+                    """
+                ),
+                {"ef_search": str(int(ef_search))},
+            )
+        else:
+            await session.execute(
+                text(
+                    """
+                    SELECT set_config('hnsw.ef_search', :ef_search, true),
+                           set_config('random_page_cost', '1.0', true),
+                           set_config('plan_cache_mode', 'force_custom_plan', true)
+                    """
+                ),
+                {"ef_search": str(int(ef_search))},
+            )
     if settings.resolved_embedding_index == "hnsw_prefix":
         prefix_dim = int(settings.embedding_prefix_dim)
         rows = await session.execute(
@@ -227,15 +245,22 @@ async def search_knowledge(
                            d.collection AS collection,
                            c.content AS content,
                            c.tokens AS tokens,
-                           NULL::float AS cosine
+                           1 - (c.embedding <=> CAST(:qvec AS {storage})) AS cosine
                     FROM chunks c
                     JOIN documents d ON d.id = c.document_id
                     WHERE {where}
                       AND c.content_tsv @@ to_tsquery('simple', :tsq)
+                    ORDER BY ts_rank_cd(c.content_tsv, to_tsquery('simple', :tsq)) DESC,
+                             c.id ASC
                     LIMIT :lim
                     """
                 ),
-                {**params, "tsq": lexical_query, "lim": int(settings.lexical_pool or 80)},
+                {
+                    **params,
+                    "tsq": lexical_query,
+                    "qvec": _vec_literal(vector),
+                    "lim": int(settings.lexical_pool or 80),
+                },
             )
             known = {str(item["chunk_id"]) for item in raw}
             for item in extra.mappings():

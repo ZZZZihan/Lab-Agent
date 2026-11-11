@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import Principal, can_read, load_user_group_ids
@@ -235,9 +235,18 @@ async def query_lab_assets(
     raw_people_names = list(await session.scalars(select(LabPerson.name)))
     people_count = len(raw_people_names)
     people_names = {n for n in raw_people_names if n}
-    projects_count = len(list(await session.scalars(select(LabProject.id))))
-    achievements_count = len(list(await session.scalars(select(LabAchievement.id))))
-    facilities_count = len(list(await session.scalars(select(LabFacility.id))))
+    counts_row = (
+        await session.execute(
+            select(
+                select(func.count()).select_from(LabProject).scalar_subquery(),
+                select(func.count()).select_from(LabAchievement).scalar_subquery(),
+                select(func.count()).select_from(LabFacility).scalar_subquery(),
+            )
+        )
+    ).one()
+    projects_count = int(counts_row[0] or 0)
+    achievements_count = int(counts_row[1] or 0)
+    facilities_count = int(counts_row[2] or 0)
 
     resolved_groups = (
         group_ids if group_ids is not None else await load_user_group_ids(session, user.id)
@@ -254,12 +263,20 @@ async def query_lab_assets(
             .order_by(Document.created_at.desc())
         )
     )
+    grants_by_doc: dict[uuid.UUID, list[DocumentACL]] = {}
+    if profile_candidates:
+        all_grants = list(
+            await session.scalars(
+                select(DocumentACL).where(
+                    DocumentACL.document_id.in_([cand.id for cand in profile_candidates])
+                )
+            )
+        )
+        for grant in all_grants:
+            grants_by_doc.setdefault(grant.document_id, []).append(grant)
     profile_doc: Document | None = None
     for cand in profile_candidates:
-        grants = list(
-            await session.scalars(select(DocumentACL).where(DocumentACL.document_id == cand.id))
-        )
-        if can_read(principal, cand, grants):
+        if can_read(principal, cand, grants_by_doc.get(cand.id, [])):
             profile_doc = cand
             break
     if profile_doc is not None:
@@ -294,66 +311,94 @@ async def query_lab_assets(
             for p_name in people_names:
                 if p_name.lower() in q_lower and p_name.lower() in h_text:
                     bonus = max(bonus, 0.98)
-            # Direct entity name match (exclude generic academic stop words)
-            generic_tokens = {"研究", "课题", "项目", "成果", "技术", "报告", "实践", "开发", "应用"}
+            # Direct entity name match (exclude generic academic/section stop words)
+            generic_tokens = {
+                "研究",
+                "课题",
+                "课题组",
+                "实验室",
+                "项目",
+                "成果",
+                "技术",
+                "报告",
+                "实践",
+                "开发",
+                "应用",
+                "团队",
+                "成员",
+                "概况",
+                "清单",
+                "承担",
+                "前期",
+                "设备",
+                "支撑",
+                "条件",
+            }
             for token in ch.tokens or []:
-                if len(token) >= 2 and token.lower() in q_lower and token.lower() not in generic_tokens:
+                t_low = token.lower()
+                if len(token) >= 2 and t_low in q_lower and t_low not in generic_tokens:
                     bonus = max(bonus, 0.86)
-                    if token.lower() in h_text:
+                    if t_low in h_text:
                         bonus = max(bonus, 0.94)
-            if bonus > 0.0 or str(ch.id) in existing_by_id:
+            if bonus > 0.0:
                 scored_chunks.append((bonus, ch))
 
-        if not scored_chunks and profile_chunks:
-            scored_chunks.append((0.80, profile_chunks[0]))
+        if scored_chunks:
+            scored_chunks.sort(key=lambda item: (-item[0], item[1].chunk_index))
+            rerank_failed = any(bool(h.get("_rerank_failed")) for h in hits)
+            merged_hits: list[Hit] = []
+            seen_ids: set[str] = set()
+            for bonus, ch in scored_chunks[: min(k, 4)]:
+                cid = str(ch.id)
+                seen_ids.add(cid)
+                base_hit = existing_by_id.get(cid)
+                best_cos = max(
+                    float(base_hit.get("cosine") or 0.0) if base_hit else 0.0,
+                    min(0.95, max(0.82, bonus)),
+                )
+                best_rrf = max(
+                    float(base_hit.get("rrf") or 0.0) if base_hit else 0.0,
+                    0.04,
+                )
+                best_rerank = max(
+                    float(base_hit.get("rerank_score") or base_hit.get("rerank") or 0.0)
+                    if base_hit
+                    else 0.0,
+                    best_cos,
+                )
+                hit_obj: Hit = {
+                    "chunk_id": cid,
+                    "document_id": str(profile_doc.id),
+                    "doc_key": profile_doc.doc_key,
+                    "chunk_index": ch.chunk_index,
+                    "title": profile_doc.title,
+                    "collection": profile_doc.collection,
+                    "heading": ch.heading,
+                    "content": ch.content,
+                    "tokens": list(ch.tokens or []),
+                    "cosine": best_cos,
+                    "bm25": float(base_hit.get("bm25") or 0.1) if base_hit else 0.1,
+                    "rrf": best_rrf,
+                    "rerank": best_rerank,
+                    "rerank_score": best_rerank,
+                    "key": f"{profile_doc.doc_key or profile_doc.id}#{ch.chunk_index}",
+                }
+                base_cov = float(str(hits[0].get("_coverage") or 0.0)) if hits else 0.0
+                base_elapsed = float(str(hits[0].get("_elapsed_ms") or 1.0)) if hits else 1.0
+                hit_obj["_coverage"] = max(base_cov, 0.85)  # type: ignore[typeddict-unknown-key]
+                hit_obj["_elapsed_ms"] = base_elapsed  # type: ignore[typeddict-unknown-key]
+                hit_obj["_mode"] = (  # type: ignore[typeddict-unknown-key]
+                    str(hits[0].get("_mode") or settings.retrieval_mode)
+                    if hits
+                    else settings.retrieval_mode
+                )
+                hit_obj["_rerank_failed"] = rerank_failed  # type: ignore[typeddict-unknown-key]
+                merged_hits.append(hit_obj)
 
-        scored_chunks.sort(key=lambda item: (-item[0], item[1].chunk_index))
-        rerank_failed = any(bool(h.get("_rerank_failed")) for h in hits)
-        merged_hits: list[Hit] = []
-        seen_ids: set[str] = set()
-        for bonus, ch in scored_chunks[: min(k, 4)]:
-            cid = str(ch.id)
-            seen_ids.add(cid)
-            base_hit = existing_by_id.get(cid)
-            best_cos = max(
-                float(base_hit.get("cosine") or 0.0) if base_hit else 0.0,
-                min(0.95, max(0.82, bonus)),
-            )
-            best_rrf = max(
-                float(base_hit.get("rrf") or 0.0) if base_hit else 0.0,
-                0.04,
-            )
-            hit_obj: Hit = {
-                "chunk_id": cid,
-                "document_id": str(profile_doc.id),
-                "doc_key": profile_doc.doc_key,
-                "chunk_index": ch.chunk_index,
-                "title": profile_doc.title,
-                "collection": profile_doc.collection,
-                "heading": ch.heading,
-                "content": ch.content,
-                "tokens": list(ch.tokens or []),
-                "cosine": best_cos,
-                "bm25": float(base_hit.get("bm25") or 0.1) if base_hit else 0.1,
-                "rrf": best_rrf,
-                "rerank_score": best_cos,
-            }
-            base_cov = float(str(hits[0].get("_coverage") or 0.0)) if hits else 0.0
-            base_elapsed = float(str(hits[0].get("_elapsed_ms") or 1.0)) if hits else 1.0
-            hit_obj["_coverage"] = max(base_cov, 0.85)  # type: ignore[typeddict-unknown-key]
-            hit_obj["_elapsed_ms"] = base_elapsed  # type: ignore[typeddict-unknown-key]
-            hit_obj["_mode"] = (  # type: ignore[typeddict-unknown-key]
-                str(hits[0].get("_mode") or settings.retrieval_mode)
-                if hits
-                else settings.retrieval_mode
-            )
-            hit_obj["_rerank_failed"] = rerank_failed  # type: ignore[typeddict-unknown-key]
-            merged_hits.append(hit_obj)
-
-        for h in hits:
-            if str(h["chunk_id"]) not in seen_ids and len(merged_hits) < k:
-                merged_hits.append(h)
-        hits = merged_hits
+            for h in hits:
+                if str(h["chunk_id"]) not in seen_ids and len(merged_hits) < k:
+                    merged_hits.append(h)
+            hits = merged_hits
 
     return {
         "status": "ok",

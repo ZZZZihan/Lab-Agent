@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 from collections.abc import AsyncIterator
@@ -27,6 +28,9 @@ _SYSTEM_PROMPT = (
 
 _CITATION_RE = re.compile(r"\[([0-9]{1,2})\]")
 _EDGE_NON_WORD_RE = re.compile(r"^[\s\W_]+|[\s\W_]+$")
+_CLOSING_EVIDENCE_TAG_RE = re.compile(r"<\s*/\s*evidence\b([^>]*>)?", re.IGNORECASE)
+_OPENING_EVIDENCE_TAG_RE = re.compile(r"<\s*evidence\b", re.IGNORECASE)
+_ATTR_WS_RE = re.compile(r"[\r\n\t]+")
 
 
 @dataclass
@@ -98,10 +102,23 @@ def check_citations(answer: str, n: int) -> CitationCheck:
     return CitationCheck(used=used, invalid=invalid, uncited=uncited, declined=declined)
 
 
+def _escape_evidence_attr(raw: str) -> str:
+    collapsed = _ATTR_WS_RE.sub(" ", raw).strip()
+    return html.escape(collapsed, quote=True)
+
+
+def _escape_evidence_body(raw: str) -> str:
+    escaped = _CLOSING_EVIDENCE_TAG_RE.sub(
+        lambda m: r"<\/evidence" + (m.group(1) or ""),
+        raw,
+    )
+    return _OPENING_EVIDENCE_TAG_RE.sub("&lt;evidence", escaped)
+
+
 def format_evidence_block(item: Evidence) -> str:
-    safe_title = item.title.replace("</evidence>", r"<\/evidence>")
-    safe_heading = item.heading.replace("</evidence>", r"<\/evidence>")
-    safe_text = item.text.replace("</evidence>", r"<\/evidence>")
+    safe_title = _escape_evidence_attr(item.title)
+    safe_heading = _escape_evidence_attr(item.heading)
+    safe_text = _escape_evidence_body(item.text)
     return (
         f'<evidence id="{item.index}" title="{safe_title}" section="{safe_heading}">\n'
         f"{safe_text}\n"
