@@ -16,8 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, changePassword, currentUser, logout, type User } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-
-const DEFAULT_INITIAL_PASSWORD = "LabAgent@2026";
+import { KNOWN_PUBLIC_DEFAULT_PASSWORD } from "@/lib/security";
 
 function computeDeadlineInfo(
   deadlineIso: string | null | undefined,
@@ -114,7 +113,7 @@ export default function ChangePasswordPage() {
 
     const ruleNotDefaultOrOld =
       newPw.length > 0 &&
-      newPw !== DEFAULT_INITIAL_PASSWORD &&
+      newPw !== KNOWN_PUBLIC_DEFAULT_PASSWORD &&
       (oldPw.length === 0 || newPw !== oldPw) &&
       !newPw.toLowerCase().startsWith("labagent-demo-2026-");
 
@@ -153,8 +152,8 @@ export default function ChangePasswordPage() {
         passed: ruleNotDefaultOrOld,
         label:
           locale === "zh"
-            ? `不能与当前口令或开源默认初始口令（${DEFAULT_INITIAL_PASSWORD}）相同`
-            : `Must differ from current password and default (${DEFAULT_INITIAL_PASSWORD})`,
+            ? `不能与当前口令或开源默认初始口令（${KNOWN_PUBLIC_DEFAULT_PASSWORD}）相同`
+            : `Must differ from current password and default (${KNOWN_PUBLIC_DEFAULT_PASSWORD})`,
       },
       {
         key: "no_identity",

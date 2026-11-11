@@ -12,4 +12,6 @@ services:
     environment:
       COOKIE_SECURE: "true"
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-}
       NEXT_PUBLIC_DEMO_HINTS: "false"

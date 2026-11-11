@@ -6,6 +6,7 @@ export type User = {
   login_name?: string | null;
   must_change_password?: boolean;
   must_change_password_by?: string | null;
+  oidc_mode?: boolean;
 };
 
 export function generateRequestId(): string {
@@ -202,6 +203,41 @@ async function parseError(response: Response): Promise<ApiError> {
   }
 }
 
+export function handleAuthRedirect(err: ApiError, path?: string): void {
+  if (typeof window === "undefined") return;
+  const pathname = window.location.pathname;
+  if (
+    err.status === 403 &&
+    err.code === "password_change_required" &&
+    pathname !== "/change-password" &&
+    pathname !== "/login"
+  ) {
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+    window.location.assign("/change-password");
+    return;
+  }
+  if (err.status === 401) {
+    if (path === "auth/change-password" && err.code === "invalid_credentials") {
+      return;
+    }
+    window.dispatchEvent(new Event("lab-auth-logout"));
+    if (pathname !== "/login") {
+      void fetch("/api/session", { method: "DELETE" }).catch(() => undefined);
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+      window.location.assign("/login");
+    }
+  }
+}
+
+export async function parseBackendError(
+  response: Response,
+  path?: string,
+): Promise<ApiError> {
+  const err = await parseError(response);
+  handleAuthRedirect(err, path);
+  return err;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/backend/${path}`, {
     ...init,
@@ -211,18 +247,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const err = await parseError(response);
-    if (
-      err.status === 403 &&
-      err.code === "password_change_required" &&
-      typeof window !== "undefined" &&
-      window.location.pathname !== "/change-password" &&
-      window.location.pathname !== "/login"
-    ) {
-      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
-      window.location.assign("/change-password");
-    }
-    throw err;
+    throw await parseBackendError(response, path);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -244,10 +269,31 @@ export type BootstrapAdminPayload = {
   setup_token?: string;
 };
 
+let cachedOidcModePromise: Promise<boolean> | null = null;
+
 export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
   const response = await fetch("/api/bootstrap-status", { cache: "no-store" });
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as BootstrapStatusResponse;
+}
+
+export function resetCachedOidcMode(): void {
+  cachedOidcModePromise = null;
+}
+
+export function resolveOidcMode(user?: User | null): Promise<boolean> {
+  if (typeof user?.oidc_mode === "boolean") {
+    return Promise.resolve(user.oidc_mode);
+  }
+  if (!cachedOidcModePromise) {
+    cachedOidcModePromise = getBootstrapStatus()
+      .then((res) => Boolean(res.oidc_mode))
+      .catch((err) => {
+        cachedOidcModePromise = null;
+        throw err;
+      });
+  }
+  return cachedOidcModePromise;
 }
 
 export async function bootstrapAdmin(
@@ -1221,6 +1267,8 @@ const LAB_ERROR_MESSAGES: Record<string, string> = {
   INITIAL_PASSWORD_REQUIRED: "存在需要新建账号的成员，请提供全组统一初始口令",
   batch_size_invalid: "单次批量导入仅支持 1~5 份申报书",
   BATCH_SIZE_INVALID: "单次批量导入仅支持 1~5 份申报书",
+  upstream_unavailable: "后端服务暂时不可用，请稍后重试",
+  UPSTREAM_UNAVAILABLE: "后端服务暂时不可用，请稍后重试",
 };
 
 export function mapLabErrorCode(
@@ -1405,7 +1453,7 @@ export async function downloadSignaturesZip(
         : undefined,
   });
   if (!response.ok) {
-    throw await parseError(response);
+    throw await parseBackendError(response, "lab/people/signatures:zip");
   }
   const blob = await response.blob();
   const filename = parseFilenameFromDisposition(
@@ -1467,7 +1515,7 @@ export async function exportSelectedLabAssets(
         : undefined,
   });
   if (!response.ok) {
-    throw await parseError(response);
+    throw await parseBackendError(response, "lab/export:selected");
   }
   const blob = await response.blob();
   const filename = parseFilenameFromDisposition(
@@ -1491,4 +1539,23 @@ export async function exportSelectedLabAssets(
     missingCount: null,
     warnings,
   };
+}
+
+export async function exportAllLabAssets(
+  format: "md" | "docx",
+): Promise<{ blob: Blob; filename: string }> {
+  const path = `lab/export?format=${encodeURIComponent(format)}`;
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    format === "docx" ? "lab-assets.docx" : "lab-assets.md",
+  );
+  return { blob, filename };
 }

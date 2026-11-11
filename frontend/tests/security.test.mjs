@@ -37,16 +37,22 @@ registerHooks({
 
 const {
   CONTENT_SECURITY_POLICY,
+  KNOWN_PUBLIC_DEFAULT_PASSWORD,
   SECURITY_HEADERS,
+  canSubmitProvisioning,
+  isInitialPasswordRequired,
   isOriginAllowed,
   parseAllowedOrigins,
   sessionCookieName,
   sessionCookieOptions,
   verifyOrigin,
 } = await import("../lib/security.ts");
+const bffModule = await import("../lib/bff.ts");
 const nextConfigModule = await import("../next.config.ts");
-const { proxy } = await import("../proxy.ts");
+const { buildLoginUrl, proxy } = await import("../proxy.ts");
 const sessionRoute = await import("../app/api/session/route.ts");
+const sessionBootstrapRoute = await import("../app/api/session/bootstrap/route.ts");
+const bootstrapStatusRoute = await import("../app/api/bootstrap-status/route.ts");
 const backendRoute = await import("../app/api/backend/[...path]/route.ts");
 const apiModule = await import("../lib/api.ts");
 const chatHelpers = await import("../app/chat/components/chatTypesAndHelpers.ts");
@@ -715,6 +721,421 @@ test("chatTypesAndHelpers never fabricates member profiles or unverified member 
   assert.equal(matched[0].hasSignature, false);
   assert.equal(matched[0].signatureLabel, "暂未绑定内嵌签名");
 });
+
+test("proxy blocks X-Forwarded-Host / Host open redirects unless matching PUBLIC_ORIGIN", () => {
+  const prevOrigin = process.env.PUBLIC_ORIGIN;
+  const prevSecure = process.env.COOKIE_SECURE;
+  try {
+    process.env.COOKIE_SECURE = "false";
+    process.env.PUBLIC_ORIGIN = "https://lab.example.org, https://lab2.example.org";
+
+    // Spoofed X-Forwarded-Host must fall back to configured PUBLIC_ORIGIN
+    const spoofed = proxy(
+      new NextRequest("http://0.0.0.0:3000/chat", {
+        headers: {
+          "x-forwarded-host": "evil.example.com",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    assert.equal(spoofed.status, 307);
+    assert.equal(spoofed.headers.get("location"), "https://lab.example.org/login");
+
+    // Spoofed Host header must not redirect off-origin
+    const spoofedHost = proxy(
+      new NextRequest("http://127.0.0.1:43123/chat", {
+        headers: {
+          host: "attacker.invalid",
+          "x-forwarded-proto": "javascript",
+        },
+      }),
+    );
+    assert.equal(spoofedHost.status, 307);
+    assert.equal(spoofedHost.headers.get("location"), "https://lab.example.org/login");
+
+    // Legitimate secondary origin in PUBLIC_ORIGIN is honored
+    const allowedSecondary = buildLoginUrl(
+      new NextRequest("http://0.0.0.0:3000/chat", {
+        headers: {
+          "x-forwarded-host": "lab2.example.org",
+          "x-forwarded-proto": "https",
+        },
+      }),
+      { PUBLIC_ORIGIN: "https://lab.example.org, https://lab2.example.org" },
+    );
+    assert.equal(allowedSecondary.toString(), "https://lab2.example.org/login");
+
+    // Unset PUBLIC_ORIGIN still blocks spoofed X-Forwarded-Host on loopback
+    delete process.env.PUBLIC_ORIGIN;
+    const unconfiguredSpoof = proxy(
+      new NextRequest("http://127.0.0.1:43123/admin/users", {
+        headers: {
+          "x-forwarded-host": "phish.example.net",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    assert.equal(unconfiguredSpoof.status, 307);
+    assert.equal(
+      unconfiguredSpoof.headers.get("location"),
+      "http://127.0.0.1:43123/login",
+    );
+  } finally {
+    if (prevOrigin === undefined) {
+      delete process.env.PUBLIC_ORIGIN;
+    } else {
+      process.env.PUBLIC_ORIGIN = prevOrigin;
+    }
+    if (prevSecure === undefined) {
+      delete process.env.COOKIE_SECURE;
+    } else {
+      process.env.COOKIE_SECURE = prevSecure;
+    }
+  }
+});
+
+test("extractClientIp preserves LAN client IPs and honors TRUSTED_PROXIES / TRUSTED_PROXY_HOPS", () => {
+  // 1. Default (edge-overwritten X-Forwarded-For) preserves distinct LAN client IPs behind internal proxy hops
+  const lanReqA = new Request("http://127.0.0.1:43123/api/session", {
+    headers: { "X-Forwarded-For": "192.168.1.50, 10.0.0.1" },
+  });
+  const lanReqB = new Request("http://127.0.0.1:43123/api/session", {
+    headers: { "X-Forwarded-For": "192.168.1.51, 10.0.0.1" },
+  });
+  assert.equal(bffModule.extractClientIp(lanReqA, {}), "192.168.1.50");
+  assert.equal(bffModule.extractClientIp(lanReqB, {}), "192.168.1.51");
+
+  // 2. TRUSTED_PROXIES (CIDRs / exact IPs) strips only configured proxy hops from right, blocking leftmost spoofing on both public and LAN networks
+  const spoofedPublicReq = new Request("http://127.0.0.1:43123/api/session", {
+    headers: {
+      "X-Forwarded-For": "1.2.3.4, 203.0.113.9, 10.0.0.1",
+      "X-Real-IP": "1.2.3.4",
+    },
+  });
+  assert.equal(
+    bffModule.extractClientIp(spoofedPublicReq, {
+      TRUSTED_PROXIES: "10.0.0.0/8, 127.0.0.1, ::1",
+    }),
+    "203.0.113.9",
+  );
+
+  const spoofedLanReq = new Request("http://127.0.0.1:43123/api/session", {
+    headers: {
+      "X-Forwarded-For": "8.8.8.8, 192.168.1.50, 10.0.0.1",
+    },
+  });
+  assert.equal(
+    bffModule.extractClientIp(spoofedLanReq, {
+      TRUSTED_PROXIES: "10.0.0.0/8, 127.0.0.1",
+    }),
+    "192.168.1.50",
+  );
+
+  // 3. TRUSTED_PROXY_HOPS=0 disables forwarded IP headers completely
+  assert.equal(
+    bffModule.extractClientIp(spoofedPublicReq, { TRUSTED_PROXY_HOPS: "0" }),
+    null,
+  );
+
+  // 4. Explicit hop count selects exact hop from right
+  assert.equal(
+    bffModule.extractClientIp(spoofedPublicReq, { TRUSTED_PROXY_HOPS: "2" }),
+    "203.0.113.9",
+  );
+  assert.equal(
+    bffModule.extractClientIp(spoofedLanReq, { TRUSTED_PROXY_HOPS: "2" }),
+    "192.168.1.50",
+  );
+
+  // IPv6 bracket+port and IPv4-mapped IPv6 normalization
+  assert.equal(
+    bffModule.normalizeIpCandidate("[2001:db8::42]:8443"),
+    "2001:db8::42",
+  );
+  assert.equal(
+    bffModule.normalizeIpCandidate("::ffff:198.51.100.7"),
+    "198.51.100.7",
+  );
+
+  // buildProxyHeaders sanitizes X-Request-Id
+  const goodHeaders = bffModule.buildProxyHeaders(
+    new Request("http://127.0.0.1:43123/api/session", {
+      headers: { "X-Request-Id": "req_12345678-abcd" },
+    }),
+    {},
+    { INTERNAL_PROXY_SECRET: "s3cr3t" },
+  );
+  assert.equal(goodHeaders.get("X-Request-Id"), "req_12345678-abcd");
+
+  const badHeaders = bffModule.buildProxyHeaders(
+    new Request("http://127.0.0.1:43123/api/session", {
+      headers: { "X-Request-Id": "bad spaces/semi;id" },
+    }),
+    {},
+    {},
+  );
+  assert.equal(badHeaders.get("X-Request-Id"), null);
+  assert.equal(typeof KNOWN_PUBLIC_DEFAULT_PASSWORD, "string");
+  assert.equal(KNOWN_PUBLIC_DEFAULT_PASSWORD.length > 0, true);
+});
+
+test("BFF routes return 502 UPSTREAM_UNAVAILABLE on fetch failure and manage session cookie on 401", async () => {
+  const prevOrigin = process.env.PUBLIC_ORIGIN;
+  const prevFetch = globalThis.fetch;
+  const prevCookies = globalThis.__TEST_COOKIES__;
+  process.env.PUBLIC_ORIGIN = "http://127.0.0.1:43123";
+
+  try {
+    // 1. Upstream network failure -> clean 502 JSON on all BFF routes
+    globalThis.__TEST_COOKIES__ = new Map([["la_session", "tok-1"]]);
+    globalThis.fetch = async () => {
+      throw new TypeError("fetch failed: ECONNREFUSED");
+    };
+
+    const sGet502 = await sessionRoute.GET(
+      new Request("http://127.0.0.1:43123/api/session"),
+    );
+    assert.equal(sGet502.status, 502);
+    assert.equal((await sGet502.json()).error.code, "upstream_unavailable");
+
+    const sPost502 = await sessionRoute.POST(
+      new Request("http://127.0.0.1:43123/api/session", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ identifier: "u", password: "p" }),
+      }),
+    );
+    assert.equal(sPost502.status, 502);
+
+    const bootPost502 = await sessionBootstrapRoute.POST(
+      new Request("http://127.0.0.1:43123/api/session/bootstrap", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      }),
+    );
+    assert.equal(bootPost502.status, 502);
+
+    const bootGet502 = await bootstrapStatusRoute.GET(
+      new Request("http://127.0.0.1:43123/api/bootstrap-status"),
+    );
+    assert.equal(bootGet502.status, 502);
+
+    const back502 = await backendRoute.GET(
+      new Request("http://127.0.0.1:43123/api/backend/health"),
+      { params: Promise.resolve({ path: ["health"] }) },
+    );
+    assert.equal(back502.status, 502);
+
+    // 2. Wrong old_password on auth/change-password (401 invalid_credentials) preserves la_session
+    globalThis.__TEST_COOKIES__ = new Map([["la_session", "still-valid-jwt"]]);
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "invalid_credentials", message: "当前口令不正确" },
+        }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      );
+    const wrongOldPw = await backendRoute.POST(
+      new Request("http://127.0.0.1:43123/api/backend/auth/change-password", {
+        method: "POST",
+        headers: {
+          Origin: "http://127.0.0.1:43123",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ old_password: "wrong", new_password: "NewPassword@2026" }),
+      }),
+      { params: Promise.resolve({ path: ["auth", "change-password"] }) },
+    );
+    assert.equal(wrongOldPw.status, 401);
+    assert.equal(globalThis.__TEST_COOKIES__.get("la_session"), "still-valid-jwt");
+
+    // 3. Expired/revoked session on /api/backend/* or /api/session clears la_session
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({ error: { code: "token_revoked", message: "会话已失效" } }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      );
+    const revokedResp = await backendRoute.GET(
+      new Request("http://127.0.0.1:43123/api/backend/lab/people"),
+      { params: Promise.resolve({ path: ["lab", "people"] }) },
+    );
+    assert.equal(revokedResp.status, 401);
+    assert.equal(globalThis.__TEST_COOKIES__.get("la_session"), "");
+
+    globalThis.__TEST_COOKIES__ = new Map([["la_session", "expired-jwt"]]);
+    const session401 = await sessionRoute.GET(
+      new Request("http://127.0.0.1:43123/api/session"),
+    );
+    assert.equal(session401.status, 401);
+    assert.equal(globalThis.__TEST_COOKIES__.get("la_session"), "");
+  } finally {
+    globalThis.fetch = prevFetch;
+    globalThis.__TEST_COOKIES__ = prevCookies;
+    if (prevOrigin === undefined) {
+      delete process.env.PUBLIC_ORIGIN;
+    } else {
+      process.env.PUBLIC_ORIGIN = prevOrigin;
+    }
+  }
+});
+
+test("handleAuthRedirect redirects on 401 / 403 password_change_required except wrong old_password", () => {
+  const prevWindow = globalThis.window;
+  const prevFetch = globalThis.fetch;
+  let assignedUrl = null;
+  let logoutDispatched = 0;
+  let sessionDeleteCalls = 0;
+
+  globalThis.fetch = async (url, init = {}) => {
+    if (url === "/api/session" && init.method === "DELETE") {
+      sessionDeleteCalls += 1;
+    }
+    return new Response("{}", { status: 200 });
+  };
+  globalThis.window = {
+    location: {
+      pathname: "/lab",
+      assign(target) {
+        assignedUrl = target;
+      },
+    },
+    dispatchEvent(evt) {
+      if (evt?.type === "lab-auth-logout") logoutDispatched += 1;
+      return true;
+    },
+  };
+
+  try {
+    // Wrong old_password on auth/change-password must not log out
+    apiModule.handleAuthRedirect(
+      new apiModule.ApiError(401, "invalid_credentials", "当前口令不正确"),
+      "auth/change-password",
+    );
+    assert.equal(assignedUrl, null);
+    assert.equal(logoutDispatched, 0);
+
+    // 403 password_change_required -> /change-password
+    apiModule.handleAuthRedirect(
+      new apiModule.ApiError(403, "password_change_required", "请先改密"),
+      "lab/people",
+    );
+    assert.equal(assignedUrl, "/change-password");
+
+    // 401 unauthorized on protected page -> dispatches logout + /login
+    assignedUrl = null;
+    apiModule.handleAuthRedirect(
+      new apiModule.ApiError(401, "unauthorized", "需要登录"),
+      "lab/people",
+    );
+    assert.equal(logoutDispatched, 1);
+    assert.equal(sessionDeleteCalls, 1);
+    assert.equal(assignedUrl, "/login");
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test("OIDC mode exempts account provisioning from initial-password requirements", async () => {
+  // Local password mode requires custom password when new accounts are provisioned
+  assert.equal(isInitialPasswordRequired(true, false), true);
+  assert.equal(isInitialPasswordRequired(false, false), false);
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: false,
+      initialPassword: "",
+    }),
+    false,
+  );
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: false,
+      initialPassword: "Custom#Password2026",
+    }),
+    true,
+  );
+
+  // OIDC SSO mode allows passwordless provisioning even when new accounts exist
+  assert.equal(isInitialPasswordRequired(true, true), false);
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: true,
+      initialPassword: "",
+    }),
+    true,
+  );
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: true,
+      initialPassword: "",
+      unresolvedCount: 1,
+    }),
+    false,
+  );
+
+  // resolveOidcMode uses user.oidc_mode directly without extra network requests, and falls back to cached /api/bootstrap-status otherwise
+  const prevFetch = globalThis.fetch;
+  let bootstrapCalls = 0;
+  apiModule.resetCachedOidcMode();
+  globalThis.fetch = async (url) => {
+    assert.equal(url, "/api/bootstrap-status");
+    bootstrapCalls += 1;
+    return new Response(
+      JSON.stringify({
+        needs_bootstrap: false,
+        setup_token_required: false,
+        oidc_mode: true,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  try {
+    assert.equal(
+      await apiModule.resolveOidcMode({
+        id: "u1",
+        display_name: "Admin",
+        role: "admin",
+        oidc_mode: false,
+      }),
+      false,
+    );
+    assert.equal(bootstrapCalls, 0);
+
+    assert.equal(
+      await apiModule.resolveOidcMode({
+        id: "u1",
+        display_name: "Admin",
+        role: "admin",
+      }),
+      true,
+    );
+    assert.equal(await apiModule.resolveOidcMode(null), true);
+    assert.equal(bootstrapCalls, 1);
+  } finally {
+    apiModule.resetCachedOidcMode();
+    globalThis.fetch = prevFetch;
+  }
+});
+
 
 
 

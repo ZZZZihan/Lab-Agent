@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 
 export const DEFAULT_PUBLIC_ORIGIN = "http://127.0.0.1:43123";
 
+/**
+ * Public repository default initial password sentinel.
+ * Used strictly for blocklist validation and warning detection — never prefill inputs with it.
+ */
+export const KNOWN_PUBLIC_DEFAULT_PASSWORD = "LabAgent@2026";
+
 export const CONTENT_SECURITY_POLICY =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 
@@ -76,4 +82,30 @@ export function verifyOrigin(
     );
   }
   return null;
+}
+
+export function isInitialPasswordRequired(
+  hasNewAccounts: boolean,
+  oidcMode?: boolean | null,
+): boolean {
+  return Boolean(hasNewAccounts) && !oidcMode;
+}
+
+export function canSubmitProvisioning(params: {
+  busy: boolean;
+  hasAsOfTime: boolean;
+  hasNewAccounts: boolean;
+  oidcMode?: boolean | null;
+  initialPassword: string;
+  unresolvedCount?: number;
+}): boolean {
+  if (params.busy || !params.hasAsOfTime) return false;
+  if ((params.unresolvedCount ?? 0) > 0) return false;
+  if (
+    isInitialPasswordRequired(params.hasNewAccounts, params.oidcMode) &&
+    !params.initialPassword.trim()
+  ) {
+    return false;
+  }
+  return true;
 }

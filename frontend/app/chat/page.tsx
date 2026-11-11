@@ -10,6 +10,7 @@ import {
   currentUser,
   formatLabBatch,
   generateRequestId,
+  parseBackendError,
   type BasketItem,
   type ChatEvent,
   type Citation,
@@ -322,7 +323,13 @@ export default function ChatPage() {
         body: JSON.stringify(payload),
       });
       if (!response.ok || !response.body) {
-        const message = response.status === 401 ? t.noSession : t.error;
+        let message = response.status === 401 ? t.noSession : t.error;
+        if (!response.ok) {
+          const parsedErr = await parseBackendError(response, "chat/stream");
+          if (response.status !== 401 && parsedErr.message) {
+            message = parsedErr.message;
+          }
+        }
         setTurns((current) =>
           current.map((turn) =>
             turn.id === id ? { ...turn, pending: false, error: message } : turn,

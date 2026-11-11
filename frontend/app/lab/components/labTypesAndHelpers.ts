@@ -268,7 +268,6 @@ export type PersonOverrideState = {
   login_name: string;
 };
 
-export const DEFAULT_INITIAL_PASSWORD = "LabAgent@2026";
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 export function extractProjectYear(proj: LabProjectItem): number | null {

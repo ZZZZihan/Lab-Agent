@@ -2,56 +2,62 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
+  apiBase,
+  buildProxyHeaders,
+  upstreamUnavailableResponse,
+} from "../../../../lib/bff";
+import {
   sessionCookieName,
   sessionCookieOptions,
   verifyOrigin,
 } from "../../../../lib/security";
 
-function apiBase() {
-  return (process.env.API_INTERNAL_URL || "http://127.0.0.1:43124").replace(/\/$/, "");
-}
-
-function extractClientIp(request: Request): string | null {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  if (realIp) return realIp;
-  return null;
-}
+type StreamingRequestInit = RequestInit & { duplex?: "half" };
 
 async function forward(request: Request, path: string[]) {
   const originDenied = verifyOrigin(request);
   if (originDenied) return originDenied;
   const jar = await cookies();
-  const token = jar.get(sessionCookieName())?.value;
+  const cookieName = sessionCookieName();
+  const token = jar.get(cookieName)?.value;
   if (!token) {
     return NextResponse.json(
       { error: { code: "unauthorized", message: "需要登录" } },
       { status: 401 },
     );
   }
-  const headers = new Headers();
-  headers.set("Authorization", `Bearer ${token}`);
-  const clientIp = extractClientIp(request);
-  if (clientIp) headers.set("X-Client-IP", clientIp);
-  const secret = process.env.INTERNAL_PROXY_SECRET?.trim();
-  if (secret) headers.set("X-Internal-Proxy-Secret", secret);
+  const headers = buildProxyHeaders(request, {
+    Authorization: `Bearer ${token}`,
+  });
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) headers.set("content-length", contentLength);
   const ifMatch = request.headers.get("if-match");
   if (ifMatch) headers.set("If-Match", ifMatch);
   const ifNoneMatch = request.headers.get("if-none-match");
   if (ifNoneMatch) headers.set("If-None-Match", ifNoneMatch);
+
   const method = request.method;
-  const upstream = await fetch(`${apiBase()}/api/v1/${path.join("/")}${new URL(request.url).search}`, {
+  const hasBody = method !== "GET" && method !== "HEAD" && request.body !== null;
+  const fetchInit: StreamingRequestInit = {
     method,
     headers,
-    body: method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer(),
+    body: hasBody ? request.body : undefined,
+    ...(hasBody ? { duplex: "half" as const } : {}),
     cache: "no-store",
-  });
+  };
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(
+      `${apiBase()}/api/v1/${path.join("/")}${new URL(request.url).search}`,
+      fetchInit,
+    );
+  } catch {
+    return upstreamUnavailableResponse();
+  }
+
   const type = upstream.headers.get("content-type") || "application/json";
   const responseHeaders: Record<string, string> = {
     "Content-Type": type,
@@ -71,27 +77,49 @@ async function forward(request: Request, path: string[]) {
     const val = upstream.headers.get(hdr);
     if (val) responseHeaders[hdr] = val;
   }
-  if (path.join("/") === "auth/change-password" && upstream.ok) {
+
+  const joinedPath = path.join("/");
+  if (joinedPath === "auth/change-password") {
     const raw = await upstream.text();
-    try {
-      const parsed = JSON.parse(raw) as {
-        access_token?: string;
-        expires_in?: number;
-      };
-      if (parsed.access_token) {
-        jar.set(
-          sessionCookieName(),
-          parsed.access_token,
-          sessionCookieOptions(parsed.expires_in || 28800),
-        );
+    if (upstream.ok) {
+      try {
+        const parsed = JSON.parse(raw) as {
+          access_token?: string;
+          expires_in?: number;
+        };
+        if (parsed.access_token) {
+          jar.set(
+            cookieName,
+            parsed.access_token,
+            sessionCookieOptions(parsed.expires_in || 28800),
+          );
+        }
+      } catch {
+        // ignore JSON parse errors
       }
-    } catch {
-      // ignore JSON parse errors
+    } else if (upstream.status === 401) {
+      let errorCode = "";
+      try {
+        const parsedErr = JSON.parse(raw) as {
+          error?: { code?: string };
+          detail?: { code?: string };
+        };
+        errorCode = parsedErr.error?.code || parsedErr.detail?.code || "";
+      } catch {
+        // ignore JSON parse errors
+      }
+      if (errorCode !== "invalid_credentials") {
+        jar.set(cookieName, "", { ...sessionCookieOptions(1), maxAge: 0 });
+      }
     }
     return new NextResponse(raw, {
       status: upstream.status,
       headers: responseHeaders,
     });
+  }
+
+  if (upstream.status === 401) {
+    jar.set(cookieName, "", { ...sessionCookieOptions(1), maxAge: 0 });
   }
   return new NextResponse(upstream.status === 304 ? null : upstream.body, {
     status: upstream.status,

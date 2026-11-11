@@ -12,6 +12,7 @@ import {
   previewImportMerge,
   provisionImportBatch,
   resolveImportBatch,
+  resolveOidcMode,
   type BatchIdentityCluster,
   type BatchIdentityQuality,
   type BatchProvisionResponse,
@@ -28,9 +29,9 @@ import {
   type User,
 } from "@/lib/api";
 import type { Copy } from "@/lib/i18n";
+import { isInitialPasswordRequired } from "@/lib/security";
 
 import {
-  DEFAULT_INITIAL_PASSWORD,
   MAX_UPLOAD_BYTES,
   type PersonOverrideState,
   triggerBlobDownload,
@@ -246,10 +247,9 @@ export function useColdStartBatchWizard({
     null,
   );
 
-  const [initialPassword, setInitialPassword] = useState(
-    DEFAULT_INITIAL_PASSWORD,
-  );
+  const [initialPassword, setInitialPassword] = useState("");
   const [includePassword, setIncludePassword] = useState(true);
+  const [fallbackOidcMode, setFallbackOidcMode] = useState(false);
   const [provisioning, setProvisioning] = useState(false);
   const [provisionResult, setProvisionResult] =
     useState<BatchProvisionResponse | null>(null);
@@ -265,6 +265,22 @@ export function useColdStartBatchWizard({
   const step4RunningRef = useRef(false);
   const autoPromptCheckedForUserRef = useRef<string | null>(null);
 
+  useEffect(() => {
+    if (typeof me?.oidc_mode === "boolean") return;
+    let cancelled = false;
+    resolveOidcMode(me)
+      .then((flag) => {
+        if (!cancelled) setFallbackOidcMode(flag);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [me]);
+
+  const oidcMode =
+    typeof me?.oidc_mode === "boolean" ? me.oidc_mode : fallbackOidcMode;
+
   function resetWizardState() {
     setWizardError("");
     setWizardStep(1);
@@ -277,6 +293,7 @@ export function useColdStartBatchWizard({
     setJobOverridesMap({});
     setJobSkipSignaturesMap({});
     setLinkSelfClusterId(null);
+    setInitialPassword("");
     setProvisionResult(null);
     setRosterCopied(false);
     setHasSavedCredentials(false);
@@ -343,7 +360,8 @@ export function useColdStartBatchWizard({
 
   // Spec §8.3.3 beforeunload guard when Step 3 or Step 4 has plaintext credentials in memory
   const hasUnsavedPlaintextRoster = Boolean(
-    wizardOpen &&
+    !oidcMode &&
+      wizardOpen &&
       (wizardStep === 3 || wizardStep === 4) &&
       provisionResult &&
       includePassword &&
@@ -375,6 +393,7 @@ export function useColdStartBatchWizard({
   function tryCloseWizard(): boolean {
     if (parsing || provisioning || step4Running) return false;
     if (
+      !oidcMode &&
       (wizardStep === 3 || wizardStep === 4) &&
       provisionResult &&
       includePassword &&
@@ -711,6 +730,27 @@ export function useColdStartBatchWizard({
     return batchResolve?.self_candidate ?? null;
   }, [batchResolve]);
 
+  const needsNewAccounts = useMemo<boolean>(() => {
+    for (const job of batchJobs) {
+      const ovForJob = jobOverridesMap[job.job_id] || {};
+      for (const p of job.preview?.people || []) {
+        const ov = ovForJob[p.key];
+        if (ov?.exclude) continue;
+        if (p.match?.status === "existing") continue;
+        const isSelfLinked = Boolean(
+          selfCandidate &&
+            linkSelfClusterId &&
+            selfCandidate.cluster_id === linkSelfClusterId &&
+            ((p.cluster_id && p.cluster_id === selfCandidate.cluster_id) ||
+              p.name === selfCandidate.name),
+        );
+        if (isSelfLinked) continue;
+        return true;
+      }
+    }
+    return false;
+  }, [batchJobs, jobOverridesMap, selfCandidate, linkSelfClusterId]);
+
   function updatePersonOverride(
     jobId: string,
     person: ImportPreviewPerson,
@@ -781,6 +821,13 @@ export function useColdStartBatchWizard({
         return;
       }
     }
+    if (
+      isInitialPasswordRequired(needsNewAccounts, oidcMode) &&
+      !initialPassword.trim()
+    ) {
+      setWizardError(mapLabErrorCode("initial_password_required"));
+      return;
+    }
 
     provisioningRef.current = true;
     setWizardError("");
@@ -812,8 +859,10 @@ export function useColdStartBatchWizard({
 
       const res = await provisionImportBatch({
         jobs: jobsPayload,
-        initial_password: initialPassword.trim() || undefined,
-        include_password: includePassword,
+        initial_password: oidcMode
+          ? undefined
+          : initialPassword.trim() || undefined,
+        include_password: oidcMode ? false : includePassword,
         ...(linkSelfClusterId
           ? { link_self_cluster_id: linkSelfClusterId }
           : {}),
@@ -1200,6 +1249,8 @@ export function useColdStartBatchWizard({
     setLinkSelfClusterId,
     qualitySummary,
     selfCandidate,
+    needsNewAccounts,
+    oidcMode,
     importJob,
     provisionAsOf,
     setProvisionAsOf,

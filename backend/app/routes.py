@@ -314,10 +314,11 @@ async def health(request: Request) -> dict[str, object]:
         "calibration_source": (
             Path(settings.calibration_source).name if settings.calibration_source else None
         ),
+        "oidc_mode": bool(settings.oidc_issuer and settings.oidc_issuer.strip()),
     }
 
 
-def _serialize_auth_user(user: User) -> dict[str, object]:
+def _serialize_auth_user(user: User, settings: Settings | None = None) -> dict[str, object]:
     return {
         "id": str(user.id),
         "display_name": user.display_name,
@@ -329,6 +330,9 @@ def _serialize_auth_user(user: User) -> dict[str, object]:
             user.must_change_password_by.isoformat()
             if user.must_change_password_by is not None
             else None
+        ),
+        "oidc_mode": bool(
+            settings and settings.oidc_issuer and settings.oidc_issuer.strip()
         ),
     }
 
@@ -475,7 +479,7 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
             "access_token": token,
             "token_type": "bearer",
             "expires_in": ttl,
-            "user": _serialize_auth_user(user),
+            "user": _serialize_auth_user(user, settings),
         }
 
 
@@ -507,11 +511,12 @@ async def logout(
 
 @router.get("/auth/me")
 async def me(
+    request: Request,
     actor: Annotated[Actor, Depends(_actor)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, object]:
     user = await _user(session, actor)
-    return _serialize_auth_user(user)
+    return _serialize_auth_user(user, _settings(request))
 
 
 @router.post("/auth/change-password")
@@ -585,7 +590,7 @@ async def change_password(
         "access_token": new_token,
         "token_type": "bearer",
         "expires_in": ttl,
-        "user": _serialize_auth_user(user),
+        "user": _serialize_auth_user(user, settings),
     }
 
 

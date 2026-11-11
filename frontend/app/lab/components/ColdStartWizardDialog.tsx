@@ -15,11 +15,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { mapLabErrorCode } from "@/lib/api";
+import {
+  KNOWN_PUBLIC_DEFAULT_PASSWORD,
+  canSubmitProvisioning,
+  isInitialPasswordRequired,
+} from "@/lib/security";
 import { cn } from "cn";
 
 import { ColdStartQualityPanel } from "./ColdStartQualityPanel";
 import {
-  DEFAULT_INITIAL_PASSWORD,
   FIELD_LABEL_MAP,
   formatProvValue,
 } from "./labTypesAndHelpers";
@@ -46,6 +50,8 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
     setLinkSelfClusterId,
     qualitySummary,
     selfCandidate,
+    needsNewAccounts,
+    oidcMode,
     initialPassword,
     setInitialPassword,
     includePassword,
@@ -299,7 +305,7 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
             />
 
             {/* Spec §2.4 & §8.3.2 Default password non-dismissible warning */}
-            {initialPassword.trim() === DEFAULT_INITIAL_PASSWORD ? (
+            {initialPassword.trim() === KNOWN_PUBLIC_DEFAULT_PASSWORD ? (
               <div
                 role="alert"
                 className="rounded-md border border-destructive bg-destructive/10 px-3.5 py-2.5 text-[12px] font-semibold text-destructive"
@@ -337,15 +343,22 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                   id="prov-pw"
                   type="text"
                   value={initialPassword}
+                  disabled={Boolean(oidcMode)}
+                  placeholder={
+                    oidcMode
+                      ? "已启用 OIDC 统一身份认证，无需初始口令"
+                      : "请设置自定义口令（至少12位，含3类字符）"
+                  }
                   onChange={(e) => setInitialPassword(e.target.value)}
-                  required
+                  required={isInitialPasswordRequired(needsNewAccounts, oidcMode)}
                 />
               </div>
               <div className="flex items-end pb-2">
                 <label className="flex cursor-pointer items-center gap-2 text-[12px] text-foreground">
                   <input
                     type="checkbox"
-                    checked={includePassword}
+                    checked={!oidcMode && includePassword}
+                    disabled={Boolean(oidcMode)}
                     onChange={(e) => setIncludePassword(e.target.checked)}
                     className="h-4 w-4 rounded border-border"
                   />
@@ -648,7 +661,15 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
               </Button>
               <Button
                 type="button"
-                disabled={provisioning || !activeAsOf.trim()}
+                disabled={
+                  !canSubmitProvisioning({
+                    busy: provisioning,
+                    hasAsOfTime: Boolean(activeAsOf.trim()),
+                    hasNewAccounts: needsNewAccounts,
+                    oidcMode,
+                    initialPassword,
+                  })
+                }
                 onClick={handleProvision}
               >
                 {provisioning
