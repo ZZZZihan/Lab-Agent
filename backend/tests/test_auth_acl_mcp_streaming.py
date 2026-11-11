@@ -318,7 +318,9 @@ async def test_chat_stream_inactive_user_and_disconnect_cancels_worker(
     )
     body_iter = stream_resp.body_iterator
     first_chunk = await anext(body_iter)  # type: ignore[arg-type]
-    assert "retrieving" in str(first_chunk)
+    assert '"type": "conversation"' in str(first_chunk)
+    second_chunk = await anext(body_iter)  # type: ignore[arg-type]
+    assert "retrieving" in str(second_chunk)
     await started.wait()
     await body_iter.aclose()  # type: ignore[attr-defined]
     await asyncio.wait_for(cancelled.wait(), timeout=2.0)
