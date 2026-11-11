@@ -88,7 +88,6 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 session.add(user)
                 await session.flush()
                 user_id = str(user.id)
-                await session.commit()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -96,7 +95,9 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     resource_type="user",
                     resource_id=user_id,
                     detail={"role": role, "via": "cli"},
+                    session=session,
                 )
+                await session.commit()
                 print(f"created {user_id} {email} ({role})")
                 return 0
 
@@ -117,7 +118,7 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 new_role = str(args.role).strip()
                 old_role = target_user.role
                 target_user.role = new_role
-                await session.commit()
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -130,13 +131,15 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                         "role_to": new_role,
                         "via": "cli",
                     },
+                    session=session,
                 )
+                await session.commit()
                 print(f"updated role {user_id} {old_role} -> {new_role}")
                 return 0
 
             if cmd in {"deactivate", "activate"}:
                 target_user.is_active = cmd == "activate"
-                await session.commit()
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -144,7 +147,9 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     resource_type="user",
                     resource_id=user_id,
                     detail={"fields": ["is_active"], "via": "cli"},
+                    session=session,
                 )
+                await session.commit()
                 state_str = "active" if target_user.is_active else "inactive"
                 print(f"updated status {user_id} {state_str}")
                 return 0
@@ -162,7 +167,7 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     return 1
                 target_user.password_hash = hash_password(password)
                 target_user.must_change_password_by = None
-                await session.commit()
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -170,7 +175,9 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     resource_type="user",
                     resource_id=user_id,
                     detail={"via": "cli"},
+                    session=session,
                 )
+                await session.commit()
                 print(f"reset password {user_id}")
                 return 0
 

@@ -495,8 +495,6 @@ async def upload_person_signature(
     person.signature_updated_at = now_utc
     person.signature_source = "upload"
     await session.flush()
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=user.id,
@@ -513,7 +511,9 @@ async def upload_person_signature(
             "width": check.width,
             "height": check.height,
         },
+        session=session,
     )
+    await session.commit()
     return {
         "person_id": str(person.id),
         "has_signature": True,
@@ -574,8 +574,6 @@ async def delete_person_signature(
     person.signature_updated_at = None
     person.signature_source = None
     await session.flush()
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=user.id,
@@ -588,7 +586,9 @@ async def delete_person_signature(
             "person_id": str(person.id),
             "previous_sha256": prev_sha,
         },
+        session=session,
     )
+    await session.commit()
     return {
         "person_id": str(person.id),
         "has_signature": False,

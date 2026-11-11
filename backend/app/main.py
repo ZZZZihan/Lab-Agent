@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 
@@ -12,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.audit import normalize_request_id
 from app.config import get_settings
 from app.db import dispose_engine, get_sessionmaker
 from app.ingest_worker import recover_processing, run_worker
@@ -53,13 +53,14 @@ class RequestContextMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        request_id = uuid.uuid4().hex
+        raw_req_id: bytes | None = None
         raw_headers = scope.get("headers")
         header_pairs = raw_headers if isinstance(raw_headers, list) else []
         for key, value in header_pairs:
             if key == b"x-request-id" and value:
-                request_id = value.decode("latin-1")
+                raw_req_id = value
                 break
+        request_id = normalize_request_id(raw_req_id)
         state: ScopeState = scope.setdefault("state", {})
         state["request_id"] = request_id
 

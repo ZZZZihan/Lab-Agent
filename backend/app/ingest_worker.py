@@ -8,7 +8,7 @@ import uuid
 
 from sqlalchemy import delete, text
 
-from app.audit import write_audit
+from app.audit import scrub_audit_str, write_audit
 from app.config import Settings
 from app.db import get_sessionmaker
 from app.logging_conf import get_logger
@@ -103,17 +103,17 @@ async def process_next_pending(embedder: Embedder, settings: Settings) -> uuid.U
             )
             doc.status = "ready"
             doc.error_code = None
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            await write_audit(
+                settings=settings,
+                actor_id=None,
+                action="document_indexed",
+                resource_type="document",
+                resource_id=str(doc_id),
+                detail={"chunks": chunk_count, "ms": elapsed_ms},
+                session=session,
+            )
             await session.commit()
-
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-        await write_audit(
-            settings=settings,
-            actor_id=None,
-            action="document_indexed",
-            resource_type="document",
-            resource_id=str(doc_id),
-            detail={"chunks": chunk_count, "ms": elapsed_ms},
-        )
     except Exception as exc:
         error_code = _extract_error_code(exc)
         next_status = "pending" if attempts < settings.ingest_max_attempts else "failed"
@@ -141,15 +141,19 @@ async def process_next_pending(embedder: Embedder, settings: Settings) -> uuid.U
                     "error_code": error_code,
                 },
             )
+            await write_audit(
+                settings=settings,
+                actor_id=None,
+                action="document_index_failed",
+                resource_type="document",
+                resource_id=str(doc_id),
+                detail={
+                    "error": scrub_audit_str(error_code, max_len=64),
+                    "attempts": attempts,
+                },
+                session=session,
+            )
             await session.commit()
-        await write_audit(
-            settings=settings,
-            actor_id=None,
-            action="document_index_failed",
-            resource_type="document",
-            resource_id=str(doc_id),
-            detail={"error": error_code, "attempts": attempts},
-        )
 
     return doc_id
 

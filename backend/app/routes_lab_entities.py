@@ -136,6 +136,21 @@ async def create_lab_achievement(
         embedder=_embedder(request),
         actor_id=user.id,
     )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_achievement_created",
+        resource_type="lab_achievement",
+        resource_id=str(achievement.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "kind": achievement.kind,
+            "year": achievement.year,
+            "rag_doc_key": doc_key,
+        },
+        session=session,
+    )
     await session.commit()
     return {"achievement": serialized_ach, "rag_doc_key": doc_key}
 
@@ -237,6 +252,17 @@ async def update_lab_achievement(
         embedder=_embedder(request),
         actor_id=user.id,
     )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_achievement_updated",
+        resource_type="lab_achievement",
+        resource_id=str(achievement.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"fields": list(touched_fields), "rag_doc_key": doc_key},
+        session=session,
+    )
     await session.commit()
     return {"achievement": serialized_ach, "rag_doc_key": doc_key}
 
@@ -264,6 +290,17 @@ async def delete_lab_achievement(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_achievement_deleted",
+        resource_type="lab_achievement",
+        resource_id=str(achievement_id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"rag_doc_key": doc_key},
+        session=session,
     )
     await session.commit()
     return {"status": "deleted", "id": str(achievement_id), "rag_doc_key": doc_key}
@@ -333,6 +370,17 @@ async def create_lab_facility(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_facility_created",
+        resource_type="lab_facility",
+        resource_id=str(facility.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"category": facility.category, "rag_doc_key": doc_key},
+        session=session,
     )
     await session.commit()
     return {"facility": serialized_fac, "rag_doc_key": doc_key}
@@ -414,6 +462,17 @@ async def update_lab_facility(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_facility_updated",
+        resource_type="lab_facility",
+        resource_id=str(facility.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"fields": list(touched_fields), "rag_doc_key": doc_key},
+        session=session,
     )
     await session.commit()
     return {"facility": serialized_fac, "rag_doc_key": doc_key}
@@ -546,8 +605,6 @@ async def restore_lab_entity_imported(
         embedder=_embedder(request),
         actor_id=user.id,
     )
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=user.id,
@@ -557,7 +614,9 @@ async def restore_lab_entity_imported(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"fields": restored, "rag_doc_key": doc_key},
+        session=session,
     )
+    await session.commit()
     return {
         **serialized,
         norm_type: serialized,
@@ -585,6 +644,17 @@ async def delete_lab_facility(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_facility_deleted",
+        resource_type="lab_facility",
+        resource_id=str(facility_id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"rag_doc_key": doc_key},
+        session=session,
     )
     await session.commit()
     return {"status": "deleted", "id": str(facility_id), "rag_doc_key": doc_key}

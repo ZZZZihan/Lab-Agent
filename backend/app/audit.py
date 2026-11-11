@@ -18,10 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings
 from app.db import get_sessionmaker
 from app.models import AuditEvent
-from app.rag.redact import contains_email_or_phone
+from app.rag.redact import contains_email_or_phone, redact_text
 
 GENESIS_PREV_HASH = "0" * 64
 AUDIT_ADVISORY_LOCK_ID = 727274
+REQUEST_ID_MAX_LEN = 64
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 FORBIDDEN_KEYS = {
     "prompt",
@@ -85,6 +87,39 @@ def _is_uuid(value: str) -> bool:
 
 def _is_sha256_hex(value: str) -> bool:
     return bool(_SHA256_HEX_RE.fullmatch(value))
+
+
+def normalize_request_id(raw: bytes | str | None) -> str:
+    """Validate incoming X-Request-Id against VARCHAR(64) and safe ASCII token chars."""
+    if raw is not None:
+        text_val = (
+            raw.decode("latin-1", errors="ignore")
+            if isinstance(raw, bytes)
+            else str(raw)
+        ).strip()
+        if _SAFE_REQUEST_ID_RE.fullmatch(text_val):
+            return text_val
+    return uuid.uuid4().hex
+
+
+def _clean_audit_request_id(request_id: str | None) -> str | None:
+    if request_id is None:
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", "", str(request_id)).strip()
+    if not cleaned:
+        return None
+    return cleaned[:REQUEST_ID_MAX_LEN]
+
+
+def scrub_audit_str(value: str | None, *, max_len: int = 120) -> str:
+    """Redact emails/phones/IDs and bound length before placing user strings in audit detail."""
+    if not value:
+        return ""
+    stripped = str(value).strip()
+    if _is_sha256_hex(stripped):
+        return stripped
+    redacted, _ = redact_text(str(value)[:1024])
+    return redacted[: min(max_len, 200)]
 
 
 def sanitize_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -184,6 +219,57 @@ def compute_row_hash(
     return hashlib.sha256(f"{prev_hash}{canonical}".encode()).hexdigest()
 
 
+async def _append_audit_event(
+    session: AsyncSession,
+    *,
+    actor_id: uuid.UUID | None,
+    action: str,
+    resource_type: str | None,
+    resource_id: str | None,
+    clean_request_id: str | None,
+    ip_hashed: str | None,
+    payload: dict[str, Any],
+) -> None:
+    await session.flush()
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": AUDIT_ADVISORY_LOCK_ID},
+    )
+    last_hash = (
+        await session.execute(
+            text("SELECT row_hash FROM audit_events ORDER BY id DESC LIMIT 1")
+        )
+    ).scalar_one_or_none()
+    prev_hash = str(last_hash).strip() if last_hash else GENESIS_PREV_HASH
+    created_at = datetime.now(UTC)
+    row_hash = compute_row_hash(
+        prev_hash,
+        created_at=created_at,
+        actor_id=actor_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        request_id=clean_request_id,
+        ip_hash=ip_hashed,
+        detail=payload,
+    )
+    session.add(
+        AuditEvent(
+            created_at=created_at,
+            actor_id=actor_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            request_id=clean_request_id,
+            ip_hash=ip_hashed,
+            detail=payload,
+            prev_hash=prev_hash,
+            row_hash=row_hash,
+        )
+    )
+    await session.flush()
+
+
 async def write_audit(
     *,
     settings: Settings,
@@ -194,48 +280,37 @@ async def write_audit(
     request_id: str | None = None,
     ip: str | None = None,
     detail: dict[str, Any] | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     payload = sanitize_detail(detail)
     ip_hashed = hash_ip(ip, settings.resolved_audit_hmac_key)
-    maker = get_sessionmaker()
-    async with maker() as session:
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_id)"),
-            {"lock_id": AUDIT_ADVISORY_LOCK_ID},
-        )
-        last_hash = (
-            await session.execute(
-                text("SELECT row_hash FROM audit_events ORDER BY id DESC LIMIT 1")
-            )
-        ).scalar_one_or_none()
-        prev_hash = str(last_hash).strip() if last_hash else GENESIS_PREV_HASH
-        created_at = datetime.now(UTC)
-        row_hash = compute_row_hash(
-            prev_hash,
-            created_at=created_at,
+    clean_request_id = _clean_audit_request_id(request_id)
+    if session is not None:
+        await _append_audit_event(
+            session,
             actor_id=actor_id,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,
-            request_id=request_id,
-            ip_hash=ip_hashed,
-            detail=payload,
+            clean_request_id=clean_request_id,
+            ip_hashed=ip_hashed,
+            payload=payload,
         )
-        session.add(
-            AuditEvent(
-                created_at=created_at,
-                actor_id=actor_id,
-                action=action,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                request_id=request_id,
-                ip_hash=ip_hashed,
-                detail=payload,
-                prev_hash=prev_hash,
-                row_hash=row_hash,
-            )
+        return
+
+    maker = get_sessionmaker()
+    async with maker() as own_session:
+        await _append_audit_event(
+            own_session,
+            actor_id=actor_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            clean_request_id=clean_request_id,
+            ip_hashed=ip_hashed,
+            payload=payload,
         )
-        await session.commit()
+        await own_session.commit()
 
 
 async def verify_audit_chain(session: AsyncSession) -> int | None:
@@ -281,7 +356,12 @@ async def verify_audit_chain(session: AsyncSession) -> int | None:
 
 
 async def run_retention(session: AsyncSession, *, days: int) -> int:
+    await session.flush()
     cutoff = datetime.now(UTC) - timedelta(days=days)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": AUDIT_ADVISORY_LOCK_ID},
+    )
     await session.execute(text("SELECT set_config('labagent.audit_retention', 'on', true)"))
     result = await session.execute(
         text("DELETE FROM audit_events WHERE created_at < :cutoff"),

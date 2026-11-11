@@ -281,11 +281,23 @@ async def reindex_lab_profile(
         embedder=_embedder(request),
         actor_id=user.id,
     )
+    rag_doc_id = str(rag_doc.id) if rag_doc is not None else None
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_profile_reindexed",
+        resource_type="document",
+        resource_id=rag_doc_id,
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"rag_doc_key": doc_key},
+        session=session,
+    )
     await session.commit()
     return {
         "status": "ok",
         "rag_doc_key": doc_key,
-        "rag_document_id": str(rag_doc.id) if rag_doc is not None else None,
+        "rag_document_id": rag_doc_id,
     }
 
 
@@ -429,8 +441,7 @@ async def update_lab_person(
         embedder=_embedder(request),
         actor_id=user.id,
     )
-    await session.commit()
-
+    audited_fields = (["name"] if "name" in fields_set else []) + list(touched_fields)
     await write_audit(
         settings=_settings(request),
         actor_id=user.id,
@@ -439,8 +450,10 @@ async def update_lab_person(
         resource_id=str(person.id),
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
-        detail={"rag_doc_key": doc_key},
+        detail={"fields": audited_fields, "rag_doc_key": doc_key},
+        session=session,
     )
+    await session.commit()
     return {"person": serialized_person, "rag_doc_key": doc_key}
 
 
@@ -547,6 +560,21 @@ async def create_lab_project(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_project_created",
+        resource_type="lab_project",
+        resource_id=str(project.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={
+            "status": project.status,
+            "lab_role": project.lab_role,
+            "rag_doc_key": doc_key,
+        },
+        session=session,
     )
     await session.commit()
     return {"project": serialized_proj, "rag_doc_key": doc_key}
@@ -691,6 +719,17 @@ async def update_lab_project(
         embedder=_embedder(request),
         actor_id=user.id,
     )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_project_updated",
+        resource_type="lab_project",
+        resource_id=str(project.id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"fields": list(touched_fields), "rag_doc_key": doc_key},
+        session=session,
+    )
     await session.commit()
     return {"project": serialized_proj, "rag_doc_key": doc_key}
 
@@ -715,6 +754,17 @@ async def delete_lab_project(
         session,
         embedder=_embedder(request),
         actor_id=user.id,
+    )
+    await write_audit(
+        settings=_settings(request),
+        actor_id=user.id,
+        action="lab_project_deleted",
+        resource_type="lab_project",
+        resource_id=str(project_id),
+        request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
+        detail={"rag_doc_key": doc_key},
+        session=session,
     )
     await session.commit()
     return {"status": "deleted", "id": str(project_id), "rag_doc_key": doc_key}

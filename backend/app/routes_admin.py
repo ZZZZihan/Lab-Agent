@@ -162,8 +162,6 @@ async def create_user(
     session.add(user)
     await session.flush()
     serialized = _serialize_user(user)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -173,7 +171,9 @@ async def create_user(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"role": role},
+        session=session,
     )
+    await session.commit()
     return {**serialized, "user": serialized}
 
 
@@ -224,8 +224,6 @@ async def update_user(
     detail["fields"] = changed_fields
     await session.flush()
     serialized = _serialize_user(user)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -235,7 +233,9 @@ async def update_user(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail=detail,
+        session=session,
     )
+    await session.commit()
     return {**serialized, "user": serialized}
 
 
@@ -265,8 +265,6 @@ async def reset_user_password(
     user.password_hash = hash_password(body.password)
     user.must_change_password_by = None
     await session.flush()
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -276,7 +274,9 @@ async def reset_user_password(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={},
+        session=session,
     )
+    await session.commit()
     return {"status": "ok", "id": str(user.id)}
 
 
@@ -316,8 +316,6 @@ async def create_group(
     session.add(group)
     await session.flush()
     serialized = await _serialize_group(session, group)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -327,7 +325,9 @@ async def create_group(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"slug": slug},
+        session=session,
     )
+    await session.commit()
     return {**serialized, "group": serialized}
 
 
@@ -377,8 +377,6 @@ async def set_group_members(
         session.add(GroupMember(group_id=group.id, user_id=uid))
     await session.flush()
     serialized = await _serialize_group(session, group)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -388,5 +386,7 @@ async def set_group_members(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"added": added, "removed": removed},
+        session=session,
     )
+    await session.commit()
     return {**serialized, "group": serialized, "added": added, "removed": removed}

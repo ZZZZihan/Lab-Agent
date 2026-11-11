@@ -149,8 +149,6 @@ async def apply_reindex(
         )
     )
     doc_count = int(getattr(res, "rowcount", 0) or 0)
-    await session.commit()
-
     new_slug = settings.embedding_slug[:200]
     await write_audit(
         settings=settings,
@@ -163,7 +161,9 @@ async def apply_reindex(
             "documents": doc_count,
             "index": index_kind,
         },
+        session=session,
     )
+    await session.commit()
     return True
 
 

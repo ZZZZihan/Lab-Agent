@@ -121,8 +121,6 @@ async def batch_resolve_imports(
         serialized_jobs.append(_serialize_import_job(job, include_preview=True))
 
     await session.flush()
-    await session.commit()
-
     q = resolved["quality"]
     await write_audit(
         settings=_settings(request),
@@ -133,14 +131,16 @@ async def batch_resolve_imports(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "job_ids": [str(j.id) for j in jobs],
+            "job_ids": [str(j.id) for j in jobs[:80]],
             "clusters": len(resolved["clusters"]),
             "people_total": int(q["people_total"]),
             "t1_covered": int(q["t1_covered"]),
             "injected_student_ids": int(q["injected_student_ids"]),
             "injected_emails": int(q["injected_emails"]),
         },
+        session=session,
     )
+    await session.commit()
     return {
         "jobs": serialized_jobs,
         "clusters": resolved["clusters"],
@@ -713,8 +713,6 @@ async def batch_provision_imports(
     }
 
     await session.flush()
-    await session.commit()
-
     await write_audit(
         settings=settings,
         actor_id=actor.id,
@@ -724,13 +722,15 @@ async def batch_provision_imports(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "job_ids": [str(j.id) for j in sorted_jobs],
+            "job_ids": [str(j.id) for j in sorted_jobs[:80]],
             "users_created": len(combined_new_accounts),
             "users_linked": len(combined_existing_accounts),
-            "merge_queue": merge_queue,
+            "merge_queue": merge_queue[:80],
             "include_password": bool(body.include_password),
         },
+        session=session,
     )
+    await session.commit()
 
     return {
         "jobs": job_results,

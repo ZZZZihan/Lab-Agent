@@ -97,7 +97,8 @@ def issue_token(user: User, settings: Settings) -> tuple[str, str, int]:
 
 
 async def revoke_token(session: AsyncSession, jti: str, exp: int) -> None:
-    session.add(RevokedToken(jti=jti, expires_at=datetime.fromtimestamp(exp, UTC)))
+    if await session.get(RevokedToken, jti) is None:
+        session.add(RevokedToken(jti=jti, expires_at=datetime.fromtimestamp(exp, UTC)))
 
 
 async def is_revoked(session: AsyncSession, jti: str) -> bool:
