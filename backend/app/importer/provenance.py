@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import undefer
+from sqlalchemy.orm import defer, undefer
 
 from app.importer.fingerprint import (
     achievement_fp,
@@ -117,6 +117,7 @@ class MergePreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     as_of_time: date | None = None
+    exclude_keys: list[str] = Field(default_factory=list)
 
 
 class MergeDecision(BaseModel):
@@ -527,6 +528,21 @@ async def _refresh_and_validate_entity_fingerprint(
         entity.entity_fingerprint = new_fp
 
 
+async def delete_entity_provenance(
+    session: AsyncSession,
+    entity_type: EntityType,
+    entity_id: uuid.UUID,
+) -> int:
+    """Delete all FieldProvenance rows (live and superseded) for a deleted entity."""
+    res = await session.execute(
+        delete(FieldProvenance).where(
+            FieldProvenance.entity_type == entity_type,
+            FieldProvenance.entity_id == entity_id,
+        )
+    )
+    return int(getattr(res, "rowcount", 0) or 0)
+
+
 async def restore_entity_imported_fields(
     session: AsyncSession,
     *,
@@ -539,6 +555,20 @@ async def restore_entity_imported_fields(
     await session.refresh(entity)
     prior_affiliation = getattr(entity, "affiliation", None)
     prior_email = getattr(entity, "email", None)
+    has_entity_import_baseline = (
+        getattr(entity, "source_import_id", None) is not None
+        or await session.scalar(
+            select(FieldProvenance.id)
+            .where(
+                FieldProvenance.entity_type == entity_type,
+                FieldProvenance.entity_id == entity.id,
+                FieldProvenance.source_kind != "manual",
+                FieldProvenance.superseded.is_(False),
+            )
+            .limit(1)
+        )
+        is not None
+    )
     target_fields = list(fields)
     if (
         entity_type == "project"
@@ -581,9 +611,15 @@ async def restore_entity_imported_fields(
             restored.append(field)
             continue
         manual_rows = [r for r in rows if r.source_kind == "manual"]
+        remaining = [r for r in rows if r.source_kind != "manual"]
+        if manual_rows and not remaining and not has_entity_import_baseline:
+            raise ProvisionError(
+                409,
+                "no_imported_baseline",
+                f"该手工录入记录不存在可恢复的导入基准值: {field}",
+            )
         for mr in manual_rows:
             mr.superseded = True
-        remaining = [r for r in rows if r.source_kind != "manual"]
         if not manual_rows and not remaining:
             restored.append(field)
             continue
@@ -675,6 +711,11 @@ async def build_provenance_map(
         src_job_id = getattr(ent, "source_import_id", None)
         ent_as_of = getattr(ent, "as_of_time", None)
         ent_as_of_str = ent_as_of.isoformat() if isinstance(ent_as_of, date) else None
+        has_any_non_manual = src_job_id is not None or any(
+            r.source_kind != "manual"
+            for f in MANAGED_FIELDS[entity_type]
+            for r in by_entity_field.get((ent.id, f), [])
+        )
         for field in MANAGED_FIELDS[entity_type]:
             cur_val = get_entity_json_value(entity_type, ent, field)
             f_rows = by_entity_field.get((ent.id, field), [])
@@ -683,7 +724,9 @@ async def build_provenance_map(
                 non_manual = [r for r in f_rows if r.source_kind != "manual"]
                 best_imp = effective_value(non_manual)
                 if eff is not None:
-                    has_manual = eff.source_kind == "manual"
+                    has_manual = eff.source_kind == "manual" and (
+                        best_imp is not None or has_any_non_manual
+                    )
                     imp_val = best_imp.value if best_imp is not None else None
                     ent_summary[field] = {
                         "source_kind": eff.source_kind,
@@ -1666,14 +1709,18 @@ async def build_merge_preview(
         raise ProvisionError(409, "import_invalid_status", "该导入任务当前状态不可合并")
 
     as_of_date = _resolve_job_as_of(job, as_of_time_override)
-    await ensure_baseline_provenance(session)
 
     existing_users = list(await session.scalars(select(User)))
     existing_people = list(await session.scalars(select(LabPerson)))
     existing_projects = list(await session.scalars(select(LabProject)))
     existing_achievements = list(await session.scalars(select(LabAchievement)))
     existing_facilities = list(await session.scalars(select(LabFacility)))
-    all_jobs = {j.id: j for j in await session.scalars(select(ImportJob))}
+    all_jobs = {
+        j.id: j
+        for j in await session.scalars(
+            select(ImportJob).options(defer(ImportJob.preview))
+        )
+    }
 
     live_rows = list(
         await session.scalars(
@@ -1702,6 +1749,43 @@ async def build_merge_preview(
                 superseded=False,
             )
         by_ef.setdefault((r.entity_type, r.entity_id, r.field), []).append(row_obj)
+
+    # Synthesize transient baseline provenance in-memory for legacy entities without mutating DB
+    preview_entity_groups: tuple[tuple[EntityType, Sequence[Any]], ...] = (
+        ("person", existing_people),
+        ("project", existing_projects),
+        ("achievement", existing_achievements),
+        ("facility", existing_facilities),
+    )
+    for entity_type_k, group in preview_entity_groups:
+        for ent in group:
+            src_job_id = getattr(ent, "source_import_id", None)
+            ent_as_of = getattr(ent, "as_of_time", None) or date.today()
+            row_as_of = (
+                as_of_date
+                if src_job_id is not None and src_job_id == job.id
+                else ent_as_of
+            )
+            for field in MANAGED_FIELDS[entity_type_k]:
+                if (entity_type_k, ent.id, field) in by_ef:
+                    continue
+                val = get_entity_json_value(entity_type_k, ent, field)
+                if _is_blank(val):
+                    continue
+                by_ef[(entity_type_k, ent.id, field)] = [
+                    FieldProvenance(
+                        id=0,
+                        entity_type=entity_type_k,
+                        entity_id=ent.id,
+                        field=field,
+                        value=val,
+                        source_kind="import" if src_job_id is not None else "legacy",
+                        source_job_id=src_job_id,
+                        as_of_time=row_as_of,
+                        recorded_by=None,
+                        superseded=False,
+                    )
+                ]
 
     preview: dict[str, Any] = dict(job.preview or {})
     exclude_key_set = {
@@ -2071,6 +2155,7 @@ async def execute_merge(
 
     as_of_date = _resolve_job_as_of(job, body.as_of_time)
     exclude_key_set = {str(k).strip() for k in body.exclude_keys if str(k).strip()}
+    await ensure_baseline_provenance(session)
     await _reconcile_job_existing_provenance(session, job.id, as_of_date)
     preview_result = await build_merge_preview(
         session,
@@ -2185,6 +2270,13 @@ async def execute_merge(
                 and old_r.source_kind == "import"
                 and not old_r.superseded
             ]
+            prior_job_manual_rows = [
+                old_r
+                for old_r in f_rows
+                if old_r.source_job_id == job.id
+                and old_r.source_kind == "manual"
+                and not old_r.superseded
+            ]
 
             imp_row = FieldProvenance(
                 entity_type=entity_type,
@@ -2200,6 +2292,24 @@ async def execute_merge(
             session.add(imp_row)
             f_rows.append(imp_row)
 
+            explicit_decision = (
+                _lookup_decision(decisions_map, ch) if ch is not None else None
+            )
+            if ch is None and prior_job_manual_rows:
+                synth_item: dict[str, object] = {
+                    "change_key": f"{entity_type}:{entity.id}:{field}",
+                    "fingerprint_key": f"{entity_type}:{entity.entity_fingerprint}:{field}",
+                    "entity_type": entity_type,
+                    "entity_name": getattr(entity, "name", None)
+                    or getattr(entity, "title", None)
+                    or "",
+                    "field": field,
+                }
+                if _lookup_decision(decisions_map, synth_item) == "keep_current":
+                    for old_mr in prior_job_manual_rows:
+                        old_mr.superseded = True
+                    imp_row.superseded = True
+
             if ch is not None:
                 cat = str(ch.get("category") or "")
                 default_act: MergeAction = (
@@ -2207,10 +2317,12 @@ async def execute_merge(
                     if ch.get("default_action") == "adopt_incoming"
                     else "keep_current"
                 )
-                chosen_act = _lookup_decision(decisions_map, ch) or default_act
+                chosen_act = explicit_decision or default_act
 
                 if cat in ("time_regression", "manual_protected", "same_time_conflict"):
                     if chosen_act == "force_adopt":
+                        for old_mr in prior_job_manual_rows:
+                            old_mr.superseded = True
                         man_row = FieldProvenance(
                             entity_type=entity_type,
                             entity_id=entity.id,
@@ -2226,6 +2338,15 @@ async def execute_merge(
                         f_rows.append(man_row)
                         forced_fields_count += 1
                         if entity_type == "project" and field == "status":
+                            for old_ss_mr in by_ef.get(
+                                ("project", entity.id, "status_source"), []
+                            ):
+                                if (
+                                    old_ss_mr.source_job_id == job.id
+                                    and old_ss_mr.source_kind == "manual"
+                                    and not old_ss_mr.superseded
+                                ):
+                                    old_ss_mr.superseded = True
                             ss_man_row = FieldProvenance(
                                 entity_type="project",
                                 entity_id=entity.id,
@@ -2243,9 +2364,16 @@ async def execute_merge(
                             ).append(ss_man_row)
                             incoming_fields["status_source"] = "explicit"
                             entity.status_source = "explicit"
-                    elif cat == "same_time_conflict" and chosen_act == "keep_current":
-                        imp_row.superseded = True
+                    elif chosen_act == "keep_current":
+                        if explicit_decision == "keep_current":
+                            for old_mr in prior_job_manual_rows:
+                                old_mr.superseded = True
+                        if cat == "same_time_conflict":
+                            imp_row.superseded = True
                 elif cat in ("updated", "fill_blank") and chosen_act == "keep_current":
+                    if explicit_decision == "keep_current":
+                        for old_mr in prior_job_manual_rows:
+                            old_mr.superseded = True
                     imp_row.superseded = True
 
             if not imp_row.superseded:
@@ -2953,8 +3081,7 @@ async def revert_import_merge(
                 or other_sig_job_id is not None
             ):
                 # Spec §10.6 & v2.2: Never delete LabPerson linked to a User account, holding a manual signature upload, or owned by another active import's signature snapshot!
-                if other_sig_job_id is not None:
-                    ent.source_import_id = other_sig_job_id
+                ent.source_import_id = other_sig_job_id
                 for field in MANAGED_FIELDS[etype]:
                     cur_val = get_entity_json_value(etype, ent, field)
                     if not _is_blank(cur_val) and field not in ("name", "project_role"):
@@ -2981,7 +3108,15 @@ async def revert_import_merge(
                     ent.signature_updated_at = None
                     ent.signature_source = None
                     reverted_fields += 1
+                await _refresh_and_validate_entity_fingerprint(
+                    session,
+                    etype,
+                    ent,
+                    prior_affiliation=prior_affiliation,
+                    prior_email=prior_email,
+                )
             else:
+                await delete_entity_provenance(session, etype, eid)
                 await session.delete(ent)
                 deleted_entities += 1
             continue
@@ -3020,6 +3155,8 @@ async def revert_import_merge(
                 ent.source_import_id = rem_jobs[-1]
             elif etype == "person" and str(ent.id) in other_sig_owner_by_pid:
                 ent.source_import_id = other_sig_owner_by_pid[str(ent.id)]
+            else:
+                ent.source_import_id = None
 
     cur_stats = dict(job.stats or {})
     raw_pre_sigs = cur_stats.pop("_pre_merge_signatures", None)

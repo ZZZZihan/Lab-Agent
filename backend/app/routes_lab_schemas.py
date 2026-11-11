@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -428,7 +428,8 @@ async def _resolve_source_import_id(
     actor_id: uuid.UUID,
     as_of_date: date,
     explicit_id: uuid.UUID | None = None,
-) -> tuple[uuid.UUID, date]:
+) -> tuple[uuid.UUID | None, date]:
+    _ = actor_id
     if explicit_id is not None:
         job = await session.get(ImportJob, explicit_id)
         if job is None:
@@ -440,29 +441,7 @@ async def _resolve_source_import_id(
                 "仅可关联已开号或已合并的导入任务",
             )
         return job.id, job.as_of_time or as_of_date
-    latest_job = await session.scalar(
-        select(ImportJob)
-        .where(ImportJob.status.in_(("provisioned", "merged")))
-        .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
-        .limit(1)
-    )
-    if latest_job is not None:
-        return latest_job.id, latest_job.as_of_time or as_of_date
-    placeholder = ImportJob(
-        uploaded_by=actor_id,
-        original_filename="manual-entry.docx",
-        content_sha256="0" * 64,
-        parser_version="v2.1-manual",
-        as_of_time=as_of_date,
-        status="provisioned",
-        preview={"cover": {"project_title": "课题组资料库档案"}},
-        stats={},
-        provisioned_at=datetime.now(UTC),
-        provisioned_by=actor_id,
-    )
-    session.add(placeholder)
-    await session.flush()
-    return placeholder.id, as_of_date
+    return None, as_of_date
 
 
 async def _require_lab_editor(

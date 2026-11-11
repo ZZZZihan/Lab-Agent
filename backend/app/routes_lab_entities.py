@@ -22,6 +22,7 @@ from app.importer.provenance import (
     ACHIEVEMENT_MANAGED_FIELDS,
     FACILITY_MANAGED_FIELDS,
     build_provenance_map,
+    delete_entity_provenance,
     get_entity_json_value,
     record_entity_import_provenance,
     record_manual_field_edit,
@@ -284,6 +285,7 @@ async def delete_lab_achievement(
         require_owner=True,
     )
 
+    await delete_entity_provenance(session, "achievement", achievement_id)
     await session.delete(achievement)
     await session.flush()
     doc_key, _ = await sync_lab_profile_rag(
@@ -638,6 +640,7 @@ async def delete_lab_facility(
         raise APIError(404, "not_found", "设备记录不存在")
     user = await _require_lab_editor(session, actor, admin_only=True)
 
+    await delete_entity_provenance(session, "facility", facility_id)
     await session.delete(facility)
     await session.flush()
     doc_key, _ = await sync_lab_profile_rag(

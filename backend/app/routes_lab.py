@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.audit import write_audit
 from app.auth import Actor
@@ -20,6 +21,7 @@ from app.importer.provenance import (
     PERSON_MANAGED_FIELDS,
     PROJECT_MANAGED_FIELDS,
     build_provenance_map,
+    delete_entity_provenance,
     get_entity_json_value,
     record_entity_import_provenance,
     record_manual_field_edit,
@@ -89,6 +91,7 @@ async def lab_overview(
     )
     latest_job = await session.scalar(
         select(ImportJob)
+        .options(defer(ImportJob.preview))
         .where(ImportJob.status.in_(("provisioned", "merged")))
         .order_by(ImportJob.provisioned_at.desc(), ImportJob.created_at.desc())
         .limit(1)
@@ -748,6 +751,7 @@ async def delete_lab_project(
         session, actor, owner_name=project.pi_name, require_owner=True
     )
 
+    await delete_entity_provenance(session, "project", project_id)
     await session.delete(project)
     await session.flush()
     doc_key, _ = await sync_lab_profile_rag(

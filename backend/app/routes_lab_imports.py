@@ -9,6 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.audit import scrub_audit_str, write_audit
 from app.auth import Actor
@@ -34,6 +35,7 @@ from app.importer.provision import (
 )
 from app.importer.reader import DocxValidationError
 from app.models import (
+    FieldProvenance,
     ImportJob,
     LabAchievement,
     LabFacility,
@@ -194,7 +196,10 @@ async def list_import_jobs(
     )
     rows = list(
         await session.scalars(
-            select(ImportJob).order_by(ImportJob.created_at.desc()).limit(50)
+            select(ImportJob)
+            .options(defer(ImportJob.preview))
+            .order_by(ImportJob.created_at.desc())
+            .limit(50)
         )
     )
     return {
@@ -263,6 +268,15 @@ async def delete_import_job(
         is not None
         or await session.scalar(
             select(LabFacility.id).where(LabFacility.source_import_id == job_id).limit(1)
+        )
+        is not None
+        or await session.scalar(
+            select(FieldProvenance.id)
+            .where(
+                FieldProvenance.source_job_id == job_id,
+                FieldProvenance.superseded.is_(False),
+            )
+            .limit(1)
         )
         is not None
     )
@@ -618,10 +632,10 @@ async def merge_preview_import_job(
             session,
             job_id=job_id,
             as_of_time_override=body.as_of_time if body is not None else None,
+            exclude_keys=body.exclude_keys if body is not None else None,
         )
     except ProvisionError as exc:
         raise APIError(exc.status, exc.code, exc.message) from exc
-    await session.commit()
     return preview
 
 
