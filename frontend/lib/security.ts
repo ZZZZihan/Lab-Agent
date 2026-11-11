@@ -98,6 +98,25 @@ export const RESERVED_LOGIN_NAMES_CLIENT = new Set([
 
 const DEMO_PASSWORD_PREFIX = "labagent-demo-" + "2026-";
 
+const UNICODE_LOWERCASE_RE = /[\p{Lowercase}ʕ]/u;
+const UNICODE_UPPERCASE_RE = /\p{Uppercase}/u;
+const UNICODE_DIGIT_RE =
+  /[\p{Nd}²³¹፩-፱᧚⁰⁴-⁹₀-₉①-⑨⑴-⑼⒈-⒐⓪⓵-⓽⓿❶-❾➀-➈➊-➒\u{10A40}-\u{10A43}\u{10E60}-\u{10E68}\u{11052}-\u{1105A}\u{1F100}-\u{1F10A}]/u;
+const UNICODE_NON_ALNUM_RE = /[^\p{L}\p{N}]/u;
+
+export function passwordCodePointLength(password: string): number {
+  return Array.from(password).length;
+}
+
+export function countPasswordCharClasses(password: string): number {
+  return (
+    (UNICODE_LOWERCASE_RE.test(password) ? 1 : 0) +
+    (UNICODE_UPPERCASE_RE.test(password) ? 1 : 0) +
+    (UNICODE_DIGIT_RE.test(password) ? 1 : 0) +
+    (UNICODE_NON_ALNUM_RE.test(password) ? 1 : 0)
+  );
+}
+
 export function isValidLoginNameClient(loginName: string): boolean {
   const normalized = loginName.trim().toLowerCase();
   if (!normalized || RESERVED_LOGIN_NAMES_CLIENT.has(normalized)) {
@@ -113,10 +132,11 @@ export function validatePasswordClient(
     oldPassword?: string | null;
   },
 ): string | null {
-  if (password.length < 12) {
+  const cpLength = passwordCodePointLength(password);
+  if (cpLength < 12) {
     return "密码长度至少为 12 个字符";
   }
-  if (password.length > 256) {
+  if (cpLength > 256) {
     return "密码长度不能超过 256 个字符";
   }
   const lowered = password.toLowerCase();
@@ -135,12 +155,7 @@ export function validatePasswordClient(
       return "密码不能包含邮箱的本地部分";
     }
   }
-  const classes =
-    (/[a-z]/.test(password) ? 1 : 0) +
-    (/[A-Z]/.test(password) ? 1 : 0) +
-    (/[0-9]/.test(password) ? 1 : 0) +
-    (/[^\p{L}\p{N}]/u.test(password) ? 1 : 0);
-  if (classes < 3) {
+  if (countPasswordCharClasses(password) < 3) {
     return "密码至少需包含大写字母、小写字母、数字和特殊字符中的 3 类";
   }
   return null;

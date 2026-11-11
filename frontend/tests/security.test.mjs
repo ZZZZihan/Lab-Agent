@@ -1161,6 +1161,11 @@ test("validatePasswordClient, isValidLoginNameClient, isRecentAchievementYear, a
     null,
   );
   assert.notEqual(validatePasswordClient("alllowercase1234"), null);
+  assert.notEqual(validatePasswordClient("😀".repeat(6)), null);
+  assert.equal(validatePasswordClient("ÉéÉéÉéÉé1234"), null);
+  assert.equal(validatePasswordClient("ДдДдДдДд1234"), null);
+  assert.equal(validatePasswordClient("ΑαΑαΑαΑα²²²²"), null);
+  assert.equal(validatePasswordClient("Aa1" + "😀".repeat(150)), null);
   assert.equal(
     validatePasswordClient("StrongPass#2026", {
       email: "alice@qingheng.lab",
@@ -1251,6 +1256,56 @@ test("validatePasswordClient, isValidLoginNameClient, isRecentAchievementYear, a
     await apiModule.logout();
     await apiModule.currentUser();
     assert.equal(sessionHits, 3);
+
+    // 5. Stale in-flight currentUser() across logout() + login() never overwrites the new user cache
+    apiModule.resetClientAuthCache();
+    let resolveDelayedSession;
+    globalThis.fetch = async (url, init = {}) => {
+      if (url === "/api/session" && (!init.method || init.method === "GET")) {
+        return new Promise((resolve) => {
+          resolveDelayedSession = () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  user: {
+                    id: "u-stale-old",
+                    display_name: "Stale Old User",
+                    role: "viewer",
+                  },
+                }),
+                {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                },
+              ),
+            );
+        });
+      }
+      if (url === "/api/session" && init.method === "DELETE") {
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }
+      if (url === "/api/session" && init.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            user: {
+              id: "u-fresh-new",
+              display_name: "Fresh New User",
+              role: "admin",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch URL in race test: ${url}`);
+    };
+    const pendingOldSession = apiModule.currentUser();
+    await apiModule.logout();
+    const loggedInNew = await apiModule.login("new@qingheng.lab", "StrongPass#2026");
+    assert.equal(loggedInNew.id, "u-fresh-new");
+    resolveDelayedSession();
+    await pendingOldSession;
+    const afterStaleResolve = await apiModule.currentUser();
+    assert.equal(afterStaleResolve?.id, "u-fresh-new");
   } finally {
     apiModule.resetClientAuthCache();
     globalThis.fetch = prevFetch;

@@ -288,9 +288,12 @@ let inflightUserPromise: Promise<User | null> | null = null;
 let cachedHealthEntry: { health: HealthResponse; expiresAt: number } | null =
   null;
 let inflightHealthPromise: Promise<HealthResponse> | null = null;
+let invalidationGen = 0;
+let authWriteGen = 0;
+let userFetchSeq = 0;
+let healthFetchSeq = 0;
 
-function setCachedCurrentUser(user: User | null): void {
-  inflightUserPromise = null;
+function writeCachedCurrentUser(user: User | null): void {
   if (user) {
     cachedUserEntry = {
       user,
@@ -301,7 +304,15 @@ function setCachedCurrentUser(user: User | null): void {
   }
 }
 
+function commitAuthenticatedUser(user: User): void {
+  authWriteGen += 1;
+  inflightUserPromise = null;
+  writeCachedCurrentUser(user);
+}
+
 export function resetClientAuthCache(): void {
+  invalidationGen += 1;
+  authWriteGen += 1;
   cachedUserEntry = null;
   inflightUserPromise = null;
   cachedHealthEntry = null;
@@ -323,16 +334,23 @@ export function resolveOidcMode(user?: User | null): Promise<boolean> {
   if (typeof user?.oidc_mode === "boolean") {
     return Promise.resolve(user.oidc_mode);
   }
-  if (cachedHealthEntry && typeof cachedHealthEntry.health.oidc_mode === "boolean") {
+  if (
+    cachedHealthEntry &&
+    Date.now() < cachedHealthEntry.expiresAt &&
+    typeof cachedHealthEntry.health.oidc_mode === "boolean"
+  ) {
     return Promise.resolve(cachedHealthEntry.health.oidc_mode);
   }
   if (!cachedOidcModePromise) {
-    cachedOidcModePromise = getBootstrapStatus()
+    const req = getBootstrapStatus()
       .then((res) => Boolean(res.oidc_mode))
       .catch((err) => {
-        cachedOidcModePromise = null;
+        if (cachedOidcModePromise === req) {
+          cachedOidcModePromise = null;
+        }
         throw err;
       });
+    cachedOidcModePromise = req;
   }
   return cachedOidcModePromise;
 }
@@ -350,12 +368,16 @@ export async function getSystemHealth(options?: {
   if (!options?.force && inflightHealthPromise) {
     return inflightHealthPromise;
   }
+  const startInvalidationGen = invalidationGen;
+  const seq = ++healthFetchSeq;
   const req = api<HealthResponse>("health")
     .then((health) => {
-      cachedHealthEntry = {
-        health,
-        expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
-      };
+      if (startInvalidationGen === invalidationGen && seq === healthFetchSeq) {
+        cachedHealthEntry = {
+          health,
+          expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
+        };
+      }
       return health;
     })
     .finally(() => {
@@ -370,6 +392,7 @@ export async function getSystemHealth(options?: {
 export async function bootstrapAdmin(
   payload: BootstrapAdminPayload,
 ): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const response = await fetch("/api/session/bootstrap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -377,7 +400,9 @@ export async function bootstrapAdmin(
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
-  setCachedCurrentUser(body.user);
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(body.user);
+  }
   return body.user;
 }
 
@@ -394,15 +419,21 @@ export async function currentUser(options?: {
   if (!options?.force && inflightUserPromise) {
     return inflightUserPromise;
   }
+  const startWriteGen = authWriteGen;
+  const seq = ++userFetchSeq;
   const req = (async () => {
     const response = await fetch("/api/session", { cache: "no-store" });
     if (response.status === 401) {
-      cachedUserEntry = null;
+      if (startWriteGen === authWriteGen && seq === userFetchSeq) {
+        cachedUserEntry = null;
+      }
       return null;
     }
     if (!response.ok) throw await parseError(response);
     const body = (await response.json()) as { user: User };
-    setCachedCurrentUser(body.user);
+    if (startWriteGen === authWriteGen && seq === userFetchSeq) {
+      writeCachedCurrentUser(body.user);
+    }
     return body.user;
   })().finally(() => {
     if (inflightUserPromise === req) {
@@ -414,6 +445,7 @@ export async function currentUser(options?: {
 }
 
 export async function login(identifier: string, password: string): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const response = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -421,7 +453,9 @@ export async function login(identifier: string, password: string): Promise<User>
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
-  setCachedCurrentUser(body.user);
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(body.user);
+  }
   return body.user;
 }
 
@@ -430,6 +464,7 @@ export async function changePassword(
   new_password: string,
   email?: string,
 ): Promise<User> {
+  const startInvalidationGen = invalidationGen;
   const res = await api<{ status: string; user: User }>("auth/change-password", {
     method: "POST",
     body: JSON.stringify({
@@ -438,7 +473,9 @@ export async function changePassword(
       ...(email && email.trim() ? { email: email.trim() } : {}),
     }),
   });
-  setCachedCurrentUser(res.user);
+  if (startInvalidationGen === invalidationGen) {
+    commitAuthenticatedUser(res.user);
+  }
   return res.user;
 }
 

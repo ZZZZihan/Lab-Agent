@@ -16,7 +16,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, changePassword, currentUser, logout, type User } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { KNOWN_PUBLIC_DEFAULT_PASSWORD } from "@/lib/security";
+import {
+  KNOWN_PUBLIC_DEFAULT_PASSWORD,
+  countPasswordCharClasses,
+  passwordCodePointLength,
+} from "@/lib/security";
 
 function computeDeadlineInfo(
   deadlineIso: string | null | undefined,
@@ -103,13 +107,9 @@ export default function ChangePasswordPage() {
   );
 
   const checklist = useMemo(() => {
-    const ruleLength = newPw.length >= 12 && newPw.length <= 256;
-    const charClasses =
-      (/[a-z]/.test(newPw) ? 1 : 0) +
-      (/[A-Z]/.test(newPw) ? 1 : 0) +
-      (/[0-9]/.test(newPw) ? 1 : 0) +
-      (/[^\p{L}\p{N}]/u.test(newPw) ? 1 : 0);
-    const ruleClasses = charClasses >= 3;
+    const cpLen = passwordCodePointLength(newPw);
+    const ruleLength = cpLen >= 12 && cpLen <= 256;
+    const ruleClasses = countPasswordCharClasses(newPw) >= 3;
 
     const ruleNotDefaultOrOld =
       newPw.length > 0 &&
