@@ -21,6 +21,7 @@ from app.maintenance import run_maintenance_worker
 from app.otel import setup_telemetry
 from app.rag.embedder import build_embedder
 from app.rag.index_meta import check_index, read_meta
+from app.rag.rerank import close_rerank_client
 from app.ratelimit import RateLimiter
 from app.routes import install_exception_handler, router
 from app.routes_admin import router as admin_router
@@ -102,9 +103,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await ensure_prod_bootstrap_token(session, settings)
     except Exception:
         log.error("database_unreachable")
+        await app.state.embedder.aclose()
+        await app.state.llm.aclose()
+        await close_rerank_client()
+        await app.state.limiter.close()
         raise
     if idx_state == "mismatch":
         await app.state.embedder.aclose()
+        await app.state.llm.aclose()
+        await close_rerank_client()
         await app.state.limiter.close()
         raise RuntimeError(
             f"数据库中的向量索引 ({meta.fingerprint if meta else 'unknown'}) 与当前配置 "
@@ -146,6 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await worker_task
         await app.state.embedder.aclose()
         await app.state.llm.aclose()
+        await close_rerank_client()
         await app.state.limiter.close()
         await dispose_engine()
 

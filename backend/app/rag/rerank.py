@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import math
 from collections.abc import Iterator, Sequence
 from typing import Any
@@ -70,6 +72,34 @@ class RerankClient:
         self.timeout_seconds = float(timeout_seconds)
         self._transport = transport
         self._external_client = client
+        self._owned_client: httpx.AsyncClient | None = None
+        self._owned_client_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._external_client is not None:
+            return self._external_client
+        running_loop = asyncio.get_running_loop()
+        if (
+            self._owned_client is None
+            or self._owned_client.is_closed
+            or self._owned_client_loop is not running_loop
+        ):
+            self._owned_client = httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                transport=self._transport,
+            )
+            self._owned_client_loop = running_loop
+        return self._owned_client
+
+    async def aclose(self) -> None:
+        client = self._owned_client
+        client_loop = self._owned_client_loop
+        self._owned_client = None
+        self._owned_client_loop = None
+        if client is not None and not client.is_closed:
+            running_loop = asyncio.get_running_loop()
+            if client_loop is None or client_loop is running_loop:
+                await client.aclose()
 
     async def rerank(
         self,
@@ -100,23 +130,13 @@ class RerankClient:
 
         url = f"{self.base_url}/rerank"
         try:
-            if self._external_client is not None:
-                response = await self._external_client.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout_seconds,
-                )
-            else:
-                async with httpx.AsyncClient(
-                    timeout=self.timeout_seconds,
-                    transport=self._transport,
-                ) as http_client:
-                    response = await http_client.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                    )
+            http_client = self._get_http_client()
+            response = await http_client.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout_seconds,
+            )
         except httpx.TimeoutException as exc:
             raise RerankError("rerank_timeout", f"Rerank request timed out: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -195,6 +215,13 @@ class RerankClient:
 
 _default_rerank_client: RerankClient | None = None
 _default_transport: httpx.AsyncBaseTransport | None = None
+_pooled_rerank_client: RerankClient | None = None
+_pooled_rerank_key: tuple[str, str, str | None, float, int] | None = None
+
+
+async def _quiet_close(client: RerankClient) -> None:
+    with contextlib.suppress(Exception):
+        await client.aclose()
 
 
 def set_rerank_client(client: RerankClient | None) -> None:
@@ -207,11 +234,9 @@ def set_rerank_transport(transport: httpx.AsyncBaseTransport | None) -> None:
     _default_transport = transport
 
 
-def build_rerank_client(
+def _resolve_rerank_config(
     settings: Settings,
-    *,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> RerankClient:
+) -> tuple[str, str, str | None, float]:
     base_url = settings.rerank_base_url or settings.llm_base_url or ""
     model = settings.rerank_model or ""
     api_key = (
@@ -223,19 +248,56 @@ def build_rerank_client(
             else None
         )
     )
+    return base_url, model, api_key, float(settings.rerank_timeout_seconds)
+
+
+def build_rerank_client(
+    settings: Settings,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> RerankClient:
+    base_url, model, api_key, timeout_seconds = _resolve_rerank_config(settings)
     return RerankClient(
         base_url=base_url,
         model=model,
         api_key=api_key,
-        timeout_seconds=float(settings.rerank_timeout_seconds),
+        timeout_seconds=timeout_seconds,
         transport=transport if transport is not None else _default_transport,
     )
 
 
 def get_rerank_client(settings: Settings) -> RerankClient:
+    global _pooled_rerank_client, _pooled_rerank_key
     if _default_rerank_client is not None:
         return _default_rerank_client
-    return build_rerank_client(settings)
+    base_url, model, api_key, timeout_seconds = _resolve_rerank_config(settings)
+    cache_key = (base_url, model, api_key, timeout_seconds, id(_default_transport))
+    if _pooled_rerank_client is not None and _pooled_rerank_key == cache_key:
+        return _pooled_rerank_client
+    prev = _pooled_rerank_client
+    _pooled_rerank_client = build_rerank_client(settings)
+    _pooled_rerank_key = cache_key
+    if prev is not None:
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(_quiet_close(prev))
+    return _pooled_rerank_client
+
+
+async def close_rerank_client() -> None:
+    """Close and clear the module-level pooled RerankClient."""
+    global _pooled_rerank_client, _pooled_rerank_key
+    client = _pooled_rerank_client
+    _pooled_rerank_client = None
+    _pooled_rerank_key = None
+    if client is not None:
+        await client.aclose()
+
+
+def reset_rerank_client() -> None:
+    """Synchronously drop module-level pooled RerankClient references (for test teardown)."""
+    global _pooled_rerank_client, _pooled_rerank_key
+    _pooled_rerank_client = None
+    _pooled_rerank_key = None
 
 
 __all__ = [
@@ -243,7 +305,9 @@ __all__ = [
     "RerankError",
     "RerankResultItem",
     "build_rerank_client",
+    "close_rerank_client",
     "get_rerank_client",
+    "reset_rerank_client",
     "set_rerank_client",
     "set_rerank_transport",
 ]

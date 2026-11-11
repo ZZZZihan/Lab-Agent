@@ -32,6 +32,7 @@ from app.db import get_sessionmaker
 from app.llm import LLM, build_llm
 from app.models import User
 from app.rag.embedder import Embedder, build_embedder
+from app.rag.rerank import close_rerank_client, reset_rerank_client
 from app.ratelimit import RateLimiter
 from app.tools import (
     fetch_document,
@@ -98,7 +99,7 @@ def get_mcp_limiter() -> RateLimiter:
 
 
 async def close_mcp_singletons() -> None:
-    """Close and clear lazy MCP singletons (embedder, llm, limiter, settings)."""
+    """Close and clear lazy MCP singletons (embedder, llm, reranker, limiter, settings)."""
     global _SETTINGS, _EMBEDDER, _LLM, _LIMITER
     if _EMBEDDER is not None:
         await _EMBEDDER.aclose()
@@ -106,6 +107,7 @@ async def close_mcp_singletons() -> None:
     if _LLM is not None:
         await _LLM.aclose()
         _LLM = None
+    await close_rerank_client()
     if _LIMITER is not None:
         await _LIMITER.close()
         _LIMITER = None
@@ -119,6 +121,7 @@ def reset_mcp_singletons() -> None:
     _EMBEDDER = None
     _LLM = None
     _LIMITER = None
+    reset_rerank_client()
 
 
 def _new_request_id() -> str:
