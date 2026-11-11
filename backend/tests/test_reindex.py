@@ -18,7 +18,8 @@ from app.rag.embedder import Embedder, HashingEmbedder, OpenAICompatibleEmbedder
 from app.rag.index_meta import check_index, column_type, has_hnsw_index, read_meta
 from app.rag.ingest import ingest_text
 from app.rag.retrieve import search_knowledge
-from app.reindex import apply_reindex
+from app.reindex import apply_reindex, init_empty_index
+from app.reindex import main as reindex_main
 from sqlalchemy import text
 
 JWT_SECRET = "test-only-jwt-secret-value-0123456789-abcdef"
@@ -336,3 +337,108 @@ async def test_run_eval_tune_writes_runtime_calibration_and_results(
     finally:
         monkeypatch.delenv("CALIBRATION_DIR", raising=False)
         reset_settings_cache()
+
+
+async def test_init_empty_index_bootstraps_fresh_prod_and_fails_closed_when_populated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import repo_root
+
+    entrypoint = (repo_root() / "scripts" / "api-entrypoint.sh").read_text(encoding="utf-8")
+    assert "python -m app.reindex --init-empty" in entrypoint
+
+    maker = get_sessionmaker()
+    s_prod_4096 = _settings(
+        app_env="prod",
+        llm_capture=False,
+        internal_proxy_secret=f"{JWT_SECRET}-proxy",
+        audit_hmac_key=f"{JWT_SECRET}-audit",
+        embedder="openai_compatible",
+        embedding_base_url="http://127.0.0.1:11434/v1",
+        embedding_model="lab-agent-qwen3-embed",
+        embedding_model_version="64b933495768",
+        embedding_dim=4096,
+        embedding_native_dim=4096,
+        embedding_storage="halfvec",
+        embedding_index="auto",
+    )
+    try:
+        # 1. Fresh empty DB (meta=None, documents=0, chunks=0) initializes cleanly to halfvec(4096)
+        async with maker() as session:
+            assert await read_meta(session) is None
+            state, initialized = await init_empty_index(session, s_prod_4096)
+            assert state == "ok"
+            assert initialized is True
+            assert await column_type(session) == ("halfvec", 4096)
+            meta = await read_meta(session)
+            assert meta is not None
+            assert meta.dim == 4096
+            assert meta.storage == "halfvec"
+            assert meta.index_kind == "none"
+
+            # 2. Second boot with identical settings is an idempotent no-op
+            state_again, initialized_again = await init_empty_index(session, s_prod_4096)
+            assert state_again == "ok"
+            assert initialized_again is False
+
+            # 3. Drift after metadata exists fails closed without wiping or altering column
+            s_drift = _settings(
+                app_env="prod",
+                llm_capture=False,
+                internal_proxy_secret=f"{JWT_SECRET}-proxy",
+                audit_hmac_key=f"{JWT_SECRET}-audit",
+                embedder="openai_compatible",
+                embedding_base_url="http://127.0.0.1:11434/v1",
+                embedding_model="lab-agent-qwen3-embed",
+                embedding_model_version="64b933495768",
+                embedding_dim=1024,
+                embedding_native_dim=4096,
+                embedding_truncate=True,
+                embedding_storage="vector",
+                embedding_index="hnsw",
+            )
+            state_drift, initialized_drift = await init_empty_index(session, s_drift)
+            assert state_drift == "mismatch"
+            assert initialized_drift is False
+            assert await column_type(session) == ("halfvec", 4096)
+
+        # 4. Non-empty DB without metadata also refuses destructive initialization
+        s_restore = _settings(embedder="hashing", embedding_dim=512, embedding_storage="vector")
+        async with maker() as session:
+            await apply_reindex(session, s_restore, HashingEmbedder(512), force=True)
+            await session.execute(text("DELETE FROM embedding_index_meta"))
+            await session.commit()
+        await _ensure_admin_and_doc(HashingEmbedder(512))
+
+        async with maker() as session:
+            state_nonempty, initialized_nonempty = await init_empty_index(session, s_prod_4096)
+            assert state_nonempty == "mismatch"
+            assert initialized_nonempty is False
+            chunk_cnt = int(
+                (await session.execute(text("SELECT COUNT(*) FROM chunks"))).scalar_one()
+            )
+            assert chunk_cnt > 0
+    finally:
+        s_restore = _settings(embedder="hashing", embedding_dim=512, embedding_storage="vector")
+        async with maker() as session:
+            await apply_reindex(
+                session, s_restore, HashingEmbedder(512), if_needed=False, force=True
+            )
+
+
+def test_reindex_cli_init_empty_argument_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_run(
+        check_only: bool,
+        init_empty: bool,
+        apply: bool,
+        if_needed: bool,
+        force: bool,
+    ) -> int:
+        assert check_only is False
+        assert init_empty is True
+        assert apply is False
+        return 0
+
+    monkeypatch.setattr("app.reindex._run", _fake_run)
+    assert reindex_main(["--init-empty"]) == 0
+

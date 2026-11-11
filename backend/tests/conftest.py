@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -48,6 +51,14 @@ os.environ["CORS_ORIGINS"] = "http://127.0.0.1:43123"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
 os.environ["INGEST_WORKER_ENABLED"] = "false"
 os.environ["OTEL_EXPORTER"] = "none"
+
+_TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="lab_agent_pytest_"))
+atexit.register(shutil.rmtree, _TEST_DATA_DIR, True)
+_TEST_UPLOAD_DIR = _TEST_DATA_DIR / "uploads"
+_TEST_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_TEST_BOOTSTRAP_TOKEN_FILE = _TEST_DATA_DIR / "bootstrap_admin.token"
+os.environ["UPLOAD_DIR"] = str(_TEST_UPLOAD_DIR)
+os.environ["BOOTSTRAP_TOKEN_FILE"] = str(_TEST_BOOTSTRAP_TOKEN_FILE)
 
 from app.config import reset_settings_cache  # noqa: E402
 
@@ -106,6 +117,18 @@ _EXISTS_SQL = text("SELECT " + " OR ".join(f"EXISTS (SELECT 1 FROM {t})" for t i
 _TRUNCATE_SQL = text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE")
 
 
+def _clear_test_data_dir() -> None:
+    if _TEST_UPLOAD_DIR.exists():
+        for entry in _TEST_UPLOAD_DIR.iterdir():
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+    else:
+        _TEST_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    _TEST_BOOTSTRAP_TOKEN_FILE.unlink(missing_ok=True)
+
+
 @pytest.fixture(autouse=True)
 async def clean_db() -> AsyncIterator[None]:
     from app.db import get_sessionmaker
@@ -117,8 +140,10 @@ async def clean_db() -> AsyncIterator[None]:
         if dirty:
             await session.execute(_TRUNCATE_SQL)
             await session.commit()
+    _clear_test_data_dir()
     CAPTURED.clear()
     yield
+    _clear_test_data_dir()
     CAPTURED.clear()
 
 

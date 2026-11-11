@@ -18,6 +18,7 @@ from app.logging_conf import configure_logging, get_logger
 from app.rag.embedder import Embedder, build_embedder
 from app.rag.index_meta import (
     HASHING_DEFAULT_FINGERPRINT,
+    IndexState,
     actual_index_kind,
     check_index,
     column_type,
@@ -35,7 +36,7 @@ def _slugify(fp: str) -> str:
 async def apply_reindex(
     session: AsyncSession,
     settings: Settings,
-    embedder: Embedder,
+    embedder: Embedder | None = None,
     *,
     if_needed: bool = False,
     force: bool = False,
@@ -166,7 +167,41 @@ async def apply_reindex(
     return True
 
 
-async def _run(check_only: bool, apply: bool, if_needed: bool, force: bool) -> int:
+async def init_empty_index(
+    session: AsyncSession,
+    settings: Settings,
+) -> tuple[IndexState, bool]:
+    """Initialize column, index, and metadata only when the database is brand-new and empty.
+
+    Used by `APP_ENV=prod` startup so a freshly migrated empty database boots cleanly
+    with the configured vector dimension/storage without ever wiping existing documents
+    or chunks when configuration drifts on a populated deployment.
+    """
+    state = await check_index(session, settings)
+    if state == "ok":
+        return "ok", False
+
+    meta = await read_meta(session)
+    doc_count = int(
+        (await session.execute(text("SELECT COUNT(*) FROM documents"))).scalar_one()
+    )
+    chunk_count = int(
+        (await session.execute(text("SELECT COUNT(*) FROM chunks"))).scalar_one()
+    )
+    if meta is None and doc_count == 0 and chunk_count == 0:
+        await apply_reindex(session, settings, None, if_needed=True)
+        return "ok", True
+
+    return state, False
+
+
+async def _run(
+    check_only: bool,
+    init_empty: bool,
+    apply: bool,
+    if_needed: bool,
+    force: bool,
+) -> int:
     settings = get_settings()
     configure_logging()
     maker = get_sessionmaker()
@@ -180,6 +215,20 @@ async def _run(check_only: bool, apply: bool, if_needed: bool, force: bool) -> i
                 meta = await read_meta(session)
                 print(
                     f"state={state} fingerprint={settings.embedding_fingerprint} "
+                    f"column={col_storage}({col_dim}) index={idx_kind} "
+                    f"meta_fingerprint={meta.fingerprint if meta else 'none'}"
+                )
+            return 0 if state == "ok" else 2
+
+        if init_empty:
+            async with maker() as session:
+                state, initialized = await init_empty_index(session, settings)
+                col_storage, col_dim = await column_type(session)
+                idx_kind = await actual_index_kind(session)
+                meta = await read_meta(session)
+                print(
+                    f"state={state} initialized={str(initialized).lower()} "
+                    f"fingerprint={settings.embedding_fingerprint} "
                     f"column={col_storage}({col_dim}) index={idx_kind} "
                     f"meta_fingerprint={meta.fingerprint if meta else 'none'}"
                 )
@@ -217,6 +266,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect or rebuild the embedding index.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="Check whether the index matches settings")
+    group.add_argument(
+        "--init-empty",
+        action="store_true",
+        help="Initialize index metadata and column if and only if the database is completely empty",
+    )
     group.add_argument("--apply", action="store_true", help="Rebuild the embedding index")
     parser.add_argument(
         "--if-needed",
@@ -232,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(
         _run(
             check_only=args.check,
+            init_empty=args.init_empty,
             apply=args.apply,
             if_needed=args.if_needed,
             force=args.force,

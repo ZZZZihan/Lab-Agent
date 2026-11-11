@@ -221,7 +221,7 @@ EOF
     fi
 
     echo "==> Ensuring derived Ollama model lab-agent-qwen3-embed (num_ctx=8192)..."
-    "$ollama_bin" create lab-agent-qwen3-embed -f docker/ollama/Modelfile.qwen3-embedding >/dev/null
+    "$ollama_bin" create lab-agent-qwen3-embed -f docker/ollama/Modelfile.qwen3-embed >/dev/null
     model_id="$("$ollama_bin" list | awk '$1 == "lab-agent-qwen3-embed" || $1 == "lab-agent-qwen3-embed:latest" {print $2; exit}')"
     if [[ -z "$model_id" ]]; then
       echo "Error: Failed to read digest for lab-agent-qwen3-embed from 'ollama list'." >&2
