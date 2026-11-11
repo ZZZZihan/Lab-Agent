@@ -201,7 +201,6 @@ async def run_maintenance_once(
 
     maker = get_sessionmaker()
     async with maker() as session:
-        audit_deleted = await run_retention(session, days=settings.audit_retention_days)
         documents_purged, messages_scrubbed = await purge_expired_deleted_documents(
             session, days=settings.deleted_document_retention_days
         )
@@ -209,22 +208,23 @@ async def run_maintenance_once(
             session, days=settings.message_retention_days
         )
         revoked_tokens_deleted = await delete_expired_revoked_tokens(session)
+        audit_deleted = await run_retention(session, days=settings.audit_retention_days)
+        counts = {
+            "audit_deleted": audit_deleted,
+            "documents_purged": documents_purged,
+            "messages_scrubbed": messages_scrubbed,
+            "messages_deleted": messages_deleted,
+            "revoked_tokens_deleted": revoked_tokens_deleted,
+        }
+        await write_audit(
+            settings=settings,
+            actor_id=None,
+            action="maintenance_run",
+            resource_type="system",
+            detail=counts,
+            session=session,
+        )
         await session.commit()
-
-    counts = {
-        "audit_deleted": audit_deleted,
-        "documents_purged": documents_purged,
-        "messages_scrubbed": messages_scrubbed,
-        "messages_deleted": messages_deleted,
-        "revoked_tokens_deleted": revoked_tokens_deleted,
-    }
-    await write_audit(
-        settings=settings,
-        actor_id=None,
-        action="maintenance_run",
-        resource_type="system",
-        detail=counts,
-    )
     return counts
 
 

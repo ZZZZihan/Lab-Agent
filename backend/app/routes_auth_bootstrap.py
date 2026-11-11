@@ -244,6 +244,17 @@ async def bootstrap_admin(
 
         token, _jti, ttl = issue_token(user, settings)
         serialized_user = _serialize_auth_user(user)
+        await write_audit(
+            settings=settings,
+            actor_id=user.id,
+            action="bootstrap_admin",
+            resource_type="user",
+            resource_id=str(user.id),
+            request_id=getattr(request.state, "request_id", None),
+            ip=ip,
+            detail={"user_id": str(user.id)},
+            session=session,
+        )
         await session.commit()
 
         if settings.bootstrap_token_file and settings.bootstrap_token_file.strip():
@@ -251,17 +262,6 @@ async def bootstrap_admin(
                 Path(settings.bootstrap_token_file.strip()).unlink(missing_ok=True)
             except OSError:
                 pass
-
-    await write_audit(
-        settings=settings,
-        actor_id=user.id,
-        action="bootstrap_admin",
-        resource_type="user",
-        resource_id=str(user.id),
-        request_id=getattr(request.state, "request_id", None),
-        ip=ip,
-        detail={"user_id": str(user.id)},
-    )
 
     return {
         "access_token": token,

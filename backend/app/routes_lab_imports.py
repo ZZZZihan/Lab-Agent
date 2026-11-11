@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, Query, Request, Upload
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit import write_audit
+from app.audit import scrub_audit_str, write_audit
 from app.auth import Actor
 from app.db import get_session
 from app.importer.fingerprint import achievement_fp, facility_fp
@@ -158,8 +158,6 @@ async def parse_proposal_upload(
     session.add(job)
     await session.flush()
     serialized = _serialize_import_job(job, include_preview=True)
-    await session.commit()
-
     await write_audit(
         settings=settings,
         actor_id=actor.id,
@@ -169,14 +167,16 @@ async def parse_proposal_upload(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "filename": filename[:120],
+            "filename": scrub_audit_str(filename, max_len=120),
             "people": len(people_list),
             "projects": len(proj_list),
             "achievements": len(ach_list),
             "facilities": len(fac_list),
             "pii_dropped": pii_dropped,
         },
+        session=session,
     )
+    await session.commit()
     return {**serialized, "deduplicated": False}
 
 
@@ -274,8 +274,7 @@ async def delete_import_job(
         )
     filename = job.original_filename
     await session.delete(job)
-    await session.commit()
-
+    await session.flush()
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -284,8 +283,10 @@ async def delete_import_job(
         resource_id=str(job_id),
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
-        detail={"original_filename": filename},
+        detail={"original_filename": scrub_audit_str(filename, max_len=120)},
+        session=session,
     )
+    await session.commit()
     return {"status": "deleted", "id": str(job_id), "job_id": str(job_id)}
 
 
@@ -448,8 +449,6 @@ async def update_import_preview(
     job.stats = cur_stats
     await session.flush()
     serialized = _serialize_import_job(job, include_preview=True)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -464,7 +463,9 @@ async def update_import_preview(
             "achievements_parsed": cur_stats["achievements_parsed"],
             "facilities_parsed": cur_stats["facilities_parsed"],
         },
+        session=session,
     )
+    await session.commit()
     return serialized
 
 
@@ -523,8 +524,6 @@ async def reparse_import_job(
     job.stats = cur_stats
     await session.flush()
     serialized = _serialize_import_job(job, include_preview=True)
-    await session.commit()
-
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -533,8 +532,13 @@ async def reparse_import_job(
         resource_id=str(job.id),
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
-        detail={"mode": effective_mode, "parser_version": parser_ver},
+        detail={
+            "mode": effective_mode,
+            "parser_version": scrub_audit_str(parser_ver, max_len=64),
+        },
+        session=session,
     )
+    await session.commit()
     return serialized
 
 
@@ -569,7 +573,6 @@ async def provision_import(
     except ProvisionError as exc:
         raise APIError(exc.status, exc.code, exc.message) from exc
 
-    await session.commit()
     raw_res_stats = result.get("stats")
     stats: dict[str, Any] = raw_res_stats if isinstance(raw_res_stats, dict) else {}
     await write_audit(
@@ -589,7 +592,9 @@ async def provision_import(
             "facilities_inserted": int(stats.get("facilities_inserted") or 0),
             "include_password": bool(effective_body.include_password),
         },
+        session=session,
     )
+    await session.commit()
     return result
 
 
@@ -647,7 +652,6 @@ async def merge_import_job(
     except ProvisionError as exc:
         raise APIError(exc.status, exc.code, exc.message) from exc
 
-    await session.commit()
     raw_stats = result.get("stats")
     stats: dict[str, Any] = raw_stats if isinstance(raw_stats, dict) else {}
     await write_audit(
@@ -664,7 +668,9 @@ async def merge_import_job(
             "kept_fields": int(stats.get("kept_fields") or 0),
             "forced_fields": int(stats.get("forced_fields") or 0),
         },
+        session=session,
     )
+    await session.commit()
     return result
 
 
@@ -692,7 +698,6 @@ async def revert_import_job(
     except ProvisionError as exc:
         raise APIError(exc.status, exc.code, exc.message) from exc
 
-    await session.commit()
     await write_audit(
         settings=_settings(request),
         actor_id=actor.id,
@@ -706,7 +711,9 @@ async def revert_import_job(
             "deleted_entities": result.get("deleted_entities"),
             "job_status": str(result.get("job_status") or ""),
         },
+        session=session,
     )
+    await session.commit()
     return result
 
 
@@ -723,7 +730,6 @@ async def backfill_imports_provenance(
         resource_type="import_job",
     )
     result = await backfill_field_provenance(session)
-    await session.commit()
     raw_disc = result.get("discrepancies")
     disc_count = len(raw_disc) if isinstance(raw_disc, list) else 0
     await write_audit(
@@ -737,7 +743,9 @@ async def backfill_imports_provenance(
             "backfilled_entries": result.get("backfilled_entries"),
             "discrepancies": disc_count,
         },
+        session=session,
     )
+    await session.commit()
     return result
 
 

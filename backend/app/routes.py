@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.acl import Principal, acl_sql, can_read
 from app.agent import run_agent
-from app.audit import run_retention, write_audit
+from app.audit import run_retention, scrub_audit_str, write_audit
 from app.auth import (
     PAT_PREFIX,
     Actor,
@@ -489,7 +489,9 @@ async def logout(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"method": "local"},
+        session=session,
     )
+    await session.commit()
     return {"status": "ok"}
 
 
@@ -552,9 +554,7 @@ async def change_password(
                         expires_at=datetime.fromtimestamp(cur_exp, UTC),
                     )
                 )
-    await session.commit()
-    await session.refresh(user)
-    new_token, _new_jti, ttl = issue_token(user, settings)
+    await session.flush()
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -564,7 +564,11 @@ async def change_password(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={"email_bound": email_bound},
+        session=session,
     )
+    await session.commit()
+    await session.refresh(user)
+    new_token, _new_jti, ttl = issue_token(user, settings)
     return {
         "status": "ok",
         "access_token": new_token,
@@ -632,8 +636,7 @@ async def create_token(
         expires_at=expires_at,
     )
     session.add(tok)
-    await session.commit()
-    await session.refresh(tok)
+    await session.flush()
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -643,11 +646,14 @@ async def create_token(
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
         detail={
-            "name": clean_name,
+            "name": scrub_audit_str(clean_name, max_len=100),
             "prefix": prefix,
             "expires_in_days": body.expires_in_days,
         },
+        session=session,
     )
+    await session.commit()
+    await session.refresh(tok)
     payload = _serialize_api_token(tok)
     payload["token"] = raw_token
     return payload
@@ -669,7 +675,7 @@ async def revoke_personal_token(
         raise APIError(404, "not_found", "令牌不存在")
     if tok.revoked_at is None:
         tok.revoked_at = datetime.now(UTC)
-        await session.commit()
+    await session.flush()
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -678,8 +684,13 @@ async def revoke_personal_token(
         resource_id=str(tok.id),
         request_id=getattr(request.state, "request_id", None),
         ip=_client_ip(request),
-        detail={"name": tok.name, "prefix": tok.prefix},
+        detail={
+            "name": scrub_audit_str(tok.name, max_len=100),
+            "prefix": tok.prefix,
+        },
+        session=session,
     )
+    await session.commit()
     return {"status": "revoked", "id": str(tok.id)}
 
 
@@ -863,7 +874,6 @@ async def upload_document(
         )
     except ValueError as exc:
         raise APIError(400, "empty_document", "文档没有可用文本") from exc
-    await session.commit()
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -871,6 +881,7 @@ async def upload_document(
         resource_type="document",
         resource_id=str(document.id),
         request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
         detail={
             "visibility": visibility,
             "collection": collection,
@@ -879,7 +890,9 @@ async def upload_document(
             "chars": len(raw),
             "grants": len(grants) + len(group_grants) + len(role_grants),
         },
+        session=session,
     )
+    await session.commit()
     return {"id": str(document.id), "status": document.status}
 
 
@@ -1004,8 +1017,6 @@ async def update_document_acl(
         await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
     )
     acl_payload = await _serialize_document_acl(session, document, new_grants)
-    await session.commit()
-
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -1020,7 +1031,9 @@ async def update_document_acl(
             "groups": len(group_ids),
             "roles": len(role_names),
         },
+        session=session,
     )
+    await session.commit()
     return {
         "id": str(document.id),
         "visibility": document.visibility,
@@ -1058,7 +1071,6 @@ async def delete_document(
     if purge:
         doc_id_str = str(document.id)
         messages_scrubbed = await purge_document(session, document.id)
-        await session.commit()
         await write_audit(
             settings=settings,
             actor_id=user.id,
@@ -1068,13 +1080,14 @@ async def delete_document(
             request_id=getattr(request.state, "request_id", None),
             ip=_client_ip(request),
             detail={"messages_scrubbed": messages_scrubbed},
+            session=session,
         )
+        await session.commit()
         return {"status": "purged", "messages_scrubbed": messages_scrubbed}
 
     from datetime import UTC, datetime
 
     document.deleted_at = datetime.now(UTC)
-    await session.commit()
     await write_audit(
         settings=settings,
         actor_id=user.id,
@@ -1082,8 +1095,11 @@ async def delete_document(
         resource_type="document",
         resource_id=str(document.id),
         request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
         detail={"operation": "delete"},
+        session=session,
     )
+    await session.commit()
     return {"status": "deleted"}
 
 
@@ -1686,8 +1702,11 @@ async def retention(
         action="audit_retention",
         resource_type="audit",
         request_id=getattr(request.state, "request_id", None),
+        ip=_client_ip(request),
         detail={"days": days, "deleted": deleted},
+        session=session,
     )
+    await session.commit()
     return {"deleted": deleted}
 
 
