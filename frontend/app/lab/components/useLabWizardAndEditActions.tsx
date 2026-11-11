@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   ApiError,
+  api,
   exportAllLabAssets,
   mapLabErrorCode,
   reindexLabAssets,
@@ -13,6 +14,7 @@ import {
   type FieldProvenanceSummary,
   type LabAchievementItem,
   type LabFacilityItem,
+  type LabOverview,
   type LabPersonItem,
   type LabProjectItem,
 } from "@/lib/api";
@@ -29,6 +31,15 @@ import type { LabCoreAndFilterState } from "../page";
 export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
   const {
     me,
+    setOverview,
+    setPeople,
+    setProjects,
+    setAchievements,
+    setFacilities,
+    dossierOpen,
+    dossierPersonId,
+    setDossier,
+    fetchDossierById,
     setError,
     setStatusBanner,
     expandedProvId,
@@ -59,6 +70,57 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     handleProvision,
     handleDownloadCsv,
   } = ctx;
+
+  function applyEntityUpdateInPlace(
+    type: TabKey,
+    updatedEntity:
+      | LabPersonItem
+      | LabProjectItem
+      | LabAchievementItem
+      | LabFacilityItem,
+  ) {
+    if (type === "people") {
+      const updatedPerson = updatedEntity as LabPersonItem;
+      setPeople((prev) =>
+        prev.map((it) => (it.id === updatedPerson.id ? updatedPerson : it)),
+      );
+      if (dossierOpen && dossierPersonId === updatedPerson.id) {
+        setDossier((prev) =>
+          prev && prev.person.id === updatedPerson.id
+            ? { ...prev, person: { ...prev.person, ...updatedPerson } }
+            : prev,
+        );
+      }
+      return;
+    }
+    if (type === "projects") {
+      const updatedProject = updatedEntity as LabProjectItem;
+      setProjects((prev) =>
+        prev.map((it) => (it.id === updatedProject.id ? updatedProject : it)),
+      );
+      void api<LabOverview>("lab/overview")
+        .then(setOverview)
+        .catch(() => undefined);
+      if (dossierOpen && dossierPersonId) {
+        void fetchDossierById(dossierPersonId, { preserveSigFeedback: true });
+      }
+      return;
+    }
+    if (type === "achievements") {
+      const updatedAch = updatedEntity as LabAchievementItem;
+      setAchievements((prev) =>
+        prev.map((it) => (it.id === updatedAch.id ? updatedAch : it)),
+      );
+      if (dossierOpen && dossierPersonId) {
+        void fetchDossierById(dossierPersonId, { preserveSigFeedback: true });
+      }
+      return;
+    }
+    const updatedFacility = updatedEntity as LabFacilityItem;
+    setFacilities((prev) =>
+      prev.map((it) => (it.id === updatedFacility.id ? updatedFacility : it)),
+    );
+  }
 
   async function handleExportAll(format: "md" | "docx") {
     if (exportingFormat !== null) return;
@@ -192,7 +254,11 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
         setEditModalOpen(false);
       }
       setStatusBanner("已保存修改并记录字段级人工溯源");
-      await loadAll();
+      if (updatedEntity) {
+        applyEntityUpdateInPlace(editType, updatedEntity);
+      } else {
+        await loadAll();
+      }
     } catch (err) {
       if (editSessionSeqRef.current === capturedSeq) {
         setEditError(err instanceof ApiError ? err.message : t.error);
@@ -263,7 +329,11 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
       setStatusBanner(
         `字段「${FIELD_LABEL_MAP[field] || field}」已恢复为申报书导入值`,
       );
-      await loadAll();
+      if (updatedEntity) {
+        applyEntityUpdateInPlace(type, updatedEntity);
+      } else {
+        await loadAll();
+      }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : t.error;
       if (wasEditingTarget && editSessionSeqRef.current === capturedSeq) {

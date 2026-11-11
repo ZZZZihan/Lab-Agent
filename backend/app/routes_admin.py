@@ -9,13 +9,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import write_audit
 from app.auth import Actor, hash_password, validate_password
 from app.db import get_session
-from app.importer.people import clean_email
+from app.importer.people import clean_email, is_valid_login_name
 from app.models import Group, GroupMember, User
 from app.routes import APIError, _actor, _client_ip, _settings
 
@@ -26,7 +27,8 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class CreateUserBody(BaseModel):
-    email: str
+    email: str | None = None
+    login_name: str | None = None
     display_name: str
     role: str
     password: str
@@ -34,6 +36,7 @@ class CreateUserBody(BaseModel):
 
 class UpdateUserBody(BaseModel):
     display_name: str | None = None
+    login_name: str | None = None
     role: str | None = None
     is_active: bool | None = None
 
@@ -137,11 +140,30 @@ async def create_user(
 ) -> dict[str, object]:
     await _require_admin(request, actor, operation="create_user")
     settings = _settings(request)
-    email = clean_email(body.email)
+    raw_email = (body.email or "").strip()
+    raw_login = (body.login_name or "").strip().lower()
+
+    email: str | None = None
+    if raw_email:
+        email = clean_email(raw_email)
+        if email is None or len(email) > 320:
+            raise APIError(400, "invalid_email", "请输入有效的邮箱地址")
+
+    login_name: str | None = None
+    if raw_login:
+        if not is_valid_login_name(raw_login):
+            raise APIError(
+                400,
+                "invalid_login_name",
+                "登录名需由 3–64 位小写字母、数字、点、下划线或连字符组成，且不能使用保留词",
+            )
+        login_name = raw_login
+
+    if email is None and login_name is None:
+        raise APIError(400, "invalid_email", "请输入有效的邮箱地址或登录名")
+
     display_name = body.display_name.strip()
     role = body.role.strip()
-    if email is None or len(email) > 320:
-        raise APIError(400, "invalid_email", "请输入有效的邮箱地址")
     if not display_name or len(display_name) > 120:
         raise APIError(400, "invalid_display_name", "姓名不能为空且不超过 120 个字符")
     if role not in ALLOWED_ROLES:
@@ -151,20 +173,38 @@ async def create_user(
     except ValueError as exc:
         raise APIError(400, "weak_password", str(exc)) from exc
 
-    existing = await session.scalar(select(User).where(User.email == email))
-    if existing is not None:
-        raise APIError(409, "email_exists", "该邮箱已存在")
+    if email is not None:
+        existing = await session.scalar(
+            select(User).where(func.lower(User.email) == email.lower())
+        )
+        if existing is not None:
+            raise APIError(409, "email_exists", "该邮箱已存在")
+
+    if login_name is not None:
+        existing_login = await session.scalar(
+            select(User).where(func.lower(User.login_name) == login_name)
+        )
+        if existing_login is not None:
+            raise APIError(409, "login_name_exists", "该登录名已存在")
 
     pw_hash = await asyncio.to_thread(hash_password, body.password)
     user = User(
         email=email,
+        login_name=login_name,
         display_name=display_name,
         role=role,
         password_hash=pw_hash,
         is_active=True,
     )
     session.add(user)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        err_text = str(exc.orig or exc).lower()
+        if "login_name" in err_text:
+            raise APIError(409, "login_name_exists", "该登录名已存在") from exc
+        raise APIError(409, "email_exists", "该邮箱已存在") from exc
     serialized = _serialize_user(user)
     await write_audit(
         settings=settings,
@@ -211,6 +251,37 @@ async def update_user(
             user.display_name = new_name
             changed_fields.append("display_name")
 
+    if body.login_name is not None:
+        normalized_login = body.login_name.strip().lower()
+        if not normalized_login:
+            if not user.email:
+                raise APIError(
+                    400,
+                    "invalid_login_name",
+                    "未绑定邮箱的账号不能清空登录名",
+                )
+            if user.login_name is not None:
+                user.login_name = None
+                changed_fields.append("login_name")
+        else:
+            if not is_valid_login_name(normalized_login):
+                raise APIError(
+                    400,
+                    "invalid_login_name",
+                    "登录名需由 3–64 位小写字母、数字、点、下划线或连字符组成，且不能使用保留词",
+                )
+            if normalized_login != (user.login_name or "").lower():
+                dup_login = await session.scalar(
+                    select(User).where(
+                        func.lower(User.login_name) == normalized_login,
+                        User.id != user.id,
+                    )
+                )
+                if dup_login is not None:
+                    raise APIError(409, "login_name_exists", "该登录名已存在")
+                user.login_name = normalized_login
+                changed_fields.append("login_name")
+
     if body.role is not None:
         new_role = body.role.strip()
         if new_role not in ALLOWED_ROLES:
@@ -226,7 +297,11 @@ async def update_user(
         changed_fields.append("is_active")
 
     detail["fields"] = changed_fields
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise APIError(409, "login_name_exists", "该登录名已存在") from exc
     serialized = _serialize_user(user)
     await write_audit(
         settings=_settings(request),

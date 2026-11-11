@@ -42,9 +42,11 @@ const {
   canSubmitProvisioning,
   isInitialPasswordRequired,
   isOriginAllowed,
+  isValidLoginNameClient,
   parseAllowedOrigins,
   sessionCookieName,
   sessionCookieOptions,
+  validatePasswordClient,
   verifyOrigin,
 } = await import("../lib/security.ts");
 const bffModule = await import("../lib/bff.ts");
@@ -56,6 +58,7 @@ const bootstrapStatusRoute = await import("../app/api/bootstrap-status/route.ts"
 const backendRoute = await import("../app/api/backend/[...path]/route.ts");
 const apiModule = await import("../lib/api.ts");
 const chatHelpers = await import("../app/chat/components/chatTypesAndHelpers.ts");
+const labHelpers = await import("../app/lab/components/labTypesAndHelpers.ts");
 const { NextRequest } = await import("next/server.js");
 
 test("next.config.ts headers() sets CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy", async () => {
@@ -1132,6 +1135,124 @@ test("OIDC mode exempts account provisioning from initial-password requirements"
     assert.equal(bootstrapCalls, 1);
   } finally {
     apiModule.resetCachedOidcMode();
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test("validatePasswordClient, isValidLoginNameClient, isRecentAchievementYear, and session/health deduplication", async () => {
+  // 1. Password client policy parity with backend validate_password
+  assert.notEqual(validatePasswordClient("Short1!"), null);
+  assert.notEqual(validatePasswordClient("Aa1!" + "b".repeat(260)), null);
+  assert.notEqual(
+    validatePasswordClient("LabAgent-Demo-" + "2026-Member"),
+    null,
+  );
+  assert.notEqual(validatePasswordClient(KNOWN_PUBLIC_DEFAULT_PASSWORD), null);
+  assert.notEqual(
+    validatePasswordClient("SameOldPass#2026", {
+      oldPassword: "SameOldPass#2026",
+    }),
+    null,
+  );
+  assert.notEqual(
+    validatePasswordClient("Alice2026#Strong", {
+      email: "alice@qingheng.lab",
+    }),
+    null,
+  );
+  assert.notEqual(validatePasswordClient("alllowercase1234"), null);
+  assert.equal(
+    validatePasswordClient("StrongPass#2026", {
+      email: "alice@qingheng.lab",
+      oldPassword: "OldDifferent#2025",
+    }),
+    null,
+  );
+
+  // 2. Login name predicate accepts T1/T2/suffixed logins (e.g. zhangsan2) and rejects reserved/short names
+  assert.equal(isValidLoginNameClient("2024010001"), true);
+  assert.equal(isValidLoginNameClient("zhangsan"), true);
+  assert.equal(isValidLoginNameClient("zhangsan2"), true);
+  assert.equal(isValidLoginNameClient("li.ming_01-a"), true);
+  assert.equal(isValidLoginNameClient("admin"), false);
+  assert.equal(isValidLoginNameClient("root"), false);
+  assert.equal(isValidLoginNameClient("labagent"), false);
+  assert.equal(isValidLoginNameClient("ab"), false);
+
+  // 3. Achievement recent-year filter rejects null/undefined/NaN years instead of treating !year as recent
+  assert.equal(labHelpers.isRecentAchievementYear(null, 2021), false);
+  assert.equal(labHelpers.isRecentAchievementYear(undefined, 2021), false);
+  assert.equal(labHelpers.isRecentAchievementYear(Number.NaN, 2021), false);
+  assert.equal(labHelpers.isRecentAchievementYear(2019, 2021), false);
+  assert.equal(labHelpers.isRecentAchievementYear(2021, 2021), true);
+  assert.equal(labHelpers.isRecentAchievementYear(2026, 2021), true);
+
+  // 4. currentUser() and getSystemHealth() deduplicate concurrent calls and invalidate on logout
+  const prevFetch = globalThis.fetch;
+  let sessionHits = 0;
+  let healthHits = 0;
+  apiModule.resetClientAuthCache();
+  globalThis.fetch = async (url, init = {}) => {
+    if (url === "/api/session" && (!init.method || init.method === "GET")) {
+      sessionHits += 1;
+      return new Response(
+        JSON.stringify({
+          user: {
+            id: "u-dedup",
+            display_name: "Dedup User",
+            role: "admin",
+            oidc_mode: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/session" && init.method === "DELETE") {
+      return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+    }
+    if (url === "/api/backend/health") {
+      healthHits += 1;
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          calibrated: true,
+          embedding_dim: 512,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+  try {
+    const [u1, u2] = await Promise.all([
+      apiModule.currentUser(),
+      apiModule.currentUser(),
+    ]);
+    assert.equal(u1?.id, "u-dedup");
+    assert.equal(u2?.id, "u-dedup");
+    assert.equal(sessionHits, 1);
+
+    const uCached = await apiModule.currentUser();
+    assert.equal(uCached?.id, "u-dedup");
+    assert.equal(sessionHits, 1);
+
+    const uForced = await apiModule.currentUser({ force: true });
+    assert.equal(uForced?.id, "u-dedup");
+    assert.equal(sessionHits, 2);
+
+    const [h1, h2] = await Promise.all([
+      apiModule.getSystemHealth(),
+      apiModule.getSystemHealth(),
+    ]);
+    assert.equal(h1.embedding_dim, 512);
+    assert.equal(h2.embedding_dim, 512);
+    assert.equal(healthHits, 1);
+
+    await apiModule.logout();
+    await apiModule.currentUser();
+    assert.equal(sessionHits, 3);
+  } finally {
+    apiModule.resetClientAuthCache();
     globalThis.fetch = prevFetch;
   }
 });

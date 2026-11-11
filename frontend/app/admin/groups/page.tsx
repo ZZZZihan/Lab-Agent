@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,8 @@ import { useI18n } from "@/lib/i18n";
 
 type AdminUser = {
   id: string;
-  email: string;
+  email: string | null;
+  login_name?: string | null;
   display_name: string;
   role: string;
   is_active: boolean;
@@ -28,7 +29,8 @@ type AdminUser = {
 
 type GroupMemberInfo = {
   id: string;
-  email: string;
+  email: string | null;
+  login_name?: string | null;
   display_name: string;
   role: string;
 };
@@ -48,6 +50,7 @@ export default function AdminGroupsPage() {
   const [groups, setGroups] = useState<AdminGroup[] | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [error, setError] = useState("");
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createSlug, setCreateSlug] = useState("");
@@ -57,6 +60,7 @@ export default function AdminGroupsPage() {
 
   const [editTarget, setEditTarget] = useState<AdminGroup | null>(null);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [memberSearch, setMemberSearch] = useState("");
   const [editError, setEditError] = useState("");
   const [savingMembers, setSavingMembers] = useState(false);
 
@@ -100,8 +104,20 @@ export default function AdminGroupsPage() {
     };
   }, []);
 
+  const filteredModalUsers = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter(
+      (u) =>
+        u.display_name.toLowerCase().includes(q) ||
+        (u.email || "").toLowerCase().includes(q) ||
+        (u.login_name || "").toLowerCase().includes(q),
+    );
+  }, [users, memberSearch]);
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
+    if (creating) return;
     setCreateError("");
     setCreating(true);
     try {
@@ -125,7 +141,7 @@ export default function AdminGroupsPage() {
 
   async function handleSaveMembers(e: React.FormEvent) {
     e.preventDefault();
-    if (!editTarget) return;
+    if (!editTarget || savingMembers) return;
     setEditError("");
     setSavingMembers(true);
     try {
@@ -134,11 +150,31 @@ export default function AdminGroupsPage() {
         body: JSON.stringify({ user_ids: selectedUserIds }),
       });
       setEditTarget(null);
+      setMemberSearch("");
       await load();
     } catch (err) {
       setEditError(err instanceof ApiError ? err.message : t.error);
     } finally {
       setSavingMembers(false);
+    }
+  }
+
+  async function handleQuickRemoveMember(group: AdminGroup, memberId: string) {
+    if (removingKey !== null) return;
+    const opKey = `${group.id}:${memberId}`;
+    setError("");
+    setRemovingKey(opKey);
+    try {
+      const nextIds = group.member_ids.filter((id) => id !== memberId);
+      await api(`admin/groups/${group.id}/members`, {
+        method: "PUT",
+        body: JSON.stringify({ user_ids: nextIds }),
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t.error);
+    } finally {
+      setRemovingKey(null);
     }
   }
 
@@ -191,11 +227,33 @@ export default function AdminGroupsPage() {
                         {group.members.length === 0 ? (
                           <span className="text-xs text-muted-foreground">—</span>
                         ) : (
-                          group.members.map((m) => (
-                            <Badge key={m.id} variant="secondary">
-                              {m.display_name}
-                            </Badge>
-                          ))
+                          group.members.map((m) => {
+                            const isRemoving =
+                              removingKey === `${group.id}:${m.id}`;
+                            return (
+                              <Badge
+                                key={m.id}
+                                variant="secondary"
+                                className="inline-flex items-center gap-1"
+                              >
+                                <span>{m.display_name}</span>
+                                {me?.role === "admin" ? (
+                                  <button
+                                    type="button"
+                                    disabled={removingKey !== null}
+                                    aria-label={`${t.removeMember} ${m.display_name}`}
+                                    title={`${t.removeMember} ${m.display_name}`}
+                                    onClick={() =>
+                                      void handleQuickRemoveMember(group, m.id)
+                                    }
+                                    className="ml-0.5 cursor-pointer rounded px-0.5 text-xs text-muted-foreground hover:text-destructive disabled:opacity-40"
+                                  >
+                                    {isRemoving ? "…" : "×"}
+                                  </button>
+                                ) : null}
+                              </Badge>
+                            );
+                          })
                         )}
                       </div>
                     </td>
@@ -206,6 +264,7 @@ export default function AdminGroupsPage() {
                         onClick={() => {
                           setEditTarget(group);
                           setSelectedUserIds(group.member_ids);
+                          setMemberSearch("");
                           setEditError("");
                         }}
                       >
@@ -269,7 +328,10 @@ export default function AdminGroupsPage() {
         <Dialog
           open={editTarget !== null}
           onOpenChange={(openState) => {
-            if (!openState) setEditTarget(null);
+            if (!openState) {
+              setEditTarget(null);
+              setMemberSearch("");
+            }
           }}
         >
           <DialogContent>
@@ -281,15 +343,23 @@ export default function AdminGroupsPage() {
               <DialogDescription>{t.groupsHint}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSaveMembers} className="space-y-4">
+              <Input
+                type="search"
+                placeholder={t.searchMembersPlaceholder}
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+                className="h-8 text-xs"
+              />
               <div className="max-h-64 space-y-2 overflow-y-auto rounded-md border border-border p-3">
-                {users.map((u) => {
+                {filteredModalUsers.map((u) => {
                   const checked = selectedUserIds.includes(u.id);
+                  const identifier = u.email || u.login_name || "—";
                   return (
                     <label
                       key={u.id}
                       className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted/50"
                     >
-                      <span className="flex items-center gap-2">
+                      <span className="flex flex-wrap items-center gap-2">
                         <input
                           type="checkbox"
                           checked={checked}
@@ -307,8 +377,13 @@ export default function AdminGroupsPage() {
                         />
                         <span className="font-medium">{u.display_name}</span>
                         <span className="font-mono text-xs text-muted-foreground">
-                          {u.email}
+                          {identifier}
                         </span>
+                        {!u.is_active ? (
+                          <Badge variant="outline" className="text-[10px]">
+                            {t.userInactive}
+                          </Badge>
+                        ) : null}
                       </span>
                       <Badge variant="outline">{u.role}</Badge>
                     </label>
@@ -324,7 +399,10 @@ export default function AdminGroupsPage() {
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={() => setEditTarget(null)}
+                  onClick={() => {
+                    setEditTarget(null);
+                    setMemberSearch("");
+                  }}
                 >
                   {t.cancel}
                 </Button>

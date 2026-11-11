@@ -220,6 +220,7 @@ export function handleAuthRedirect(err: ApiError, path?: string): void {
     if (path === "auth/change-password" && err.code === "invalid_credentials") {
       return;
     }
+    resetClientAuthCache();
     window.dispatchEvent(new Event("lab-auth-logout"));
     if (pathname !== "/login") {
       void fetch("/api/session", { method: "DELETE" }).catch(() => undefined);
@@ -269,7 +270,44 @@ export type BootstrapAdminPayload = {
   setup_token?: string;
 };
 
+export type HealthResponse = {
+  status?: string;
+  calibrated?: boolean;
+  embedding_model?: string;
+  embedding_dim?: number;
+  retrieval_mode?: string;
+  oidc_mode?: boolean;
+};
+
+const SESSION_CACHE_TTL_MS = 5_000;
+const HEALTH_CACHE_TTL_MS = 30_000;
+
 let cachedOidcModePromise: Promise<boolean> | null = null;
+let cachedUserEntry: { user: User; expiresAt: number } | null = null;
+let inflightUserPromise: Promise<User | null> | null = null;
+let cachedHealthEntry: { health: HealthResponse; expiresAt: number } | null =
+  null;
+let inflightHealthPromise: Promise<HealthResponse> | null = null;
+
+function setCachedCurrentUser(user: User | null): void {
+  inflightUserPromise = null;
+  if (user) {
+    cachedUserEntry = {
+      user,
+      expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+    };
+  } else {
+    cachedUserEntry = null;
+  }
+}
+
+export function resetClientAuthCache(): void {
+  cachedUserEntry = null;
+  inflightUserPromise = null;
+  cachedHealthEntry = null;
+  inflightHealthPromise = null;
+  cachedOidcModePromise = null;
+}
 
 export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
   const response = await fetch("/api/bootstrap-status", { cache: "no-store" });
@@ -285,6 +323,9 @@ export function resolveOidcMode(user?: User | null): Promise<boolean> {
   if (typeof user?.oidc_mode === "boolean") {
     return Promise.resolve(user.oidc_mode);
   }
+  if (cachedHealthEntry && typeof cachedHealthEntry.health.oidc_mode === "boolean") {
+    return Promise.resolve(cachedHealthEntry.health.oidc_mode);
+  }
   if (!cachedOidcModePromise) {
     cachedOidcModePromise = getBootstrapStatus()
       .then((res) => Boolean(res.oidc_mode))
@@ -294,6 +335,36 @@ export function resolveOidcMode(user?: User | null): Promise<boolean> {
       });
   }
   return cachedOidcModePromise;
+}
+
+export async function getSystemHealth(options?: {
+  force?: boolean;
+}): Promise<HealthResponse> {
+  if (
+    !options?.force &&
+    cachedHealthEntry &&
+    Date.now() < cachedHealthEntry.expiresAt
+  ) {
+    return cachedHealthEntry.health;
+  }
+  if (!options?.force && inflightHealthPromise) {
+    return inflightHealthPromise;
+  }
+  const req = api<HealthResponse>("health")
+    .then((health) => {
+      cachedHealthEntry = {
+        health,
+        expiresAt: Date.now() + HEALTH_CACHE_TTL_MS,
+      };
+      return health;
+    })
+    .finally(() => {
+      if (inflightHealthPromise === req) {
+        inflightHealthPromise = null;
+      }
+    });
+  inflightHealthPromise = req;
+  return req;
 }
 
 export async function bootstrapAdmin(
@@ -306,15 +377,40 @@ export async function bootstrapAdmin(
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
+  setCachedCurrentUser(body.user);
   return body.user;
 }
 
-export async function currentUser(): Promise<User | null> {
-  const response = await fetch("/api/session", { cache: "no-store" });
-  if (response.status === 401) return null;
-  if (!response.ok) throw await parseError(response);
-  const body = (await response.json()) as { user: User };
-  return body.user;
+export async function currentUser(options?: {
+  force?: boolean;
+}): Promise<User | null> {
+  if (
+    !options?.force &&
+    cachedUserEntry &&
+    Date.now() < cachedUserEntry.expiresAt
+  ) {
+    return cachedUserEntry.user;
+  }
+  if (!options?.force && inflightUserPromise) {
+    return inflightUserPromise;
+  }
+  const req = (async () => {
+    const response = await fetch("/api/session", { cache: "no-store" });
+    if (response.status === 401) {
+      cachedUserEntry = null;
+      return null;
+    }
+    if (!response.ok) throw await parseError(response);
+    const body = (await response.json()) as { user: User };
+    setCachedCurrentUser(body.user);
+    return body.user;
+  })().finally(() => {
+    if (inflightUserPromise === req) {
+      inflightUserPromise = null;
+    }
+  });
+  inflightUserPromise = req;
+  return req;
 }
 
 export async function login(identifier: string, password: string): Promise<User> {
@@ -325,6 +421,7 @@ export async function login(identifier: string, password: string): Promise<User>
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as { user: User };
+  setCachedCurrentUser(body.user);
   return body.user;
 }
 
@@ -341,11 +438,14 @@ export async function changePassword(
       ...(email && email.trim() ? { email: email.trim() } : {}),
     }),
   });
+  setCachedCurrentUser(res.user);
   return res.user;
 }
 
 export async function logout(): Promise<void> {
+  resetClientAuthCache();
   await fetch("/api/session", { method: "DELETE" });
+  resetClientAuthCache();
 }
 
 export type FieldProvenanceSummary = {
@@ -1556,6 +1656,46 @@ export async function exportAllLabAssets(
   const filename = parseFilenameFromDisposition(
     response.headers.get("content-disposition"),
     format === "docx" ? "lab-assets.docx" : "lab-assets.md",
+  );
+  return { blob, filename };
+}
+
+export type AuditFilterParams = {
+  action?: string;
+  actor_id?: string;
+  resource_type?: string;
+  resource_id?: string;
+  since?: string;
+  until?: string;
+};
+
+export async function exportAuditCsv(
+  filters?: AuditFilterParams,
+): Promise<{ blob: Blob; filename: string }> {
+  const params = new URLSearchParams();
+  if (filters?.action?.trim()) params.set("action", filters.action.trim());
+  if (filters?.actor_id?.trim()) params.set("actor_id", filters.actor_id.trim());
+  if (filters?.resource_type?.trim()) {
+    params.set("resource_type", filters.resource_type.trim());
+  }
+  if (filters?.resource_id?.trim()) {
+    params.set("resource_id", filters.resource_id.trim());
+  }
+  if (filters?.since?.trim()) params.set("since", filters.since.trim());
+  if (filters?.until?.trim()) params.set("until", filters.until.trim());
+  const qs = params.toString();
+  const path = qs ? `audit/export.csv?${qs}` : "audit/export.csv";
+  const response = await fetch(`/api/backend/${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await parseBackendError(response, path);
+  }
+  const blob = await response.blob();
+  const filename = parseFilenameFromDisposition(
+    response.headers.get("content-disposition"),
+    `audit-${new Date().toISOString().slice(0, 10)}.csv`,
   );
   return { blob, filename };
 }

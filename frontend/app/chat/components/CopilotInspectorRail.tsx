@@ -21,9 +21,11 @@ export function CopilotInspectorRail({
   draft,
   busy,
   uiLocked,
+  embeddingDim,
   activeEvidence,
   onDraftChange,
   onAsk,
+  onStop,
   onSelectConversation,
   onStartNewConversation,
   onDeleteConversation,
@@ -35,9 +37,11 @@ export function CopilotInspectorRail({
   draft: string;
   busy: boolean;
   uiLocked: boolean;
+  embeddingDim?: number | null;
   activeEvidence: ActiveEvidenceSelection | null;
   onDraftChange: (value: string) => void;
   onAsk: (question: string) => void;
+  onStop?: () => void;
   onSelectConversation: (id: string) => void;
   onStartNewConversation: () => void;
   onDeleteConversation: (id: string) => void;
@@ -465,17 +469,36 @@ export function CopilotInspectorRail({
           <div className="mt-2 flex items-center justify-between gap-2 border-t border-stone-100 pt-2 dark:border-stone-800/80">
             <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-stone-500 dark:text-stone-400">
               <span className="text-primary dark:text-emerald-400">✦</span>
-              <span>{busy ? t.asking : "4096维混合检索就绪"}</span>
+              <span>
+                {busy
+                  ? t.asking
+                  : embeddingDim
+                    ? `${embeddingDim}维混合检索就绪`
+                    : "混合检索就绪"}
+              </span>
             </span>
 
-            <button
-              type="submit"
-              disabled={uiLocked || !draft.trim()}
-              aria-label={busy ? t.asking : t.send}
-              className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground shadow-xs transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
-            >
-              ↑
-            </button>
+            {busy && onStop ? (
+              <button
+                type="button"
+                onClick={onStop}
+                aria-label="停止生成"
+                title="停止生成"
+                className="inline-flex h-8 cursor-pointer items-center gap-1 rounded-full border border-stone-300 bg-stone-100 px-2.5 text-xs font-medium text-stone-700 transition-colors hover:bg-stone-200 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+              >
+                <span className="text-[10px]">■</span>
+                <span>停止</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={uiLocked || !draft.trim()}
+                aria-label={busy ? t.asking : t.send}
+                className="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground shadow-xs transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                ↑
+              </button>
+            )}
           </div>
         </form>
 

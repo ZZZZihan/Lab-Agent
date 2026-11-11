@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import {
   type BasketEntityKind,
@@ -18,6 +18,7 @@ import {
   normalizeNameKey,
   basketKey,
   extractProjectYear,
+  isRecentAchievementYear,
 } from "./labTypesAndHelpers";
 import type { LabCoreState } from "../page";
 
@@ -248,13 +249,32 @@ export function useLabFiltersAndSelection(core: LabCoreState) {
     searchQuery,
   ]);
 
+  useEffect(() => {
+    lastClickedIndexRef.current = {
+      people: null,
+      projects: null,
+      achievements: null,
+      facilities: null,
+    };
+  }, [
+    activeTab,
+    searchQuery,
+    roleFilter,
+    statusFilter,
+    kindFilter,
+    onlyOngoingProjects,
+    onlyRecentProjects,
+    onlyRecentAchievements,
+    lastClickedIndexRef,
+  ]);
+
   const filteredAchievements = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const minYear = baseYear - 5;
     return achievements.filter((a) => {
       if (kindFilter && a.kind !== kindFilter) return false;
       if (onlyRecentAchievements) {
-        if (a.year == null || a.year < minYear) return false;
+        if (!isRecentAchievementYear(a.year, minYear)) return false;
       }
       if (!q) return true;
       return (
@@ -416,7 +436,7 @@ export function useLabFiltersAndSelection(core: LabCoreState) {
   function handleQuickSelectRecentAchievements() {
     const minYear = baseYear - 5;
     const recent = achievements
-      .filter((a) => !a.year || a.year >= minYear)
+      .filter((a) => isRecentAchievementYear(a.year, minYear))
       .map<BasketItem>((a) => ({
         kind: "achievement",
         id: a.id,

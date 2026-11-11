@@ -1509,6 +1509,7 @@ def _build_audit_filters(
     *,
     action: str | None = None,
     actor_id: uuid.UUID | None = None,
+    resource_type: str | None = None,
     resource_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -1522,6 +1523,9 @@ def _build_audit_filters(
     if actor_id is not None:
         conditions.append("a.actor_id = CAST(:actor_id AS uuid)")
         params["actor_id"] = str(actor_id)
+    if resource_type:
+        conditions.append("a.resource_type = :resource_type")
+        params["resource_type"] = resource_type
     if resource_id:
         conditions.append("a.resource_id = :resource_id")
         params["resource_id"] = resource_id
@@ -1546,6 +1550,7 @@ async def list_audit(
     session: Annotated[AsyncSession, Depends(get_session)],
     action: str | None = None,
     actor_id: uuid.UUID | None = None,
+    resource_type: str | None = None,
     resource_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -1566,6 +1571,7 @@ async def list_audit(
     conditions, params = _build_audit_filters(
         action=action,
         actor_id=actor_id,
+        resource_type=resource_type,
         resource_id=resource_id,
         since=since,
         until=until,
@@ -1603,6 +1609,7 @@ async def export_audit_csv(
     session: Annotated[AsyncSession, Depends(get_session)],
     action: str | None = None,
     actor_id: uuid.UUID | None = None,
+    resource_type: str | None = None,
     resource_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -1622,6 +1629,7 @@ async def export_audit_csv(
     conditions, params = _build_audit_filters(
         action=action,
         actor_id=actor_id,
+        resource_type=resource_type,
         resource_id=resource_id,
         since=since,
         until=until,

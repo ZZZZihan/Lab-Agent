@@ -103,12 +103,12 @@ export default function ChangePasswordPage() {
   );
 
   const checklist = useMemo(() => {
-    const ruleLength = newPw.length >= 12;
+    const ruleLength = newPw.length >= 12 && newPw.length <= 256;
     const charClasses =
       (/[a-z]/.test(newPw) ? 1 : 0) +
       (/[A-Z]/.test(newPw) ? 1 : 0) +
       (/[0-9]/.test(newPw) ? 1 : 0) +
-      (/[^a-zA-Z0-9]/.test(newPw) ? 1 : 0);
+      (/[^\p{L}\p{N}]/u.test(newPw) ? 1 : 0);
     const ruleClasses = charClasses >= 3;
 
     const ruleNotDefaultOrOld =
@@ -190,7 +190,7 @@ export default function ChangePasswordPage() {
     setSaving(true);
     try {
       await changePassword(oldPw, newPw, bindEmail);
-      const verified = await currentUser();
+      const verified = await currentUser({ force: true });
       if (verified && !verified.must_change_password) {
         setUser(verified);
         setSuccessMsg(

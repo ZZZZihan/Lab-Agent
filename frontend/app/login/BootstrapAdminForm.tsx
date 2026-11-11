@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, bootstrapAdmin, mapLabErrorCode } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { validatePasswordClient } from "@/lib/security";
 
 export function BootstrapAdminForm({
   setupTokenRequired,
@@ -51,6 +52,11 @@ export function BootstrapAdminForm({
             const trimmedStaffNo = staffNo.trim();
             const trimmedToken = setupToken.trim();
             if (!trimmedName || !trimmedEmail || !password) {
+              return;
+            }
+            const pwErr = validatePasswordClient(password, { email: trimmedEmail });
+            if (pwErr) {
+              setError(pwErr);
               return;
             }
             submittingRef.current = true;
