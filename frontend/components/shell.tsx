@@ -124,9 +124,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/chat", label: t.chat },
     { href: "/documents", label: t.documents },
     { href: "/lab", label: t.labAssets },
+    { href: "/invoices", label: t.invoicesNav },
     { href: "/settings", label: t.settings },
     ...(user?.role === "admin"
       ? [
+          { href: "/admin/invoices", label: t.adminInvoicesNav },
           { href: "/admin/imports", label: t.importsNav },
           { href: "/admin/users", label: t.users },
           { href: "/admin/groups", label: t.groups },

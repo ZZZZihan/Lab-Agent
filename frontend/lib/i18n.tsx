@@ -361,6 +361,20 @@ const copy = {
       "选填：3–64 位小写字母、数字、._-（如学工号或姓名全拼）；邮箱与登录名至少填写一项",
     searchMembersPlaceholder: "搜索姓名、邮箱或登录名…",
     removeMember: "移除",
+    invoicesNav: "发票报销",
+    adminInvoicesNav: "发票管理",
+    invoicesTitle: "发票上传与自动重命名",
+    invoicesSubtitle:
+      "上传 PDF 发票自动识别货物名称、合计金额与开票日期，下载或导出时文件名自动重命名为「货物名称+合计金额.pdf」。",
+    adminInvoicesTitle: "全组发票后台汇总与导出",
+    adminInvoicesSubtitle:
+      "汇总查看全部成员上传的 PDF 发票，支持按成员、关键词或开票日期筛选，并一键打包导出重命名后的发票与汇总清单。",
+    adminInvoicesOnly: "只有管理员可以访问全组发票后台汇总管理。",
+    action_invoice_uploaded: "上传发票",
+    action_invoice_updated: "修改发票",
+    action_invoice_deleted: "删除发票",
+    action_invoice_downloaded: "下载发票",
+    action_invoice_exported: "批量导出发票",
   },
   en: {
     brand: "Lab Agent",
@@ -729,6 +743,20 @@ const copy = {
       "Optional: 3–64 lowercase chars (a-z, 0-9, ._-); provide at least email or login name",
     searchMembersPlaceholder: "Search name, email, or login name…",
     removeMember: "Remove",
+    invoicesNav: "Invoices",
+    adminInvoicesNav: "Invoice Admin",
+    invoicesTitle: "PDF Invoices & Auto-Renaming",
+    invoicesSubtitle:
+      "Upload PDF invoices to auto-recognize item name, total amount, and invoice date. Downloads and exports are automatically renamed to ItemName+Amount.pdf.",
+    adminInvoicesTitle: "Lab Invoice Summary & Export (Admin)",
+    adminInvoicesSubtitle:
+      "Review all members' uploaded PDF invoices, filter by member, keyword, or date range, and batch export renamed PDFs and CSV summaries.",
+    adminInvoicesOnly: "Only administrators can access the lab-wide invoice management console.",
+    action_invoice_uploaded: "Invoice uploaded",
+    action_invoice_updated: "Invoice updated",
+    action_invoice_deleted: "Invoice deleted",
+    action_invoice_downloaded: "Invoice downloaded",
+    action_invoice_exported: "Invoices exported",
   },
 } as const;
 

@@ -520,3 +520,55 @@ class FieldProvenance(Base):
         Boolean, default=False, server_default="false"
     )
 
+
+class LabInvoice(Base):
+    __tablename__ = "lab_invoices"
+    __table_args__ = (
+        CheckConstraint(
+            "total_amount >= 0 AND total_amount <= 9999999999.99",
+            name="ck_lab_invoices_total_amount",
+        ),
+        CheckConstraint(
+            "octet_length(pdf_data) > 0 AND octet_length(pdf_data) <= 10485760",
+            name="ck_lab_invoices_pdf_size",
+        ),
+        CheckConstraint(
+            "pdf_size_bytes > 0 AND pdf_size_bytes <= 10485760",
+            name="ck_lab_invoices_pdf_size_col",
+        ),
+        CheckConstraint(
+            "pdf_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_lab_invoices_pdf_sha256",
+        ),
+        Index("lab_invoices_owner_idx", "owner_id"),
+        Index("lab_invoices_date_idx", "invoice_date"),
+        Index("lab_invoices_sha256_idx", "pdf_sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    raw_item_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    invoice_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    pdf_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, deferred=True)
+    pdf_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    pdf_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
