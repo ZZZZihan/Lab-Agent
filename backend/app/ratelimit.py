@@ -32,8 +32,12 @@ class RateLimiter:
         if not self.settings.rate_limit_enabled:
             return True
         try:
-            count = await self.redis.incr(bucket)
-            if count == 1:
+            async with self.redis.pipeline(transaction=True) as pipe:
+                pipe.set(bucket, 0, ex=window_seconds, nx=True)
+                pipe.incr(bucket)
+                pipe.ttl(bucket)
+                _, count, ttl = await pipe.execute()
+            if int(ttl) == -1:
                 await self.redis.expire(bucket, window_seconds)
             return int(count) <= limit
         except redis.RedisError:
