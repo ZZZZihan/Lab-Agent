@@ -28,8 +28,8 @@ export default function LoginPage() {
   const { t, toggle } = useI18n();
   const router = useRouter();
   const showHints = process.env.NEXT_PUBLIC_DEMO_HINTS === "true";
-  const [identifier, setIdentifier] = useState(showHints ? "member@lab.local" : "");
-  const [password, setPassword] = useState(showHints ? "LabAgent-Demo-2026-Member" : "");
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const submittingRef = useRef(false);
@@ -97,8 +97,10 @@ export default function LoginPage() {
                 setPending(true);
                 setError("");
                 try {
-                  await login(identifier, password);
-                  router.replace("/chat");
+                  const loggedIn = await login(identifier, password);
+                  router.replace(
+                    loggedIn.must_change_password ? "/change-password" : "/chat",
+                  );
                 } catch (err) {
                   if (err instanceof ApiError) {
                     if (err.code === "ambiguous_name") {

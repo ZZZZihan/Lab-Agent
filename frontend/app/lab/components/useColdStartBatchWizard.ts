@@ -30,7 +30,6 @@ import {
 import type { Copy } from "@/lib/i18n";
 
 import {
-  DEFAULT_INITIAL_PASSWORD,
   MAX_UPLOAD_BYTES,
   type PersonOverrideState,
   triggerBlobDownload,
@@ -246,9 +245,7 @@ export function useColdStartBatchWizard({
     null,
   );
 
-  const [initialPassword, setInitialPassword] = useState(
-    DEFAULT_INITIAL_PASSWORD,
-  );
+  const [initialPassword, setInitialPassword] = useState("");
   const [includePassword, setIncludePassword] = useState(true);
   const [provisioning, setProvisioning] = useState(false);
   const [provisionResult, setProvisionResult] =
@@ -277,6 +274,7 @@ export function useColdStartBatchWizard({
     setJobOverridesMap({});
     setJobSkipSignaturesMap({});
     setLinkSelfClusterId(null);
+    setInitialPassword("");
     setProvisionResult(null);
     setRosterCopied(false);
     setHasSavedCredentials(false);
@@ -711,6 +709,27 @@ export function useColdStartBatchWizard({
     return batchResolve?.self_candidate ?? null;
   }, [batchResolve]);
 
+  const needsNewAccounts = useMemo<boolean>(() => {
+    for (const job of batchJobs) {
+      const ovForJob = jobOverridesMap[job.job_id] || {};
+      for (const p of job.preview?.people || []) {
+        const ov = ovForJob[p.key];
+        if (ov?.exclude) continue;
+        if (p.match?.status === "existing") continue;
+        const isSelfLinked = Boolean(
+          selfCandidate &&
+            linkSelfClusterId &&
+            selfCandidate.cluster_id === linkSelfClusterId &&
+            ((p.cluster_id && p.cluster_id === selfCandidate.cluster_id) ||
+              p.name === selfCandidate.name),
+        );
+        if (isSelfLinked) continue;
+        return true;
+      }
+    }
+    return false;
+  }, [batchJobs, jobOverridesMap, selfCandidate, linkSelfClusterId]);
+
   function updatePersonOverride(
     jobId: string,
     person: ImportPreviewPerson,
@@ -780,6 +799,10 @@ export function useColdStartBatchWizard({
         );
         return;
       }
+    }
+    if (needsNewAccounts && !initialPassword.trim()) {
+      setWizardError(mapLabErrorCode("initial_password_required"));
+      return;
     }
 
     provisioningRef.current = true;
@@ -1200,6 +1223,7 @@ export function useColdStartBatchWizard({
     setLinkSelfClusterId,
     qualitySummary,
     selfCandidate,
+    needsNewAccounts,
     importJob,
     provisionAsOf,
     setProvisionAsOf,

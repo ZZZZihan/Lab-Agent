@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 
 export const DEFAULT_PUBLIC_ORIGIN = "http://127.0.0.1:43123";
 
+/**
+ * Public repository default initial password sentinel.
+ * Used strictly for blocklist validation and warning detection — never prefill inputs with it.
+ */
+export const KNOWN_PUBLIC_DEFAULT_PASSWORD = "LabAgent@2026";
+
 export const CONTENT_SECURITY_POLICY =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 

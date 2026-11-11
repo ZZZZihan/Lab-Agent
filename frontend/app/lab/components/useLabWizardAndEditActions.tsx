@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   ApiError,
+  exportAllLabAssets,
+  mapLabErrorCode,
   reindexLabAssets,
   restoreImportedField,
   updateLabEntity,
@@ -64,32 +66,16 @@ export function createWizardAndEditActions(ctx: LabCoreAndFilterState) {
     setStatusBanner("");
     setExportingFormat(format);
     try {
-      const response = await fetch(
-        `/api/backend/lab/export?format=${format}`,
-        {
-          method: "GET",
-          cache: "no-store",
-        },
-      );
-      if (!response.ok) {
-        let msg = t.error;
-        try {
-          const errBody = (await response.json()) as {
-            error?: { message?: string };
-          };
-          if (errBody.error?.message) msg = errBody.error.message;
-        } catch {
-          // ignore JSON parse failure
-        }
-        throw new Error(msg);
-      }
-      const blob = await response.blob();
-      triggerBlobDownload(
-        blob,
-        format === "docx" ? "lab-assets.docx" : "lab-assets.md",
-      );
+      const { blob, filename } = await exportAllLabAssets(format);
+      triggerBlobDownload(blob, filename);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.error);
+      setError(
+        err instanceof ApiError
+          ? mapLabErrorCode(err.code, err.message)
+          : err instanceof Error
+            ? err.message
+            : t.error,
+      );
     } finally {
       setExportingFormat(null);
     }

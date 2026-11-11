@@ -27,6 +27,7 @@ import {
   getImportJob,
   getImportRoster,
   listImportJobs,
+  mapLabErrorCode,
   previewImportMerge,
   reparseImportJob,
   revertImportMerge,
@@ -42,8 +43,8 @@ import {
   type User,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
+import { KNOWN_PUBLIC_DEFAULT_PASSWORD } from "@/lib/security";
 
-const DEFAULT_INITIAL_PASSWORD = "LabAgent@2026";
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/;
 const RESERVED_LOGIN_NAMES = new Set([
@@ -192,7 +193,7 @@ export default function AdminImportsPage() {
 
   const [importJob, setImportJob] = useState<ImportJobResponse | null>(null);
   const [provisionAsOf, setProvisionAsOf] = useState("");
-  const [initialPassword, setInitialPassword] = useState(DEFAULT_INITIAL_PASSWORD);
+  const [initialPassword, setInitialPassword] = useState("");
   const [includePassword, setIncludePassword] = useState(true);
   const [overrides, setOverrides] = useState<Record<string, PersonOverrideRow>>({});
   const [savingPreview, setSavingPreview] = useState(false);
@@ -441,6 +442,7 @@ export default function AdminImportsPage() {
       });
       setImportJob(parsed);
       setProvisionAsOf(parsed.as_of_time || parsed.preview?.as_of_time || "");
+      setInitialPassword("");
       setOverrides(buildInitialOverrides(parsed));
       if (parsed.deduplicated) {
         setWizardNotice("该文件已上传过且尚未开号，已打开原任务预览。");
@@ -448,7 +450,9 @@ export default function AdminImportsPage() {
       setWizardStep(2);
       await loadJobs();
     } catch (err) {
-      setWizardError(err instanceof ApiError ? err.message : t.error);
+      setWizardError(
+        err instanceof ApiError ? mapLabErrorCode(err.code, err.message) : t.error,
+      );
     } finally {
       setParsing(false);
     }
@@ -459,6 +463,7 @@ export default function AdminImportsPage() {
     setWizardNotice("");
     setProvisionResult(null);
     setHasSavedCredentials(false);
+    setInitialPassword("");
     try {
       const detail = await getImportJob(jobId);
       setImportJob(detail);
@@ -467,7 +472,9 @@ export default function AdminImportsPage() {
       setWizardStep(2);
       setWizardOpen(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : t.error);
+      setError(
+        err instanceof ApiError ? mapLabErrorCode(err.code, err.message) : t.error,
+      );
     }
   }
 
@@ -560,10 +567,54 @@ export default function AdminImportsPage() {
     }
   }
 
+  const previewSummary = useMemo(() => {
+    const list = importJob?.preview?.people || [];
+    let newCount = 0;
+    let existingCount = 0;
+    let excludeCount = 0;
+    let unresolvedCount = 0;
+    for (const p of list) {
+      const ov = overrides[p.key] || {
+        mode: p.match?.status === "existing" ? "existing" : "new",
+        login_name: p.login_name || "",
+        link_user_id: p.match?.user_id || "",
+      };
+      if (ov.mode === "exclude") {
+        excludeCount += 1;
+        continue;
+      }
+      if (ov.mode === "existing") {
+        existingCount += 1;
+        if (!ov.link_user_id && p.match?.status !== "existing") {
+          unresolvedCount += 1;
+        }
+        continue;
+      }
+      newCount += 1;
+      const loginClean = ov.login_name.trim().toLowerCase();
+      const stillConflict =
+        p.match?.status === "conflict" && loginClean === (p.login_name || "");
+      if (!isValidLoginName(ov.login_name) || stillConflict) {
+        unresolvedCount += 1;
+      }
+    }
+    return {
+      total: list.length,
+      newCount,
+      existingCount,
+      excludeCount,
+      unresolvedCount,
+    };
+  }, [importJob, overrides]);
+
   async function handleProvision() {
     if (!importJob || savingPreview || reparsing || provisioning) return;
     if (!provisionAsOf.trim()) {
       setWizardError("请填写本子基准日期 (as_of_time)");
+      return;
+    }
+    if (previewSummary.newCount > 0 && !initialPassword.trim()) {
+      setWizardError(mapLabErrorCode("initial_password_required"));
       return;
     }
     setWizardError("");
@@ -615,7 +666,9 @@ export default function AdminImportsPage() {
       setWizardStep(3);
       await loadJobs();
     } catch (err) {
-      setWizardError(err instanceof ApiError ? err.message : t.error);
+      setWizardError(
+        err instanceof ApiError ? mapLabErrorCode(err.code, err.message) : t.error,
+      );
     } finally {
       setProvisioning(false);
     }
@@ -919,46 +972,6 @@ export default function AdminImportsPage() {
     );
   }
 
-  const previewSummary = useMemo(() => {
-    const list = importJob?.preview?.people || [];
-    let newCount = 0;
-    let existingCount = 0;
-    let excludeCount = 0;
-    let unresolvedCount = 0;
-    for (const p of list) {
-      const ov = overrides[p.key] || {
-        mode: p.match?.status === "existing" ? "existing" : "new",
-        login_name: p.login_name || "",
-        link_user_id: p.match?.user_id || "",
-      };
-      if (ov.mode === "exclude") {
-        excludeCount += 1;
-        continue;
-      }
-      if (ov.mode === "existing") {
-        existingCount += 1;
-        if (!ov.link_user_id && p.match?.status !== "existing") {
-          unresolvedCount += 1;
-        }
-        continue;
-      }
-      newCount += 1;
-      const loginClean = ov.login_name.trim().toLowerCase();
-      const stillConflict =
-        p.match?.status === "conflict" && loginClean === (p.login_name || "");
-      if (!isValidLoginName(ov.login_name) || stillConflict) {
-        unresolvedCount += 1;
-      }
-    }
-    return {
-      total: list.length,
-      newCount,
-      existingCount,
-      excludeCount,
-      unresolvedCount,
-    };
-  }, [importJob?.preview?.people, overrides]);
-
   function renderStatusBadge(job: ImportJobSummary) {
     if (job.status === "provisioned") {
       return (
@@ -1025,6 +1038,7 @@ export default function AdminImportsPage() {
                   setUploadFile(null);
                   setUploadAsOf("");
                   setImportJob(null);
+                  setInitialPassword("");
                   setProvisionResult(null);
                   setHasSavedCredentials(false);
                   setWizardOpen(true);
@@ -1738,7 +1752,7 @@ export default function AdminImportsPage() {
                 </div>
 
                 {/* Default password warning bar (Spec §2.4 & §8.3.2) */}
-                {initialPassword.trim() === DEFAULT_INITIAL_PASSWORD ? (
+                {initialPassword.trim() === KNOWN_PUBLIC_DEFAULT_PASSWORD ? (
                   <div
                     role="alert"
                     className="rounded-md border border-destructive bg-destructive/10 px-3.5 py-2.5 text-xs font-semibold text-destructive"
@@ -1770,9 +1784,10 @@ export default function AdminImportsPage() {
                       id="imp-pw"
                       type="text"
                       value={initialPassword}
+                      placeholder="请设置自定义口令（至少12位，含3类字符）"
                       disabled={wizardBusy}
                       onChange={(e) => setInitialPassword(e.target.value)}
-                      required
+                      required={previewSummary.newCount > 0}
                     />
                   </div>
                   <div className="flex items-end pb-2">
@@ -2020,7 +2035,8 @@ export default function AdminImportsPage() {
                       reparsing ||
                       provisioning ||
                       !provisionAsOf.trim() ||
-                      previewSummary.unresolvedCount > 0
+                      previewSummary.unresolvedCount > 0 ||
+                      (previewSummary.newCount > 0 && !initialPassword.trim())
                     }
                     onClick={handleProvision}
                   >
