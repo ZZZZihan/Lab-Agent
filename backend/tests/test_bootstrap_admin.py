@@ -132,6 +132,7 @@ async def test_bootstrap_succeeds_when_no_admin_exists(client: AsyncClient) -> N
     assert user_data["login_name"] == "tg109823"
     assert user_data["role"] == "admin"
     assert user_data["must_change_password"] is False
+    assert user_data["oidc_mode"] is False
 
     # Verify /api/v1/auth/me works with the issued token
     me_res = await client.get(
@@ -141,6 +142,7 @@ async def test_bootstrap_succeeds_when_no_admin_exists(client: AsyncClient) -> N
     assert me_res.status_code == 200
     assert me_res.json()["id"] == user_data["id"]
     assert me_res.json()["role"] == "admin"
+    assert me_res.json()["oidc_mode"] is False
 
     # Verify bootstrap is now closed
     status_after = await client.get("/api/v1/auth/bootstrap-status")

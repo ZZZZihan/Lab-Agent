@@ -30,6 +30,7 @@ import {
   mapLabErrorCode,
   previewImportMerge,
   reparseImportJob,
+  resolveOidcMode,
   revertImportMerge,
   updateImportPreview,
   type ImportJobResponse,
@@ -43,7 +44,11 @@ import {
   type User,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { KNOWN_PUBLIC_DEFAULT_PASSWORD } from "@/lib/security";
+import {
+  KNOWN_PUBLIC_DEFAULT_PASSWORD,
+  canSubmitProvisioning,
+  isInitialPasswordRequired,
+} from "@/lib/security";
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/;
@@ -195,6 +200,7 @@ export default function AdminImportsPage() {
   const [provisionAsOf, setProvisionAsOf] = useState("");
   const [initialPassword, setInitialPassword] = useState("");
   const [includePassword, setIncludePassword] = useState(true);
+  const [fallbackOidcMode, setFallbackOidcMode] = useState(false);
   const [overrides, setOverrides] = useState<Record<string, PersonOverrideRow>>({});
   const [savingPreview, setSavingPreview] = useState(false);
   const [reparsing, setReparsing] = useState(false);
@@ -302,11 +308,28 @@ export default function AdminImportsPage() {
     };
   }, [t.error]);
 
+  useEffect(() => {
+    if (typeof me?.oidc_mode === "boolean") return;
+    let cancelled = false;
+    resolveOidcMode(me)
+      .then((flag) => {
+        if (!cancelled) setFallbackOidcMode(flag);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [me]);
+
+  const oidcMode =
+    typeof me?.oidc_mode === "boolean" ? me.oidc_mode : fallbackOidcMode;
+
   const wizardBusy = savingPreview || reparsing || provisioning;
 
   // Spec §8.3.3 beforeunload guard when Step 3 has plaintext credentials in memory
   const hasUnsavedPlaintextRoster = Boolean(
-    wizardOpen &&
+    !oidcMode &&
+      wizardOpen &&
       wizardStep === 3 &&
       provisionResult &&
       Boolean(provisionResult.initial_password || includePassword) &&
@@ -378,6 +401,7 @@ export default function AdminImportsPage() {
   function tryCloseWizard() {
     if (wizardBusy) return;
     if (
+      !oidcMode &&
       wizardStep === 3 &&
       provisionResult &&
       Boolean(provisionResult.initial_password || includePassword) &&
@@ -613,7 +637,10 @@ export default function AdminImportsPage() {
       setWizardError("请填写本子基准日期 (as_of_time)");
       return;
     }
-    if (previewSummary.newCount > 0 && !initialPassword.trim()) {
+    if (
+      isInitialPasswordRequired(previewSummary.newCount > 0, oidcMode) &&
+      !initialPassword.trim()
+    ) {
       setWizardError(mapLabErrorCode("initial_password_required"));
       return;
     }
@@ -643,13 +670,16 @@ export default function AdminImportsPage() {
           method: "POST",
           body: JSON.stringify({
             as_of_time: provisionAsOf.trim() || undefined,
-            initial_password: initialPassword.trim() || undefined,
-            include_password: includePassword,
+            initial_password: oidcMode
+              ? undefined
+              : initialPassword.trim() || undefined,
+            include_password: oidcMode ? false : includePassword,
             people: peoplePayload,
           }),
         },
       );
       if (
+        !oidcMode &&
         me?.id &&
         me.role === "admin" &&
         Boolean(res.initial_password || includePassword)
@@ -1784,18 +1814,25 @@ export default function AdminImportsPage() {
                       id="imp-pw"
                       type="text"
                       value={initialPassword}
-                      placeholder="请设置自定义口令（至少12位，含3类字符）"
-                      disabled={wizardBusy}
+                      placeholder={
+                        oidcMode
+                          ? "已启用 OIDC 统一身份认证，无需初始口令"
+                          : "请设置自定义口令（至少12位，含3类字符）"
+                      }
+                      disabled={wizardBusy || Boolean(oidcMode)}
                       onChange={(e) => setInitialPassword(e.target.value)}
-                      required={previewSummary.newCount > 0}
+                      required={isInitialPasswordRequired(
+                        previewSummary.newCount > 0,
+                        oidcMode,
+                      )}
                     />
                   </div>
                   <div className="flex items-end pb-2">
                     <label className="flex cursor-pointer items-center gap-2 text-foreground">
                       <input
                         type="checkbox"
-                        checked={includePassword}
-                        disabled={wizardBusy}
+                        checked={!oidcMode && includePassword}
+                        disabled={wizardBusy || Boolean(oidcMode)}
                         onChange={(e) => setIncludePassword(e.target.checked)}
                         className="h-4 w-4 rounded border-border"
                       />
@@ -2031,12 +2068,14 @@ export default function AdminImportsPage() {
                   <Button
                     type="button"
                     disabled={
-                      savingPreview ||
-                      reparsing ||
-                      provisioning ||
-                      !provisionAsOf.trim() ||
-                      previewSummary.unresolvedCount > 0 ||
-                      (previewSummary.newCount > 0 && !initialPassword.trim())
+                      !canSubmitProvisioning({
+                        busy: savingPreview || reparsing || provisioning,
+                        hasAsOfTime: Boolean(provisionAsOf.trim()),
+                        hasNewAccounts: previewSummary.newCount > 0,
+                        oidcMode,
+                        initialPassword,
+                        unresolvedCount: previewSummary.unresolvedCount,
+                      })
                     }
                     onClick={handleProvision}
                   >

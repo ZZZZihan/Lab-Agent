@@ -246,7 +246,7 @@ async def bootstrap_admin(
         await session.flush()
 
         token, _jti, ttl = issue_token(user, settings)
-        serialized_user = _serialize_auth_user(user)
+        serialized_user = _serialize_auth_user(user, settings)
         await write_audit(
             settings=settings,
             actor_id=user.id,

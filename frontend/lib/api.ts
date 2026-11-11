@@ -6,6 +6,7 @@ export type User = {
   login_name?: string | null;
   must_change_password?: boolean;
   must_change_password_by?: string | null;
+  oidc_mode?: boolean;
 };
 
 export function generateRequestId(): string {
@@ -268,10 +269,31 @@ export type BootstrapAdminPayload = {
   setup_token?: string;
 };
 
+let cachedOidcModePromise: Promise<boolean> | null = null;
+
 export async function getBootstrapStatus(): Promise<BootstrapStatusResponse> {
   const response = await fetch("/api/bootstrap-status", { cache: "no-store" });
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as BootstrapStatusResponse;
+}
+
+export function resetCachedOidcMode(): void {
+  cachedOidcModePromise = null;
+}
+
+export function resolveOidcMode(user?: User | null): Promise<boolean> {
+  if (typeof user?.oidc_mode === "boolean") {
+    return Promise.resolve(user.oidc_mode);
+  }
+  if (!cachedOidcModePromise) {
+    cachedOidcModePromise = getBootstrapStatus()
+      .then((res) => Boolean(res.oidc_mode))
+      .catch((err) => {
+        cachedOidcModePromise = null;
+        throw err;
+      });
+  }
+  return cachedOidcModePromise;
 }
 
 export async function bootstrapAdmin(

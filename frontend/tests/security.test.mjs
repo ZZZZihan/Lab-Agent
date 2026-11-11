@@ -39,6 +39,8 @@ const {
   CONTENT_SECURITY_POLICY,
   KNOWN_PUBLIC_DEFAULT_PASSWORD,
   SECURITY_HEADERS,
+  canSubmitProvisioning,
+  isInitialPasswordRequired,
   isOriginAllowed,
   parseAllowedOrigins,
   sessionCookieName,
@@ -1037,6 +1039,99 @@ test("handleAuthRedirect redirects on 401 / 403 password_change_required except 
     assert.equal(assignedUrl, "/login");
   } finally {
     globalThis.window = prevWindow;
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test("OIDC mode exempts account provisioning from initial-password requirements", async () => {
+  // Local password mode requires custom password when new accounts are provisioned
+  assert.equal(isInitialPasswordRequired(true, false), true);
+  assert.equal(isInitialPasswordRequired(false, false), false);
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: false,
+      initialPassword: "",
+    }),
+    false,
+  );
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: false,
+      initialPassword: "Custom#Password2026",
+    }),
+    true,
+  );
+
+  // OIDC SSO mode allows passwordless provisioning even when new accounts exist
+  assert.equal(isInitialPasswordRequired(true, true), false);
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: true,
+      initialPassword: "",
+    }),
+    true,
+  );
+  assert.equal(
+    canSubmitProvisioning({
+      busy: false,
+      hasAsOfTime: true,
+      hasNewAccounts: true,
+      oidcMode: true,
+      initialPassword: "",
+      unresolvedCount: 1,
+    }),
+    false,
+  );
+
+  // resolveOidcMode uses user.oidc_mode directly without extra network requests, and falls back to cached /api/bootstrap-status otherwise
+  const prevFetch = globalThis.fetch;
+  let bootstrapCalls = 0;
+  apiModule.resetCachedOidcMode();
+  globalThis.fetch = async (url) => {
+    assert.equal(url, "/api/bootstrap-status");
+    bootstrapCalls += 1;
+    return new Response(
+      JSON.stringify({
+        needs_bootstrap: false,
+        setup_token_required: false,
+        oidc_mode: true,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  try {
+    assert.equal(
+      await apiModule.resolveOidcMode({
+        id: "u1",
+        display_name: "Admin",
+        role: "admin",
+        oidc_mode: false,
+      }),
+      false,
+    );
+    assert.equal(bootstrapCalls, 0);
+
+    assert.equal(
+      await apiModule.resolveOidcMode({
+        id: "u1",
+        display_name: "Admin",
+        role: "admin",
+      }),
+      true,
+    );
+    assert.equal(await apiModule.resolveOidcMode(null), true);
+    assert.equal(bootstrapCalls, 1);
+  } finally {
+    apiModule.resetCachedOidcMode();
     globalThis.fetch = prevFetch;
   }
 });

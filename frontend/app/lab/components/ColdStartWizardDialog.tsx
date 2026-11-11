@@ -15,7 +15,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { mapLabErrorCode } from "@/lib/api";
-import { KNOWN_PUBLIC_DEFAULT_PASSWORD } from "@/lib/security";
+import {
+  KNOWN_PUBLIC_DEFAULT_PASSWORD,
+  canSubmitProvisioning,
+  isInitialPasswordRequired,
+} from "@/lib/security";
 import { cn } from "cn";
 
 import { ColdStartQualityPanel } from "./ColdStartQualityPanel";
@@ -47,6 +51,7 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
     qualitySummary,
     selfCandidate,
     needsNewAccounts,
+    oidcMode,
     initialPassword,
     setInitialPassword,
     includePassword,
@@ -338,16 +343,22 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
                   id="prov-pw"
                   type="text"
                   value={initialPassword}
-                  placeholder="请设置自定义口令（至少12位，含3类字符）"
+                  disabled={Boolean(oidcMode)}
+                  placeholder={
+                    oidcMode
+                      ? "已启用 OIDC 统一身份认证，无需初始口令"
+                      : "请设置自定义口令（至少12位，含3类字符）"
+                  }
                   onChange={(e) => setInitialPassword(e.target.value)}
-                  required={needsNewAccounts}
+                  required={isInitialPasswordRequired(needsNewAccounts, oidcMode)}
                 />
               </div>
               <div className="flex items-end pb-2">
                 <label className="flex cursor-pointer items-center gap-2 text-[12px] text-foreground">
                   <input
                     type="checkbox"
-                    checked={includePassword}
+                    checked={!oidcMode && includePassword}
+                    disabled={Boolean(oidcMode)}
                     onChange={(e) => setIncludePassword(e.target.checked)}
                     className="h-4 w-4 rounded border-border"
                   />
@@ -651,9 +662,13 @@ export function ColdStartWizardDialog({ ctx }: { ctx: LabPageContext }) {
               <Button
                 type="button"
                 disabled={
-                  provisioning ||
-                  !activeAsOf.trim() ||
-                  (needsNewAccounts && !initialPassword.trim())
+                  !canSubmitProvisioning({
+                    busy: provisioning,
+                    hasAsOfTime: Boolean(activeAsOf.trim()),
+                    hasNewAccounts: needsNewAccounts,
+                    oidcMode,
+                    initialPassword,
+                  })
                 }
                 onClick={handleProvision}
               >

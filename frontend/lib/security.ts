@@ -83,3 +83,29 @@ export function verifyOrigin(
   }
   return null;
 }
+
+export function isInitialPasswordRequired(
+  hasNewAccounts: boolean,
+  oidcMode?: boolean | null,
+): boolean {
+  return Boolean(hasNewAccounts) && !oidcMode;
+}
+
+export function canSubmitProvisioning(params: {
+  busy: boolean;
+  hasAsOfTime: boolean;
+  hasNewAccounts: boolean;
+  oidcMode?: boolean | null;
+  initialPassword: string;
+  unresolvedCount?: number;
+}): boolean {
+  if (params.busy || !params.hasAsOfTime) return false;
+  if ((params.unresolvedCount ?? 0) > 0) return false;
+  if (
+    isInitialPasswordRequired(params.hasNewAccounts, params.oidcMode) &&
+    !params.initialPassword.trim()
+  ) {
+    return false;
+  }
+  return true;
+}
