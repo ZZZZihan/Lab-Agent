@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 _EMAIL = re.compile(
-    r"(?<![A-Za-z0-9.%+\-])[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?![A-Za-z])"
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]*[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?![A-Za-z])"
 )
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)")
 _LANDLINE = re.compile(

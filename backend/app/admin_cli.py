@@ -118,6 +118,7 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                 new_role = str(args.role).strip()
                 old_role = target_user.role
                 target_user.role = new_role
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -138,6 +139,7 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
 
             if cmd in {"deactivate", "activate"}:
                 target_user.is_active = cmd == "activate"
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,
@@ -165,6 +167,7 @@ async def _run(args: argparse.Namespace, password: str | None) -> int:
                     return 1
                 target_user.password_hash = hash_password(password)
                 target_user.must_change_password_by = None
+                await session.flush()
                 await write_audit(
                     settings=settings,
                     actor_id=None,

@@ -17,11 +17,12 @@ from app.audit import (
 )
 from app.auth import hash_password
 from app.config import get_settings
-from app.db import get_sessionmaker
+from app.db import get_engine, get_sessionmaker
 from app.importer.fingerprint import person_fp
-from app.models import AuditEvent, ImportJob, LabPerson, LabProject, User
+from app.models import AuditEvent, Document, ImportJob, LabPerson, LabProject, User
+from app.rag.redact import contains_email_or_phone, redact_text
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from tests.test_proposal_coldstart import build_synthetic_proposal_docx
 
 SYNTH_PHONE = "138" + "00138000"
@@ -76,6 +77,15 @@ def test_normalize_request_id_and_scrub_audit_str() -> None:
     cjk_scrubbed = scrub_audit_str(f"联系邮箱{SYNTH_EMAIL}请查收", max_len=120)
     assert SYNTH_EMAIL not in cjk_scrubbed
     assert "[REDACTED_EMAIL]" in cjk_scrubbed
+
+    for punct_prefix in ("+", "-", ".", "_", "%"):
+        punct_email = f"{punct_prefix}alerts" + "@" + "example.com"
+        assert contains_email_or_phone(f"请发送至 {punct_email} 确认")
+        redacted_text, cnt = redact_text(f"请发送至 {punct_email} 确认")
+        assert cnt == 1
+        assert punct_email not in redacted_text
+        assert "alerts" + "@" + "example.com" not in redacted_text
+        assert "[REDACTED_EMAIL]" in redacted_text
 
     sha_with_phone_digits = ("f" + SYNTH_PHONE + ("a1b2" * 13))[:64]
     assert len(sha_with_phone_digits) == 64
@@ -139,6 +149,59 @@ async def test_transactional_audit_rolls_back_domain_write_on_failure(
         )
         assert leaked is None
         assert await verify_audit_chain(session) is None
+
+
+async def test_write_audit_flushes_dirty_orm_before_advisory_lock(
+    client: AsyncClient,
+) -> None:
+    admin_user, _ = await _bootstrap_admin_headers(client)
+
+    async with get_sessionmaker()() as session:
+        doc = Document(
+            owner_id=admin_user.id,
+            title="锁序验证文档",
+            source="upload",
+            visibility="private",
+            content_text="测试正文",
+            status="ready",
+        )
+        session.add(doc)
+        await session.commit()
+        doc_id = doc.id
+
+    executed_sql: list[str] = []
+
+    def _capture_sql(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        executed_sql.append(str(statement))
+
+    sync_engine = get_engine().sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _capture_sql)
+    try:
+        async with get_sessionmaker()() as session:
+            loaded = await session.get(Document, doc_id)
+            assert loaded is not None
+            loaded.deleted_at = datetime.now(UTC)
+            # Intentionally do NOT call session.flush() in caller: write_audit must flush first
+            await write_audit(
+                settings=get_settings(),
+                actor_id=admin_user.id,
+                action="document_delete",
+                resource_type="document",
+                resource_id=str(doc_id),
+                detail={"operation": "delete"},
+                session=session,
+            )
+            await session.commit()
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _capture_sql)
+
+    update_idx = next(
+        i for i, sql in enumerate(executed_sql) if "UPDATE documents" in sql
+    )
+    lock_idx = next(
+        i for i, sql in enumerate(executed_sql) if "pg_advisory_xact_lock" in sql
+    )
+    assert update_idx < lock_idx
 
 
 async def test_audit_retention_is_atomic_and_preserves_chain(

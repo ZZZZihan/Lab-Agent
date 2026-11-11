@@ -1088,6 +1088,7 @@ async def delete_document(
     from datetime import UTC, datetime
 
     document.deleted_at = datetime.now(UTC)
+    await session.flush()
     await write_audit(
         settings=settings,
         actor_id=user.id,

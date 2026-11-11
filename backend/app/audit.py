@@ -230,6 +230,7 @@ async def _append_audit_event(
     ip_hashed: str | None,
     payload: dict[str, Any],
 ) -> None:
+    await session.flush()
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_id)"),
         {"lock_id": AUDIT_ADVISORY_LOCK_ID},
@@ -355,6 +356,7 @@ async def verify_audit_chain(session: AsyncSession) -> int | None:
 
 
 async def run_retention(session: AsyncSession, *, days: int) -> int:
+    await session.flush()
     cutoff = datetime.now(UTC) - timedelta(days=days)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_id)"),
