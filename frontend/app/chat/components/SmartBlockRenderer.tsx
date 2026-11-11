@@ -5,6 +5,7 @@ import { Children, type ReactNode, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { cn } from "cn";
 import { type Citation, type LabPersonItem } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -117,14 +118,23 @@ function EditorialProse({
           {withCitations(children)}
         </h5>
       ),
-      ul: ({ children }) => (
-        <ul className="list-disc space-y-1.5 pl-5">{children}</ul>
+      ul: ({ className, children }) => (
+        <ul className={cn("list-disc space-y-1.5 pl-5", className)}>
+          {children}
+        </ul>
       ),
-      ol: ({ children }) => (
-        <ol className="list-decimal space-y-1.5 pl-5">{children}</ol>
+      ol: ({ start, className, children }) => (
+        <ol
+          start={start}
+          className={cn("list-decimal space-y-1.5 pl-5", className)}
+        >
+          {children}
+        </ol>
       ),
-      li: ({ children }) => (
-        <li className="leading-[1.7]">{withCitations(children)}</li>
+      li: ({ className, children }) => (
+        <li className={cn("leading-[1.7]", className)}>
+          {withCitations(children)}
+        </li>
       ),
       strong: ({ children }) => (
         <strong className="font-semibold text-stone-900 dark:text-stone-100">
@@ -156,7 +166,10 @@ function EditorialProse({
         </pre>
       ),
       code: ({ className, children }) => {
-        const isBlock = Boolean(className && className.includes("language-"));
+        const isBlock = Boolean(
+          (className && className.includes("language-")) ||
+            String(children).includes("\n"),
+        );
         if (isBlock) {
           return <code className={className}>{children}</code>;
         }
@@ -178,11 +191,16 @@ function EditorialProse({
           {children}
         </thead>
       ),
-      th: ({ children }) => (
-        <th className="px-3 py-2 font-semibold">{withCitations(children)}</th>
+      th: ({ style, children }) => (
+        <th style={style} className="px-3 py-2 font-semibold">
+          {withCitations(children)}
+        </th>
       ),
-      td: ({ children }) => (
-        <td className="border-t border-stone-200/70 px-3 py-2 align-top dark:border-stone-800/80">
+      td: ({ style, children }) => (
+        <td
+          style={style}
+          className="border-t border-stone-200/70 px-3 py-2 align-top dark:border-stone-800/80"
+        >
           {withCitations(children)}
         </td>
       ),

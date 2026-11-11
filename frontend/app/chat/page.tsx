@@ -334,6 +334,7 @@ export default function ChatPage() {
         phase: t.asking,
       },
     ]);
+    let resolvedConvId: string | undefined;
     try {
       const payload: { message: string; conversation_id?: string } = {
         message: text,
@@ -365,9 +366,11 @@ export default function ChatPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let resolvedConvId: string | undefined;
       const apply = (event: ChatEvent) => {
-        if (event.type === "done" && event.conversation_id) {
+        if (
+          (event.type === "conversation" || event.type === "done") &&
+          event.conversation_id
+        ) {
           resolvedConvId = event.conversation_id;
           activeSelectionRef.current = event.conversation_id;
           setConversationId(event.conversation_id);
@@ -484,17 +487,31 @@ export default function ChatPage() {
       const isAbort =
         controller.signal.aborted ||
         (err instanceof Error && err.name === "AbortError");
-      setTurns((current) =>
-        current.map((turn) =>
-          turn.id === id
-            ? {
-                ...turn,
-                pending: false,
-                ...(isAbort ? {} : { error: t.error }),
-              }
-            : turn,
-        ),
-      );
+      const knownConvId = resolvedConvId || targetConversationId || undefined;
+      if (isAbort && !knownConvId) {
+        setTurns((current) => current.filter((turn) => turn.id !== id));
+        setDraft((cur) => cur || text);
+        void loadConversations();
+      } else {
+        if (knownConvId) {
+          activeSelectionRef.current = knownConvId;
+          setConversationId(knownConvId);
+        }
+        setTurns((current) =>
+          current.map((turn) =>
+            turn.id === id
+              ? {
+                  ...turn,
+                  pending: false,
+                  ...(isAbort ? {} : { error: t.error }),
+                }
+              : turn,
+          ),
+        );
+        if (resolvedConvId) {
+          await loadConversations();
+        }
+      }
     } finally {
       if (streamAbortRef.current === controller) {
         streamAbortRef.current = null;

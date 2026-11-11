@@ -91,6 +91,7 @@ export type TokenUsage = {
 
 /**
  * SSE event contract emitted by POST /api/v1/chat/stream:
+ * - conversation:   { conversation_id }
  * - status:         { phase }
  * - tool:           { name, status }
  * - retrieval:      { mode, coverage, elapsed_ms, hits[], refused }
@@ -103,6 +104,7 @@ export type TokenUsage = {
  */
 export type ChatEvent = {
   type:
+    | "conversation"
     | "status"
     | "tool"
     | "retrieval"

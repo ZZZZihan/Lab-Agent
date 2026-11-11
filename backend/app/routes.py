@@ -1327,6 +1327,12 @@ async def chat_stream(
                         )
                     )
                     await session.commit()
+                    await emit(
+                        {
+                            "type": "conversation",
+                            "conversation_id": str(conversation.id),
+                        }
+                    )
                     result = await run_agent(
                         session=session,
                         user=user,

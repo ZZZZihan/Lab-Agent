@@ -76,12 +76,19 @@ export const AUDIT_RESOURCE_TYPES = [
   "group",
   "document",
   "audit",
-  "token",
+  "api_token",
   "import_job",
   "lab_person",
   "lab_project",
   "lab_achievement",
   "lab_facility",
+  "chat",
+  "chunk",
+  "embedding_index",
+  "mcp_tool",
+  "reranker",
+  "system",
+  "tool",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

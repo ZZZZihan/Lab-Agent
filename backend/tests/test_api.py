@@ -2470,6 +2470,8 @@ async def test_conversation_history_continuation_and_other_user_returns_404(
     first_events = _events(first_resp.text)
     first_done = next(ev for ev in first_events if ev["type"] == "done")
     conv_id = str(first_done["conversation_id"])
+    assert first_events[0]["type"] == "conversation"
+    assert str(first_events[0]["conversation_id"]) == conv_id
 
     # Continuing the conversation with conversation_id appends to the same conversation
     second_resp = await client.post(
@@ -2615,6 +2617,20 @@ async def test_admin_create_update_user_login_name_and_audit_resource_type_filte
     csv_rows = list(csv.DictReader(io.StringIO(csv_resp.text)))
     assert len(csv_rows) == len(events)
     assert all(r["resource_type"] == "user" and r["resource_id"] == uid for r in csv_rows)
+
+    pat_resp = await client.post(
+        "/api/v1/tokens",
+        json={"name": "audit-filter-token", "expires_in_days": 7},
+        headers=admin,
+    )
+    assert pat_resp.status_code in (200, 201), pat_resp.text
+    token_audit = await client.get(
+        "/api/v1/audit?resource_type=api_token",
+        headers=admin,
+    )
+    assert token_audit.status_code == 200
+    token_events = token_audit.json()["events"]
+    assert any(ev["action"] == "token_create" and ev["resource_type"] == "api_token" for ev in token_events)
 
 
 
