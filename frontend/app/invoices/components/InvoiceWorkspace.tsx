@@ -214,6 +214,11 @@ export function InvoiceWorkspace({ mode }: { mode: "member" | "admin" }) {
     setUploadError("");
     setParseWarnings([]);
     setNotice("");
+    setItemName("");
+    setRawItemHint(null);
+    setTotalAmount("");
+    setInvoiceDate("");
+    setInvoiceNumber("");
     if (files.length === 0) {
       setSelectedFiles([]);
       return;
@@ -245,19 +250,17 @@ export function InvoiceWorkspace({ mode }: { mode: "member" | "admin" }) {
         setInvoiceNumber(preview.invoice_number || "");
         setParseWarnings(preview.warnings || []);
       } catch (err) {
+        setItemName("");
+        setRawItemHint(null);
+        setTotalAmount("");
+        setInvoiceDate("");
+        setInvoiceNumber("");
         setUploadError(err instanceof ApiError ? err.message : t.error);
         setParseWarnings([]);
       } finally {
         parseLockRef.current = false;
         setParsingPreview(false);
       }
-    } else if (files.length > 1) {
-      setItemName("");
-      setRawItemHint(null);
-      setTotalAmount("");
-      setInvoiceDate("");
-      setInvoiceNumber("");
-      setParseWarnings([]);
     }
   }
 

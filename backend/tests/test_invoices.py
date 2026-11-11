@@ -452,6 +452,8 @@ async def test_invoice_lifecycle_acl_and_admin_export(client: AsyncClient) -> No
         csv_text = zf.read("发票汇总清单.csv").decode("utf-8-sig")
         assert "分析纯无水乙醇+510.00.pdf" in csv_text
         assert "算力租赁费+2120.00_2.pdf" in csv_text
+        assert "'26312000000088881111" in csv_text
+        assert "'26312000000088882222" in csv_text
         assert "成员陈予安" in csv_text
         assert "成员周宁" in csv_text
 
@@ -461,7 +463,9 @@ async def test_invoice_lifecycle_acl_and_admin_export(client: AsyncClient) -> No
         headers=admin_headers,
     )
     assert csv_resp.status_code == 200
-    assert "分析纯无水乙醇+510.00.pdf" in csv_resp.content.decode("utf-8-sig")
+    csv_direct_text = csv_resp.content.decode("utf-8-sig")
+    assert "分析纯无水乙醇+510.00.pdf" in csv_direct_text
+    assert "'26312000000088881111" in csv_direct_text
 
     # 8. Admin deletes inv3 and verifies remaining count
     del_resp = await client.delete(

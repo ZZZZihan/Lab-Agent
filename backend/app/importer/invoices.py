@@ -466,6 +466,17 @@ def deduplicate_invoice_filenames(
     return result
 
 
+def _format_csv_identifier_cell(value: str) -> str:
+    """Format an identifier (e.g. 20-digit invoice number) as spreadsheet-safe text."""
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    escaped = escape_csv_cell(cleaned)
+    if not escaped.startswith("'"):
+        return f"'{escaped}"
+    return escaped
+
+
 def build_invoices_csv_bytes(rows: Sequence[dict[str, object]]) -> bytes:
     """Build a UTF-8-SIG CSV summary of invoices with formula-injection protection and PII scrubbing."""
     buf = io.StringIO()
@@ -499,7 +510,7 @@ def build_invoices_csv_bytes(rows: Sequence[dict[str, object]]) -> bytes:
                 escape_csv_cell(item_clean),
                 escape_csv_cell(str(row.get("total_amount") or "0.00")),
                 escape_csv_cell(str(row.get("invoice_date") or "")),
-                escape_csv_cell(inv_no_clean),
+                _format_csv_identifier_cell(inv_no_clean),
                 escape_csv_cell(owner_clean),
                 escape_csv_cell(orig_clean),
                 escape_csv_cell(note_clean),
