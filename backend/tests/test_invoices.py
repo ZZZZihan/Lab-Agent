@@ -218,7 +218,21 @@ def test_invoice_field_extraction_and_renaming_units() -> None:
         "餐费+128.00_3.pdf",
     ]
 
-    # 5. Validation errors for non-PDF or corrupt bytes
+    # 5. Explicit issue-date labels take precedence over earlier `服务日期` / `住宿日期`
+    assert (
+        extract_invoice_date("服务日期：2026年10月01日\n开票日期：2026年11月11日")
+        == date(2026, 11, 11)
+    )
+    assert (
+        extract_invoice_date("服务日期: 2026-10-01\n开票日期: 2026-11-11")
+        == date(2026, 11, 11)
+    )
+    assert (
+        extract_invoice_amount("合计金额：1000.00\n价税合计：1060.00")
+        == Decimal("1060.00")
+    )
+
+    # 6. Validation errors for non-PDF or corrupt bytes
     with pytest.raises(InvoiceValidationError) as exc_info:
         parse_invoice_pdf(b"not a pdf", "bad.txt")
     assert exc_info.value.status == 415
@@ -456,7 +470,26 @@ async def test_invoice_lifecycle_acl_and_admin_export(client: AsyncClient) -> No
     )
     assert del_resp.status_code == 200
 
-    # 9. Verify hash-chained audit log integrity across all invoice events
+    # 9. If admin downgrades member1 to viewer, member1 can no longer mutate or delete own invoice
+    downgrade_resp = await client.patch(
+        f"/api/v1/admin/users/{member1_user.id}",
+        headers=admin_headers,
+        json={"role": "viewer"},
+    )
+    assert downgrade_resp.status_code == 200
+    m1_downgraded_patch = await client.patch(
+        f"/api/v1/lab/invoices/{inv1_id}",
+        headers=member1_headers,
+        json={"item_name": "降级后尝试修改"},
+    )
+    assert m1_downgraded_patch.status_code == 403
+    m1_downgraded_del = await client.delete(
+        f"/api/v1/lab/invoices/{inv1_id}",
+        headers=member1_headers,
+    )
+    assert m1_downgraded_del.status_code == 403
+
+    # 10. Verify hash-chained audit log integrity across all invoice events
     maker = get_sessionmaker()
     async with maker() as session:
         broken = await verify_audit_chain(session)

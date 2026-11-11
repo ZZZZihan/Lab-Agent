@@ -37,9 +37,13 @@ import { triggerBlobDownload } from "../../lab/components/labTypesAndHelpers";
 const MAX_INVOICE_BYTES = 10 * 1024 * 1024;
 
 function buildClientRenamedPreview(itemName: string, amount: string): string {
+  let rawItem = itemName.trim();
+  const starMatch = rawItem.match(/\*\s*([^*\n\r]{1,40}?)\s*\*\s*([^\n\r*]+)/);
+  if (starMatch) {
+    rawItem = starMatch[2].trim() || starMatch[1].trim();
+  }
   const cleanItem =
-    itemName
-      .trim()
+    rawItem
       .replace(/[/\\:*?"<>|\s]+/g, "_")
       .replace(/^[_.\s]+|[_.\s]+$/g, "")
       .slice(0, 60) || "未命名项目";

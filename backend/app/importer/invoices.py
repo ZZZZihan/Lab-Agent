@@ -33,7 +33,7 @@ _TAX_STAR_ITEM_RE = re.compile(
 
 # Explicit label on the same line
 _LABELED_ITEM_RE = re.compile(
-    r"(?:货物或应税劳务[、，,\s]*服务名称|货物或应税劳务名称|货物或应税劳务|项目名称|商品名称|货物名称|服务名称|消费项目|收费项目)"
+    r"(?<![一-龥])(?:货物或应税劳务[、，,\s]*服务名称|货物或应税劳务名称|货物或应税劳务|项目名称|商品名称|货物名称|服务名称|消费项目|收费项目)"
     r"\s*[:：]\s*([^\n\r]+)"
 )
 
@@ -75,13 +75,21 @@ _HEADER_NOISE_TOKENS = frozenset(
     }
 )
 
-# Date patterns
-_LABELED_DATE_CJK_RE = re.compile(
-    r"(?:开\s*票\s*日\s*期|填\s*开\s*日\s*期|发\s*票\s*日\s*期|日\s*期)\s*[:：]?\s*"
+# Date patterns: explicit issue-date labels first, standalone generic `日期` second, bare dates last
+_EXPLICIT_ISSUE_DATE_CJK_RE = re.compile(
+    r"(?:开\s*票\s*日\s*期|填\s*开\s*日\s*期|发\s*票\s*日\s*期)\s*[:：]?\s*"
     r"((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
 )
-_LABELED_DATE_ISO_RE = re.compile(
-    r"(?:开\s*票\s*日\s*期|填\s*开\s*日\s*期|发\s*票\s*日\s*期|日\s*期)\s*[:：]?\s*"
+_EXPLICIT_ISSUE_DATE_ISO_RE = re.compile(
+    r"(?:开\s*票\s*日\s*期|填\s*开\s*日\s*期|发\s*票\s*日\s*期)\s*[:：]?\s*"
+    r"((?:19|20)\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})"
+)
+_GENERIC_LABELED_DATE_CJK_RE = re.compile(
+    r"(?<![一-龥])日\s*期\s*[:：]?\s*"
+    r"((?:19|20)\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+)
+_GENERIC_LABELED_DATE_ISO_RE = re.compile(
+    r"(?<![一-龥])日\s*期\s*[:：]?\s*"
     r"((?:19|20)\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})"
 )
 _ANY_DATE_CJK_RE = re.compile(
@@ -102,8 +110,12 @@ _UPPERCASE_CN_ADJACENT_AMOUNT_RE = re.compile(
     r"(?:[（(]\s*小\s*写\s*[)）]\s*[:：]?\s*)?(?:RMB|CNY|[¥￥])\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
     re.IGNORECASE,
 )
+_JIASHUI_TOTAL_AMOUNT_RE = re.compile(
+    r"价\s*税\s*合\s*计\s*[:：]?\s*(?:RMB|CNY|[¥￥])?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
+    re.IGNORECASE,
+)
 _LABELED_TOTAL_AMOUNT_RE = re.compile(
-    r"(?:价\s*税\s*合\s*计|合\s*计\s*金\s*额|金\s*额\s*合\s*计|总\s*金\s*额|实\s*付\s*金\s*额|应\s*付\s*金\s*额|总\s*计)"
+    r"(?:合\s*计\s*金\s*额|金\s*额\s*合\s*计|总\s*金\s*额|实\s*付\s*金\s*额|应\s*付\s*金\s*额|总\s*计)"
     r"\s*[:：]?\s*(?:RMB|CNY|[¥￥])?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
     re.IGNORECASE,
 )
@@ -267,8 +279,10 @@ def extract_invoice_date(text: str) -> date | None:
         return None
 
     for pattern in (
-        _LABELED_DATE_CJK_RE,
-        _LABELED_DATE_ISO_RE,
+        _EXPLICIT_ISSUE_DATE_CJK_RE,
+        _EXPLICIT_ISSUE_DATE_ISO_RE,
+        _GENERIC_LABELED_DATE_CJK_RE,
+        _GENERIC_LABELED_DATE_ISO_RE,
         _ANY_DATE_CJK_RE,
         _ANY_DATE_ISO_RE,
     ):
@@ -318,11 +332,20 @@ def extract_invoice_amount(text: str) -> Decimal | None:
         if dec is not None and dec > Decimal("0"):
             return dec
 
-    # 3. Labeled `价税合计` / `合计金额` / `总金额` / `总计`
-    for match in _LABELED_TOTAL_AMOUNT_RE.finditer(normalized):
+    # 3. Explicit `价税合计` label (without `（小写）`)
+    for match in _JIASHUI_TOTAL_AMOUNT_RE.finditer(normalized):
         dec = _try_parse_decimal(match.group(1))
         if dec is not None and dec > Decimal("0"):
             return dec
+
+    # 4. Labeled `合计金额` / `总金额` / `总计`
+    labeled_candidates: list[Decimal] = []
+    for match in _LABELED_TOTAL_AMOUNT_RE.finditer(normalized):
+        dec = _try_parse_decimal(match.group(1))
+        if dec is not None and dec > Decimal("0"):
+            labeled_candidates.append(dec)
+    if labeled_candidates:
+        return max(labeled_candidates)
 
     # 4. `合 计` line
     heji_candidates: list[Decimal] = []

@@ -51,7 +51,7 @@ async def test_migration_v22_single_head_and_constraints() -> None:
     script = ScriptDirectory.from_config(alembic_cfg)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads == ["20261111_0010"]
+    assert heads == ["20261111_0011"]
     assert script.get_revision("20261110_0009") is not None
 
     # Verify downgrade -1 -> upgrade head cycle in subprocess to avoid nested event loop issues

@@ -142,6 +142,7 @@ async def parse_invoice_endpoint(
     session: Annotated[AsyncSession, Depends(get_session)],
     file: Annotated[UploadFile, File()],
 ) -> dict[str, object]:
+    settings = _settings(request)
     user = await _user(session, actor)
     if user.role == "viewer":
         await _deny_invoice_access(
@@ -150,6 +151,14 @@ async def parse_invoice_endpoint(
             "invoice_parse",
             message="查看者不能上传发票",
         )
+
+    allowed = await request.app.state.limiter.allow(
+        f"invoice_parse:{user.id}",
+        max(settings.upload_rate_limit * 2, 10),
+        settings.upload_rate_window_seconds,
+    )
+    if not allowed:
+        raise APIError(429, "rate_limited", "发票解析请求过于频繁，请稍后再试")
 
     original_filename = (file.filename or "invoice.pdf").strip()[:255] or "invoice.pdf"
     payload = await file.read(MAX_INVOICE_PDF_BYTES + 1)
@@ -430,6 +439,14 @@ async def update_invoice(
 ) -> dict[str, object]:
     settings = _settings(request)
     user = await _user(session, actor)
+    if user.role == "viewer":
+        await _deny_invoice_access(
+            request,
+            user.id,
+            "invoice_update",
+            resource_id=str(invoice_id),
+            message="查看者不能修改发票",
+        )
     inv = await session.get(LabInvoice, invoice_id)
     if inv is None:
         raise APIError(404, "not_found", "发票记录不存在")
@@ -506,6 +523,14 @@ async def delete_invoice(
 ) -> dict[str, str]:
     settings = _settings(request)
     user = await _user(session, actor)
+    if user.role == "viewer":
+        await _deny_invoice_access(
+            request,
+            user.id,
+            "invoice_delete",
+            resource_id=str(invoice_id),
+            message="查看者不能删除发票",
+        )
     inv = await session.get(LabInvoice, invoice_id)
     if inv is None:
         raise APIError(404, "not_found", "发票记录不存在")
@@ -628,7 +653,6 @@ async def export_invoices_zip(
 
     stmt = (
         select(LabInvoice, User)
-        .options(undefer(LabInvoice.pdf_data))
         .join(User, User.id == LabInvoice.owner_id)
         .order_by(LabInvoice.invoice_date.desc().nulls_last(), LabInvoice.created_at.desc())
     )
@@ -650,10 +674,10 @@ async def export_invoices_zip(
         date_from=body.date_from,
         date_to=body.date_to,
     )
-    rows = list((await session.execute(stmt)).all())
+    meta_rows = list((await session.execute(stmt.limit(MAX_INVOICE_ZIP_COUNT + 1))).all())
 
     if body.invoice_ids is not None and user.role != "admin":
-        found_ids = {inv.id for inv, _ in rows}
+        found_ids = {inv.id for inv, _ in meta_rows}
         if len(found_ids) != len(set(body.invoice_ids)):
             await _deny_invoice_access(
                 request,
@@ -662,16 +686,16 @@ async def export_invoices_zip(
                 message="包含无权导出的他人发票",
             )
 
-    if not rows:
+    if not meta_rows:
         raise APIError(404, "no_invoices", "没有符合条件的发票可导出")
-    if len(rows) > MAX_INVOICE_ZIP_COUNT:
+    if len(meta_rows) > MAX_INVOICE_ZIP_COUNT:
         raise APIError(
             400,
             "batch_limit_exceeded",
             f"单次最多打包导出 {MAX_INVOICE_ZIP_COUNT} 张发票，请缩小筛选范围",
         )
 
-    total_bytes = sum(int(inv.pdf_size_bytes) for inv, _ in rows)
+    total_bytes = sum(int(inv.pdf_size_bytes) for inv, _ in meta_rows)
     if total_bytes > MAX_INVOICE_ZIP_TOTAL_BYTES:
         raise APIError(
             413,
@@ -679,9 +703,20 @@ async def export_invoices_zip(
             "所选发票总体积超过 100 MB 上限，请分批导出",
         )
 
-    serialized_rows = [_serialize_invoice(inv, owner) for inv, owner in rows]
-    blobs = [bytes(inv.pdf_data) for inv, _ in rows]
+    target_ids = [inv.id for inv, _ in meta_rows]
+    blob_rows = (
+        await session.execute(
+            select(LabInvoice.id, LabInvoice.pdf_data).where(
+                LabInvoice.id.in_(target_ids)
+            )
+        )
+    ).all()
+    blob_by_id = {row_id: bytes(data) for row_id, data in blob_rows}
+
+    serialized_rows = [_serialize_invoice(inv, owner) for inv, owner in meta_rows]
+    blobs = [blob_by_id[inv.id] for inv, _ in meta_rows]
     zip_bytes = await asyncio.to_thread(build_invoices_zip_bytes, serialized_rows, blobs)
+    rows = meta_rows
 
     await write_audit(
         settings=settings,
