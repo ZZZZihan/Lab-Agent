@@ -23,6 +23,7 @@ from app.config import Settings
 from app.importer.fingerprint import (
     achievement_fp,
     facility_fp,
+    is_redacted_placeholder,
     norm,
     person_fp,
     project_fp,
@@ -583,9 +584,9 @@ async def provision_import_job(
                 user_id = uuid.uuid4()
                 new_user = User(
                     id=user_id,
-                    email=user_email,
-                    login_name=p_login,
-                    display_name=pname,
+                    email=user_email[:320] if user_email else None,
+                    login_name=p_login[:64] if p_login else None,
+                    display_name=pname[:120],
                     password_hash=pw_hash,
                     role="member",
                     is_active=True,
@@ -689,16 +690,16 @@ async def provision_import_job(
                 )
                 new_person = LabPerson(
                     user_id=user_id,
-                    name=pname,
-                    email=p_email,
-                    title=str(person.get("title") or "").strip() or None,
-                    admin_duty=str(person.get("admin_duty") or "").strip() or None,
-                    tutor_role=str(person.get("tutor_role") or "").strip() or None,
+                    name=pname[:64],
+                    email=p_email[:320] if p_email else None,
+                    title=(str(person.get("title") or "").strip()[:64] or None),
+                    admin_duty=(str(person.get("admin_duty") or "").strip()[:64] or None),
+                    tutor_role=(str(person.get("tutor_role") or "").strip()[:32] or None),
                     research_specialty=(
                         str(person.get("research_specialty") or "").strip() or None
                     ),
-                    degree=str(person.get("degree") or "").strip() or None,
-                    affiliation=p_aff,
+                    degree=(str(person.get("degree") or "").strip()[:32] or None),
+                    affiliation=p_aff[:255] if p_aff else None,
                     project_role=proj_role,
                     bio=str(person.get("bio") or "").strip() or None,
                     entity_fingerprint=fp_val,
@@ -746,10 +747,13 @@ async def provision_import_job(
                 ach_skipped += 1
                 continue
             existing_ach_fps.add(fp_val)
+            first_author_val = str(ach.get("first_author") or "").strip()[:64] or None
+            if is_redacted_placeholder(first_author_val):
+                first_author_val = None
             new_ach = LabAchievement(
-                kind=kind,
+                kind=kind[:16],
                 title=title,
-                first_author=str(ach.get("first_author") or "").strip() or None,
+                first_author=first_author_val,
                 authors_text=str(ach.get("authors_text") or "").strip() or None,
                 venue=str(ach.get("venue") or "").strip() or None,
                 year=year_val,
@@ -775,9 +779,18 @@ async def provision_import_job(
         ]
         for proj in raw_projects:
             title = str(proj.get("title") or "").strip()
-            funder = str(proj.get("funder") or "").strip() or None
-            grant_no = str(proj.get("grant_no") or "").strip() or None
-            pi_name = str(proj.get("pi_name") or "").strip() or None
+            funder = str(proj.get("funder") or "").strip()[:255] or None
+            raw_pw = proj.get("warnings")
+            proj_warns = [str(w) for w in (raw_pw if isinstance(raw_pw, list) else []) if str(w)]
+            raw_grant_orig = str(proj.get("grant_no") or "").strip() or None
+            grant_no = raw_grant_orig[:64] if raw_grant_orig else None
+            if is_redacted_placeholder(raw_grant_orig):
+                grant_no = None
+                if "GRANT_NO_REDACTED" not in proj_warns:
+                    proj_warns.append("GRANT_NO_REDACTED")
+            pi_name = str(proj.get("pi_name") or "").strip()[:64] or None
+            if is_redacted_placeholder(pi_name):
+                pi_name = None
             lab_role = str(proj.get("lab_role") or "host")
             if lab_role not in ("host", "participant", "unknown"):
                 lab_role = "host"
@@ -789,10 +802,16 @@ async def provision_import_job(
             if status_source == "inferred" and end_d is not None:
                 status = "completed" if end_d < as_of_date else "ongoing"
             raw_text = str(proj.get("raw_text") or title).strip()
-            fp_val = str(proj.get("fingerprint") or "") or project_fp(
+            saved_proj_fp = (
+                None
+                if is_redacted_placeholder(raw_grant_orig)
+                else (str(proj.get("fingerprint") or "") or None)
+            )
+            fp_val = saved_proj_fp or project_fp(
                 grant_no=grant_no,
                 title=title,
                 funder=funder,
+                warnings=proj_warns,
             )
             if fp_val in existing_proj_fps:
                 proj_skipped += 1
@@ -831,8 +850,8 @@ async def provision_import_job(
             if isinstance(f, dict)
         ]
         for fac in raw_facilities:
-            category = str(fac.get("category") or "equipment")
-            name = str(fac.get("name") or "").strip()
+            category = str(fac.get("category") or "equipment")[:32]
+            name = str(fac.get("name") or "").strip()[:255]
             spec = str(fac.get("spec") or "").strip() or None
             val_wan = _parse_decimal(fac.get("value_wan"))
             usage = str(fac.get("usage_scenario") or "").strip() or None

@@ -11,11 +11,16 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.importer.fingerprint import achievement_fp, project_fp
+from app.importer.fingerprint import (
+    achievement_fp,
+    is_redacted_placeholder,
+    project_fp,
+)
 from app.importer.parser import parse_date_string, reparse_preview_payload
 from app.importer.pii import assert_no_pii, scrub_free_text
 from app.llm import CAPTURED
 from app.models import LabPerson, User
+from app.redact import redact_text
 
 ALLOWED_ACHIEVEMENT_KINDS: frozenset[str] = frozenset(
     {"report", "exhibition", "paper", "patent", "software", "award", "book", "other"}
@@ -38,6 +43,7 @@ _REPARSE_SYSTEM_PROMPT = (
 )
 
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_MAX_NUMERIC_12_2 = Decimal("10000000000")
 
 
 class LLMReparseError(RuntimeError):
@@ -49,15 +55,27 @@ class LLMReparseError(RuntimeError):
         self.message = message
 
 
+def _is_explicit_null(val: object) -> bool:
+    return val is None or (
+        isinstance(val, str) and val.strip().lower() in ("", "null")
+    )
+
+
 def _clean_opt_str(val: object, *, max_len: int = 500) -> str | None:
-    if val is None:
+    if _is_explicit_null(val):
         return None
     s = str(val).strip()
-    if not s or s.lower() == "null":
-        return None
     scrubbed, _ = scrub_free_text(s)
     cleaned = scrubbed.strip()[:max_len]
     return cleaned or None
+
+
+def _prepare_outbound_text(raw: str, *, llm_redact: bool) -> str:
+    scrubbed, _ = scrub_free_text(raw)
+    if llm_redact:
+        redacted, _ = redact_text(scrubbed)
+        return redacted
+    return scrubbed
 
 
 def _extract_json_object(raw_content: str) -> dict[str, Any]:
@@ -86,6 +104,8 @@ async def _call_llm_json(
     settings: Settings,
     llm_obj: Any,
 ) -> dict[str, Any]:
+    if settings.llm_redact:
+        prompt, _ = redact_text(prompt)
     assert_no_pii(prompt)
     if settings.llm_capture:
         CAPTURED.append(prompt)
@@ -179,14 +199,20 @@ async def reparse_preview_payload_with_llm(
             "achievements": [
                 {
                     "index": idx,
-                    "raw_text": scrub_free_text(str(a.get("raw_text") or a.get("title") or ""))[0],
+                    "raw_text": _prepare_outbound_text(
+                        str(a.get("raw_text") or a.get("title") or ""),
+                        llm_redact=settings.llm_redact,
+                    ),
                 }
                 for idx, a in enumerate(achievements_list, start=1)
             ],
             "projects": [
                 {
                     "index": idx,
-                    "raw_text": scrub_free_text(str(j.get("raw_text") or j.get("title") or ""))[0],
+                    "raw_text": _prepare_outbound_text(
+                        str(j.get("raw_text") or j.get("title") or ""),
+                        llm_redact=settings.llm_redact,
+                    ),
                 }
                 for idx, j in enumerate(projects_list, start=1)
             ],
@@ -203,7 +229,9 @@ async def reparse_preview_payload_with_llm(
             by_idx_ach = {
                 int(item["index"]): item
                 for item in llm_achs
-                if isinstance(item, dict) and isinstance(item.get("index"), int)
+                if isinstance(item, dict)
+                and isinstance(item.get("index"), int)
+                and not isinstance(item.get("index"), bool)
             }
             for idx, base_ach in enumerate(achievements_list, start=1):
                 cand = by_idx_ach.get(idx)
@@ -212,31 +240,50 @@ async def reparse_preview_payload_with_llm(
                 cand_title = _clean_opt_str(cand.get("title"), max_len=500)
                 if cand_title:
                     base_ach["title"] = cand_title.strip("《》")
-                cand_kind = _clean_opt_str(cand.get("kind"), max_len=32)
+                cand_kind = _clean_opt_str(cand.get("kind"), max_len=16)
                 if cand_kind and cand_kind.lower() in ALLOWED_ACHIEVEMENT_KINDS:
                     base_ach["kind"] = cand_kind.lower()
                 for opt_key, cap in (
-                    ("first_author", 120),
+                    ("first_author", 64),
                     ("authors_text", 500),
                     ("venue", 300),
                     ("support_note", 500),
                 ):
                     if opt_key in cand:
                         cleaned_opt = _clean_opt_str(cand.get(opt_key), max_len=cap)
-                        if cleaned_opt is not None:
-                            base_ach[opt_key] = cleaned_opt
-                raw_year = cand.get("year")
-                if isinstance(raw_year, int) and 1990 <= raw_year <= 2035:
-                    base_ach["year"] = raw_year
-                elif isinstance(raw_year, str) and raw_year.strip().isdigit():
-                    yr = int(raw_year.strip())
-                    if 1990 <= yr <= 2035:
-                        base_ach["year"] = yr
+                        if opt_key == "first_author" and is_redacted_placeholder(cleaned_opt):
+                            cleaned_opt = None
+                        base_ach[opt_key] = cleaned_opt
+                if "year" in cand:
+                    raw_year = cand.get("year")
+                    if _is_explicit_null(raw_year):
+                        base_ach["year"] = None
+                    elif (
+                        isinstance(raw_year, int)
+                        and not isinstance(raw_year, bool)
+                        and 1990 <= raw_year <= 2035
+                    ):
+                        base_ach["year"] = raw_year
+                    elif isinstance(raw_year, str) and raw_year.strip().isdigit():
+                        yr = int(raw_year.strip())
+                        if 1990 <= yr <= 2035:
+                            base_ach["year"] = yr
+                ach_warnings = [
+                    str(w)
+                    for w in (base_ach.get("warnings") or [])
+                    if str(w) and str(w) != "ACHIEVEMENT_RAW"
+                ]
+                base_ach["warnings"] = ach_warnings
                 base_ach["parse_quality"] = "structured"
                 base_ach["fingerprint"] = achievement_fp(
                     kind=str(base_ach.get("kind") or "other"),
                     title=str(base_ach.get("title") or ""),
-                    year=base_ach.get("year") if isinstance(base_ach.get("year"), int) else None,
+                    year=(
+                        base_ach.get("year")
+                        if isinstance(base_ach.get("year"), int)
+                        and not isinstance(base_ach.get("year"), bool)
+                        else None
+                    ),
                     raw_text=str(base_ach.get("raw_text") or ""),
                     parse_quality=str(base_ach.get("parse_quality") or "structured"),
                 )
@@ -246,44 +293,70 @@ async def reparse_preview_payload_with_llm(
             by_idx_proj = {
                 int(item["index"]): item
                 for item in llm_projs
-                if isinstance(item, dict) and isinstance(item.get("index"), int)
+                if isinstance(item, dict)
+                and isinstance(item.get("index"), int)
+                and not isinstance(item.get("index"), bool)
             }
             for idx, base_proj in enumerate(projects_list, start=1):
                 cand = by_idx_proj.get(idx)
                 if not isinstance(cand, dict):
                     continue
+                proj_warnings = [
+                    str(w) for w in (base_proj.get("warnings") or []) if str(w)
+                ]
                 cand_title = _clean_opt_str(cand.get("title"), max_len=500)
                 if cand_title:
                     base_proj["title"] = cand_title.strip("《》")
                 for opt_key, cap in (
-                    ("grant_no", 80),
-                    ("pi_name", 120),
-                    ("funder", 240),
+                    ("grant_no", 64),
+                    ("pi_name", 64),
+                    ("funder", 255),
                 ):
                     if opt_key in cand:
                         cleaned_opt = _clean_opt_str(cand.get(opt_key), max_len=cap)
-                        if cleaned_opt is not None:
-                            base_proj[opt_key] = cleaned_opt
-                cand_role = _clean_opt_str(cand.get("lab_role"), max_len=32)
+                        if opt_key == "grant_no" and is_redacted_placeholder(cleaned_opt):
+                            if "GRANT_NO_REDACTED" not in proj_warnings:
+                                proj_warnings.append("GRANT_NO_REDACTED")
+                            cleaned_opt = None
+                        elif opt_key == "pi_name" and is_redacted_placeholder(cleaned_opt):
+                            cleaned_opt = None
+                        base_proj[opt_key] = cleaned_opt
+                if is_redacted_placeholder(str(base_proj.get("grant_no") or "")):
+                    if "GRANT_NO_REDACTED" not in proj_warnings:
+                        proj_warnings.append("GRANT_NO_REDACTED")
+                    base_proj["grant_no"] = None
+                cand_role = _clean_opt_str(cand.get("lab_role"), max_len=16)
                 if cand_role and cand_role.lower() in ALLOWED_PROJECT_ROLES:
                     base_proj["lab_role"] = cand_role.lower()
                 for date_key in ("start_date", "end_date"):
-                    raw_d = _clean_opt_str(cand.get(date_key), max_len=32)
-                    if raw_d:
-                        parsed_d = parse_date_string(raw_d)
-                        if parsed_d is not None:
-                            base_proj[date_key] = parsed_d.isoformat()
-                raw_amt = _clean_opt_str(cand.get("amount_wan"), max_len=32)
-                if raw_amt:
-                    m_amt = re.match(r"^(\d+(?:\.\d+)?)", raw_amt)
-                    if m_amt:
-                        try:
-                            dec = Decimal(m_amt.group(1))
-                            if dec > 0:
-                                base_proj["amount_wan"] = f"{dec:.2f}"
-                        except InvalidOperation:
-                            pass
-                cand_status = _clean_opt_str(cand.get("status"), max_len=32)
+                    if date_key in cand:
+                        raw_date_val = cand.get(date_key)
+                        if _is_explicit_null(raw_date_val):
+                            base_proj[date_key] = None
+                        else:
+                            raw_d = _clean_opt_str(raw_date_val, max_len=32)
+                            if raw_d:
+                                parsed_d = parse_date_string(raw_d)
+                                if parsed_d is not None:
+                                    base_proj[date_key] = parsed_d.isoformat()
+                if "amount_wan" in cand:
+                    raw_amt_val = cand.get("amount_wan")
+                    if _is_explicit_null(raw_amt_val):
+                        base_proj["amount_wan"] = None
+                    else:
+                        raw_amt = _clean_opt_str(raw_amt_val, max_len=32)
+                        if raw_amt:
+                            m_amt = re.match(r"^(\d+(?:\.\d+)?)", raw_amt)
+                            if m_amt:
+                                try:
+                                    dec = Decimal(m_amt.group(1))
+                                    if Decimal("0") < dec < _MAX_NUMERIC_12_2:
+                                        base_proj["amount_wan"] = f"{dec:.2f}"
+                                    elif dec == Decimal("0"):
+                                        base_proj["amount_wan"] = None
+                                except InvalidOperation:
+                                    pass
+                cand_status = _clean_opt_str(cand.get("status"), max_len=16)
                 if cand_status and cand_status.lower() in ALLOWED_PROJECT_STATUSES:
                     st_low = cand_status.lower()
                     if st_low in ("ongoing", "completed"):
@@ -296,10 +369,28 @@ async def reparse_preview_payload_with_llm(
                                 "completed" if end_d < as_of_date else "ongoing"
                             )
                             base_proj["status_source"] = "inferred"
+                        else:
+                            base_proj["status"] = "unknown"
+                            base_proj["status_source"] = "inferred"
+                    else:
+                        base_proj["status"] = "unknown"
+                        base_proj["status_source"] = "inferred"
+                elif base_proj.get("status_source") == "inferred":
+                    if base_proj.get("end_date") and as_of_date is not None:
+                        end_d = parse_date_string(str(base_proj["end_date"]))
+                        base_proj["status"] = (
+                            ("completed" if end_d < as_of_date else "ongoing")
+                            if end_d is not None
+                            else "unknown"
+                        )
+                    elif not base_proj.get("end_date"):
+                        base_proj["status"] = "unknown"
+                base_proj["warnings"] = proj_warnings
                 base_proj["fingerprint"] = project_fp(
                     grant_no=str(base_proj.get("grant_no") or "") or None,
                     title=str(base_proj.get("title") or ""),
                     funder=str(base_proj.get("funder") or "") or None,
+                    warnings=proj_warnings,
                 )
 
     preview["achievements"] = achievements_list

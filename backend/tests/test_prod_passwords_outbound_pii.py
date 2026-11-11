@@ -347,6 +347,48 @@ def test_minority_and_latin_person_names_and_generated_suffixed_logins() -> None
     assert logins[2] == "alicemariesmith"
     assert logins[3] == "alicemariesmith2"
 
+    # Accented Unicode Latin & rare CJK Extension A/B names
+    assert normalize_person_name("José   García") == "José García"
+    assert name_to_pinyin("José García") == "josegarcia"
+    assert normalize_person_name("龚 䶮") == "龚䶮"
+    assert name_to_pinyin("龚䶮") == "gongyan"
+
+    intl_docx = _build_proposal_docx_with_names(
+        applicant_name="José García",
+        member_rows=[
+            [
+                "1",
+                "龚䶮",
+                "男",
+                "199103",
+                "副教授",
+                "",
+                "计算语言学",
+                "博士",
+                "天津天狮学院",
+                "",
+            ],
+            [
+                "2",
+                "王𠮷",
+                "女",
+                "199406",
+                "讲师",
+                "",
+                "智能评测",
+                "博士",
+                "天津天狮学院",
+                "",
+            ],
+        ],
+    )
+    parsed_intl = parse_proposal_docx("intl_proposal.docx", intl_docx)
+    intl_people = parsed_intl["preview"]["people"]
+    assert [p["name"] for p in intl_people] == ["José García", "龚䶮", "王𠮷"]
+    assert intl_people[0]["project_role"] == "applicant"
+    assert intl_people[0]["login_name"] == "josegarcia"
+    assert intl_people[1]["login_name"] == "gongyan"
+
 
 def test_parser_minority_names_and_equipment_budget_row_sequence_guard() -> None:
     minority_name = "阿不都热合曼•买买提明·艾尔肯"
@@ -561,6 +603,199 @@ async def test_llm_reparse_scrubs_outbound_chunks_and_parses_structured_json() -
                 llm_obj=StubLLM(fail_http),
             )
         assert err.value.code == "llm_reparse_failed"
+
+
+async def test_llm_reparse_null_overrides_db_limits_email_redaction_and_redacted_grants(
+    client: AsyncClient,
+) -> None:
+    _, headers = await _seed_admin_and_login(client)
+    outbound_prompts: list[str] = []
+    test_work_email = "contact-office@university.edu.cn"
+
+    def _edge_llm_handler(request: httpx.Request) -> httpx.Response:
+        req_body = json.loads(request.content.decode())
+        outbound_prompts.append(req_body["messages"][-1]["content"])
+        content_obj = {
+            "achievements": [
+                {
+                    "index": 1,
+                    "kind": "report",
+                    "title": "年度智库报告",
+                    "first_author": None,
+                    "authors_text": None,
+                    "venue": None,
+                    "year": None,
+                    "support_note": None,
+                },
+                {
+                    "index": 2,
+                    "kind": "paper",
+                    "title": "超长作者边界论文",
+                    "first_author": "A" * 100,
+                    "authors_text": "Author List",
+                    "venue": "Journal",
+                    "year": 2025,
+                },
+            ],
+            "projects": [
+                {
+                    "index": 1,
+                    "title": "第一项脱敏编号课题",
+                    "funder": "教育部人文社科规划司" + ("甲" * 260),
+                    "grant_no": "[已脱敏]",
+                    "pi_name": "P" * 100,
+                    "lab_role": "host",
+                    "start_date": None,
+                    "end_date": None,
+                    "amount_wan": None,
+                    "status": "unknown",
+                },
+                {
+                    "index": 2,
+                    "title": "第二项脱敏编号课题",
+                    "funder": "天津市科技局",
+                    "grant_no": "[已脱敏]",
+                    "pi_name": None,
+                    "lab_role": "participant",
+                    "start_date": "2024-01-01",
+                    "end_date": "2026-12-31",
+                    "amount_wan": "20",
+                    "status": "ongoing",
+                },
+                {
+                    "index": 3,
+                    "title": "超长编号正常课题",
+                    "funder": "国家社科基金",
+                    "grant_no": "G" * 95,
+                    "pi_name": None,
+                    "lab_role": "host",
+                    "start_date": None,
+                    "end_date": None,
+                    "amount_wan": None,
+                    "status": "ongoing",
+                },
+            ],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps(content_obj, ensure_ascii=False)}}
+                ]
+            },
+        )
+
+    class StubLLM:
+        def __init__(self, http_client: httpx.AsyncClient) -> None:
+            self._client = http_client
+            self.model = "qwen3-stub"
+
+    preview_seed: dict[str, Any] = {
+        "people": [{"name": "万振凯", "affiliation": "天津天狮学院", "project_role": "applicant"}],
+        "achievements": [],
+        "projects": [],
+        "facilities": [],
+        "source_snapshot": {
+            "people": [
+                {"name": "万振凯", "affiliation": "天津天狮学院", "project_role": "applicant"}
+            ],
+            "facilities": [],
+            "t4": {
+                "achievement_raw_items": [
+                    f"课题组编：《年度智库报告》，内部出版，2024年，联系邮箱 {test_work_email}。",
+                    "万振凯：《超长作者边界论文》，学报，2025年。",
+                ],
+                "project_raw_items": [
+                    f"《第一项脱敏编号课题》（{TEST_ID18}），万振凯主持，2023-2025，50万元。",
+                    f"《第二项脱敏编号课题》（{TEST_ID18}），万振凯主持，2024-2026，20万元。",
+                    "《超长编号正常课题》（ABC12345），万振凯主持，2024-2026，30万元。",
+                ],
+            },
+        },
+    }
+    redact_settings = Settings(
+        llm_provider="ollama",
+        llm_base_url="http://llm.stub.local/v1",
+        llm_redact=True,
+        jwt_secret=STRONG_SECRET_A,
+        audit_hmac_key=STRONG_SECRET_C,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_edge_llm_handler)
+    ) as edge_http:
+        refined_preview, _ = await reparse_preview_payload_with_llm(
+            preview_seed,
+            as_of_date=date(2026, 3, 1),
+            settings=redact_settings,
+            llm_obj=StubLLM(edge_http),
+        )
+
+    # 1) Outbound LLM redaction honored: work email was redacted to [REDACTED_EMAIL]
+    assert len(outbound_prompts) == 1
+    assert test_work_email not in outbound_prompts[0]
+    assert "[REDACTED_EMAIL]" in outbound_prompts[0]
+
+    # 2) Explicit null corrections from LLM cleared FSM baseline fields
+    ach1 = refined_preview["achievements"][0]
+    assert ach1["first_author"] is None
+    assert ach1["authors_text"] is None
+    assert ach1["venue"] is None
+    assert ach1["year"] is None
+
+    proj1, proj2, proj3 = refined_preview["projects"]
+    assert proj1["start_date"] is None
+    assert proj1["end_date"] is None
+    assert proj1["amount_wan"] is None
+    assert proj1["status"] == "unknown"
+    assert proj2["pi_name"] is None
+
+    # 3) DB column caps enforced (<=64 for first_author/grant_no/pi_name, <=255 for funder)
+    assert len(refined_preview["achievements"][1]["first_author"]) == 64
+    assert len(proj1["pi_name"]) == 64
+    assert len(proj1["funder"]) == 255
+    assert len(proj3["grant_no"]) == 64
+
+    # 4) Redacted grant numbers rejected & distinct fingerprints preserved across projects
+    assert proj1["grant_no"] is None
+    assert proj2["grant_no"] is None
+    assert "GRANT_NO_REDACTED" in proj1["warnings"]
+    assert "GRANT_NO_REDACTED" in proj2["warnings"]
+    assert proj1["fingerprint"] != proj2["fingerprint"]
+
+    # 5) End-to-end DB provisioning succeeds without StringDataRightTruncation or duplicate skipping
+    docx_bytes = _build_proposal_docx_with_names(applicant_name="万振凯")
+    r_up = await client.post(
+        "/api/v1/admin/imports",
+        headers=headers,
+        files={
+            "file": (
+                "proposal.docx",
+                docx_bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert r_up.status_code == 200, r_up.text
+    job_id = uuid.UUID(r_up.json()["id"])
+
+    from app.models import ImportJob
+
+    maker = get_sessionmaker()
+    async with maker() as session:
+        job_row = await session.get(ImportJob, job_id)
+        assert job_row is not None
+        job_row.preview = refined_preview
+        await session.commit()
+
+    r_prov = await client.post(
+        f"/api/v1/admin/imports/{job_id}/provision",
+        headers=headers,
+        json={"initial_password": STRONG_NEW_PW},
+    )
+    assert r_prov.status_code == 200, r_prov.text
+    prov_stats = r_prov.json()["stats"]
+    assert prov_stats["achievements_inserted"] == 2
+    assert prov_stats["projects_inserted"] == 3
 
 
 async def test_outbound_pii_blocked_with_422_and_signature_audit_and_upload_work(

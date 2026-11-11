@@ -49,12 +49,18 @@ SURNAME_PINYIN_OVERRIDES: dict[str, str] = {
 }
 
 
+_CJK_OR_DOT_CLASS = r"㐀-䶿一-鿿豈-﫿\U00020000-\U000323af·"
+_CJK_ADJACENT_SPACE_RE = re.compile(
+    rf"(?<=[{_CJK_OR_DOT_CLASS}])\s+|\s+(?=[{_CJK_OR_DOT_CLASS}])"
+)
+
+
 def normalize_person_name(raw_name: str) -> str:
     cleaned = unicodedata.normalize("NFKC", raw_name or "")
     cleaned = re.sub(r"[•‧・∙⋅]", "·", cleaned)
     cleaned = re.sub(r"[​-‏﻿]+", "", cleaned)
-    cleaned = re.sub(r"(?<=[A-Za-z])\s+(?=[A-Za-z])", "\x00", cleaned)
-    cleaned = re.sub(r"\s+", "", cleaned).replace("\x00", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = _CJK_ADJACENT_SPACE_RE.sub("", cleaned)
     return cleaned.strip("· ")
 
 
@@ -80,8 +86,9 @@ def name_to_pinyin(raw_name: str) -> str:
         prefix = SURNAME_PINYIN_OVERRIDES[name[0]]
         rest = name[1:]
     rest_syllables = lazy_pinyin(rest, style=Style.NORMAL, errors="default") if rest else []
-    combined = (prefix + "".join(rest_syllables)).lower()
-    return re.sub(r"[^a-z]", "", combined)[:56]
+    decomposed = unicodedata.normalize("NFKD", (prefix + "".join(rest_syllables)).lower())
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z]", "", folded)[:56]
 
 
 def decide_login_identity(

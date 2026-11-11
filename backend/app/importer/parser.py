@@ -9,7 +9,13 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.importer.fingerprint import achievement_fp, facility_fp, norm, project_fp
+from app.importer.fingerprint import (
+    achievement_fp,
+    facility_fp,
+    is_redacted_placeholder,
+    norm,
+    project_fp,
+)
 from app.importer.people import assign_people_identities, normalize_person_name
 from app.importer.pii import assert_no_pii, is_pii_id_or_phone, scrub_free_text
 from app.importer.reader import (
@@ -28,8 +34,11 @@ from app.models import LabPerson, User
 
 PARSER_VERSION = "v2.1-hybrid"
 
+CJK_IDEOGRAPH_CLASS = r"㐀-䶿一-鿿豈-﫿\U00020000-\U000323af"
 CN_NAME_RE = re.compile(
-    r"^(?:[一-龥]{2,20}(?:·[一-龥]{1,20}){0,3}|[一-龥]{1,20}(?:·[一-龥]{1,20}){1,3}|[A-Za-z][A-Za-z .'-]{1,48}[A-Za-z])$"
+    rf"^(?:[{CJK_IDEOGRAPH_CLASS}]{{2,20}}(?:·[{CJK_IDEOGRAPH_CLASS}]{{1,20}}){{0,3}}"
+    rf"|[{CJK_IDEOGRAPH_CLASS}]{{1,20}}(?:·[{CJK_IDEOGRAPH_CLASS}]{{1,20}}){{1,3}}"
+    r"|[^\W\d_][^\W\d_ .'-]{0,62}[^\W\d_.]\.?)$"
 )
 NON_PERSON_NAME_LABELS: frozenset[str] = frozenset(
     {
@@ -63,7 +72,7 @@ ITEM_SPLIT_RE = re.compile(
 )
 
 GRANT_NO_AFTER_TITLE_RE = re.compile(
-    r"^[（(]\s*([A-Za-z0-9一-龥][A-Za-z0-9一-龥_-]{2,24})\s*[)）]"
+    rf"^[（(]\s*([A-Za-z0-9{CJK_IDEOGRAPH_CLASS}][A-Za-z0-9{CJK_IDEOGRAPH_CLASS}_-]{{2,24}})\s*[)）]"
 )
 GRANT_NO_INLINE_RE = re.compile(
     r"(?:批准号|项目编号|编号|立项号)?[:：]?\s*"
@@ -554,6 +563,37 @@ MEMBER_HEADER_MAP: dict[str, str] = {
 }
 
 
+_FORM_HEADER_LABELS_LOWER: frozenset[str] = (
+    frozenset(lbl.lower() for lbl in NON_PERSON_NAME_LABELS)
+    | frozenset(APPLICANT_KV_MAP.keys())
+    | frozenset(normalize_label(k).lower() for k in MEMBER_HEADER_MAP)
+)
+
+
+def _is_plausible_person_name(raw_name: str) -> bool:
+    name = normalize_person_name(raw_name)
+    if not (2 <= len(name) <= 64):
+        return False
+    lbl = normalize_label(name).lower()
+    if (
+        name in NON_PERSON_NAME_LABELS
+        or lbl in _FORM_HEADER_LABELS_LOWER
+        or any(kw in name for kw in SKIP_ROW_KEYWORDS)
+    ):
+        return False
+    if any(ch.isdigit() for ch in name):
+        return False
+    if not name[0].isalpha() or not (name[-1].isalpha() or name[-1] == "."):
+        return False
+    alpha_count = 0
+    for ch in name:
+        if ch.isalpha():
+            alpha_count += 1
+        elif ch not in " ·.'-":
+            return False
+    return alpha_count >= 2
+
+
 def _is_member_header_row(row: list[str]) -> bool:
     labels = [normalize_label(c) for c in row if c.strip()]
     if any(lbl in ("男", "女") for lbl in labels):
@@ -642,11 +682,7 @@ def _extract_people(
         applicant["warnings"] = applicant_warnings
         applicant["source"] = {"table_index": tbl_idx, "row_index": applicant_row_idx}
         app_name = str(applicant.get("name") or "")
-        if (
-            app_name
-            and app_name not in NON_PERSON_NAME_LABELS
-            and CN_NAME_RE.match(app_name)
-        ):
+        if _is_plausible_person_name(app_name):
             people.append(applicant)
 
         # 2) Parse Member table rows starting at header_row_idx + 1
@@ -723,11 +759,7 @@ def _extract_people(
                         member[target] = val
 
                 raw_name = str(member.get("name") or "")
-                if (
-                    not raw_name
-                    or raw_name in NON_PERSON_NAME_LABELS
-                    or not CN_NAME_RE.match(raw_name)
-                ):
+                if not _is_plausible_person_name(raw_name):
                     continue
                 member["warnings"] = mem_warnings
                 people.append(member)
@@ -950,11 +982,11 @@ def _parse_achievement_item(raw_item: str, *, index: int) -> dict[str, object]:
     item_warnings: list[str] = []
 
     m_lead = re.match(
-        r"^([一-龥·]{2,10})\s*(?:[（(]第一[)）])?\s*[:：]\s*(.+)$",
+        rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,10}})\s*(?:[（(]第一[)）])?\s*[:：]\s*(.+)$",
         first_sentence,
     )
     if m_lead:
-        first_author = normalize_person_name(m_lead.group(1))
+        first_author = normalize_person_name(m_lead.group(1))[:64]
         authors_text = first_author
         remainder = m_lead.group(2).strip()
         parts = [p.strip() for p in re.split(r"[，,]", remainder) if p.strip()]
@@ -992,9 +1024,9 @@ def _parse_achievement_item(raw_item: str, *, index: int) -> dict[str, object]:
             title = first_sentence[:200]
             parse_quality = "raw"
             item_warnings.append("ACHIEVEMENT_RAW")
-        m_author = re.match(r"^([一-龥·]{2,6})", first_sentence)
+        m_author = re.match(rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})", first_sentence)
         if m_author:
-            first_author = normalize_person_name(m_author.group(1))
+            first_author = normalize_person_name(m_author.group(1))[:64]
             authors_text = first_author
         years = re.findall(r"((?:19|20)\d{2})", first_sentence)
         if years:
@@ -1054,6 +1086,12 @@ def _parse_project_item(
         m_inline = GRANT_NO_INLINE_RE.search(text)
         if m_inline:
             grant_no = m_inline.group(1).strip()
+    if grant_no and is_redacted_placeholder(grant_no):
+        grant_no = None
+        if "GRANT_NO_REDACTED" not in item_warnings:
+            item_warnings.append("GRANT_NO_REDACTED")
+    elif grant_no:
+        grant_no = grant_no[:64]
 
     after_title = after_title.lstrip("，,。；; ")
     segments = [
@@ -1070,19 +1108,19 @@ def _parse_project_item(
     for seg in segments:
         if pi_name is None:
             m_host = re.match(
-                r"^(?:主持人|负责人)?[:：]?\s*([一-龥·]{2,6})\s*(?:[（(]?主持[)）]?|负责人)$",
+                rf"^(?:主持人|负责人)?[:：]?\s*([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})\s*(?:[（(]?主持[)）]?|负责人)$",
                 seg,
             )
             if m_host:
-                pi_name = normalize_person_name(m_host.group(1))
+                pi_name = normalize_person_name(m_host.group(1))[:64]
                 lab_role = "host"
                 continue
             m_part = re.match(
-                r"^([一-龥·]{2,6})\s*[（(]?(?:参与|参加)[)）]?$",
+                rf"^([{CJK_IDEOGRAPH_CLASS}·]{{2,6}})\s*[（(]?(?:参与|参加)[)）]?$",
                 seg,
             )
             if m_part:
-                pi_name = normalize_person_name(m_part.group(1))
+                pi_name = normalize_person_name(m_part.group(1))[:64]
                 lab_role = "participant"
                 continue
 
@@ -1124,7 +1162,7 @@ def _parse_project_item(
             )
             and len(seg) >= 2
         ):
-            funder = seg
+            funder = seg[:255]
 
     status = "unknown"
     status_source = "inferred"
