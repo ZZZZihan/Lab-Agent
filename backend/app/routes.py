@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import hmac
 import io
@@ -32,19 +33,21 @@ from app.auth import (
     authenticate_local,
     authenticate_pat,
     decode_unverified_for_logout,
+    ensure_utc,
     generate_pat,
     hash_password,
     issue_token,
     password_fingerprint,
     revoke_token,
     validate_password,
-    verify_password,
+    verify_password_async,
 )
 from app.config import Settings
 from app.db import get_session, get_sessionmaker
 from app.importer.people import clean_email, name_to_pinyin, normalize_person_name
 from app.importer.pii import escape_csv_cell
 from app.llm import LLM
+from app.logging_conf import get_logger
 from app.maintenance import purge_document, scrub_missing_document_citations
 from app.models import (
     ApiToken,
@@ -64,6 +67,7 @@ from app.tools import search_knowledge_base
 
 router = APIRouter(prefix="/api/v1")
 bearer = HTTPBearer(auto_error=False)
+log = get_logger("routes")
 
 
 class APIError(Exception):
@@ -201,44 +205,42 @@ async def _actor(
                 actor = await authenticate_pat(session, raw_token)
             except PermissionError as exc:
                 raise APIError(401, "unauthorized", "令牌无效或已过期") from exc
-            if not _is_pat_allowed_request(request):
-                await write_audit(
-                    settings=settings,
-                    actor_id=actor.id,
-                    action="permission_denied",
-                    resource_type="api_token",
-                    resource_id=str(actor.token_id) if actor.token_id else None,
-                    request_id=getattr(request.state, "request_id", None),
-                    ip=_client_ip(request),
-                    detail={"operation": f"{request.method} {request.url.path}"},
-                )
-                raise APIError(403, "forbidden", "个人访问令牌无权访问此接口")
         else:
             try:
                 actor = await authenticate_local(session, raw_token, settings)
             except PermissionError as exc:
                 raise APIError(401, "unauthorized", "登录已失效") from exc
 
-        user = await session.get(User, actor.id)
-        if user is not None and user.must_change_password_by is not None:
-            now_utc = datetime.now(UTC)
-            exp = user.must_change_password_by
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=UTC)
-            if now_utc > exp:
-                raise APIError(
-                    403,
-                    "initial_password_expired",
-                    "初始口令已过期，请联系课题组管理员重置",
-                )
-            path = request.url.path.rstrip("/")
-            if not path.endswith(("/auth/change-password", "/auth/me", "/auth/logout")):
-                raise APIError(
-                    403,
-                    "password_change_required",
-                    "首次登录请先修改初始口令后再访问系统功能",
-                )
-        return actor
+    if actor.auth_via_pat and not _is_pat_allowed_request(request):
+        await write_audit(
+            settings=settings,
+            actor_id=actor.id,
+            action="permission_denied",
+            resource_type="api_token",
+            resource_id=str(actor.token_id) if actor.token_id else None,
+            request_id=getattr(request.state, "request_id", None),
+            ip=_client_ip(request),
+            detail={"operation": f"{request.method} {request.url.path}"},
+        )
+        raise APIError(403, "forbidden", "个人访问令牌无权访问此接口")
+
+    if actor.must_change_password_by is not None:
+        now_utc = datetime.now(UTC)
+        exp = ensure_utc(actor.must_change_password_by)
+        if now_utc > exp:
+            raise APIError(
+                403,
+                "initial_password_expired",
+                "初始口令已过期，请联系课题组管理员重置",
+            )
+        path = request.url.path.rstrip("/")
+        if not path.endswith(("/auth/change-password", "/auth/me", "/auth/logout")):
+            raise APIError(
+                403,
+                "password_change_required",
+                "首次登录请先修改初始口令后再访问系统功能",
+            )
+    return actor
 
 
 async def _user(session: AsyncSession, actor: Actor) -> User:
@@ -428,7 +430,11 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
                     if len(family) == 1:
                         user = family[0]
 
-        if user is None or not user.is_active or not verify_password(user.password_hash, body.password):
+        password_ok = await verify_password_async(
+            user.password_hash if user is not None and user.is_active else None,
+            body.password,
+        )
+        if user is None or not user.is_active or not password_ok:
             await write_audit(
                 settings=settings,
                 actor_id=user.id if user else None,
@@ -439,7 +445,9 @@ async def login(body: LoginBody, request: Request) -> dict[str, object]:
             )
             raise APIError(401, "invalid_credentials", "邮箱、登录名或密码不正确")
 
-        if user.must_change_password_by is not None and datetime.now(UTC) > user.must_change_password_by:
+        if user.must_change_password_by is not None and datetime.now(UTC) > ensure_utc(
+            user.must_change_password_by
+        ):
             await write_audit(
                 settings=settings,
                 actor_id=user.id,
@@ -516,7 +524,7 @@ async def change_password(
 ) -> dict[str, object]:
     settings = _settings(request)
     user = await _user(session, actor)
-    old_ok = await asyncio.to_thread(verify_password, user.password_hash, body.old_password)
+    old_ok = await verify_password_async(user.password_hash, body.old_password)
     if not old_ok:
         raise APIError(401, "invalid_credentials", "当前口令不正确")
     if body.new_password == body.old_password:
@@ -739,7 +747,11 @@ async def list_documents(
             FROM documents d
             WHERE d.deleted_at IS NULL
               AND d.source <> 'eval'
-              AND (d.status = 'ready' OR d.owner_id = CAST(:uid AS uuid))
+              AND (
+                d.status = 'ready'
+                OR d.owner_id = CAST(:uid AS uuid)
+                OR CAST(:is_admin AS boolean)
+              )
               AND {acl_sql()}
             ORDER BY d.created_at DESC
             """
@@ -909,12 +921,15 @@ async def get_document(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, object]:
     document = await session.get(Document, document_id)
-    if document is None or document.deleted_at is not None:
+    if document is None or document.deleted_at is not None or document.source == "eval":
+        raise APIError(404, "not_found", "文档不存在")
+    is_owner_or_admin = actor.role == "admin" or document.owner_id == actor.id
+    if not is_owner_or_admin and document.status != "ready":
         raise APIError(404, "not_found", "文档不存在")
     grants = list(
         await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
     )
-    if not can_read(
+    if not is_owner_or_admin and not can_read(
         Principal(id=actor.id, role=actor.role, group_ids=actor.group_ids),
         document,
         grants,
@@ -1284,7 +1299,7 @@ async def chat_stream(
             try:
                 async with get_sessionmaker()() as session:
                     user = await session.get(User, actor.id)
-                    if user is None:
+                    if user is None or not user.is_active:
                         await queue.put({"type": "error", "code": "unauthorized"})
                         return
                     conversation = None
@@ -1378,19 +1393,27 @@ async def chat_stream(
                     if done_error is not None:
                         done_event["error"] = done_error
                     await queue.put(done_event)
+            except asyncio.CancelledError:
+                raise
             except Exception:
+                log.exception("chat_stream_failed", request_id=request_id)
                 await queue.put({"type": "error", "code": "agent_failed"})
             finally:
-                await queue.put(None)
+                queue.put_nowait(None)
 
         task = asyncio.create_task(work())
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            kind = str(item.get("type") or "message")
-            yield f"event: {kind}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
-        await task
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                kind = str(item.get("type") or "message")
+                yield f"event: {kind}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     return StreamingResponse(events(), media_type="text/event-stream")
 

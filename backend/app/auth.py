@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from jwt import PyJWKClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,9 +24,14 @@ from app.config import Settings
 from app.models import ApiToken, RevokedToken, User
 
 _hasher = PasswordHasher()
+_DUMMY_PASSWORD_HASH = _hasher.hash("LabAgent-Timing-Guard-Dummy#2026")
 _jwks_clients: dict[str, PyJWKClient] = {}
+_jwks_lock = threading.Lock()
 PAT_PREFIX = "la_pat_"
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+MAX_PASSWORD_LENGTH = 256
+MAX_VERIFY_PASSWORD_BYTES = 1024
+OIDC_JWKS_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -34,10 +42,18 @@ class Actor:
     group_ids: frozenset[str] = frozenset()
     auth_via_pat: bool = False
     token_id: uuid.UUID | None = None
+    must_change_password_by: datetime | None = None
 
 
 UNUSABLE_PASSWORD_HASH = "!unusable"
 _DEMO_PREFIX = "labagent-demo-" + "2026-"
+
+
+def ensure_utc(dt: datetime) -> datetime:
+    """Normalize a naive or timezone-aware datetime to UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def validate_password(
@@ -46,9 +62,11 @@ def validate_password(
     *,
     settings: Settings | None = None,
 ) -> None:
-    """Enforce password policy: >=12 chars, not a demo/default prod password, no email local part, >=3 char classes."""
+    """Enforce password policy: 12..256 chars, not a demo/default prod password, no email local part, >=3 char classes."""
     if len(password) < 12:
         raise ValueError("密码长度至少为 12 个字符")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"密码长度不能超过 {MAX_PASSWORD_LENGTH} 个字符")
     lowered = password.lower()
     if lowered.startswith(_DEMO_PREFIX):
         raise ValueError("不能使用演示账号密码")
@@ -80,12 +98,23 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password_hash: str, password: str) -> bool:
-    if password_hash.startswith("!"):
+    if not password_hash or password_hash.startswith("!"):
+        return False
+    if len(password.encode("utf-8")) > MAX_VERIFY_PASSWORD_BYTES:
         return False
     try:
         return bool(_hasher.verify(password_hash, password))
-    except VerifyMismatchError:
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+async def verify_password_async(password_hash: str | None, password: str) -> bool:
+    """Verify a password off the event loop, running a dummy Argon2id check when the hash is absent or unusable."""
+    usable = bool(password_hash and not password_hash.startswith("!"))
+    target_hash = password_hash if usable and password_hash is not None else _DUMMY_PASSWORD_HASH
+    bounded = password[:MAX_VERIFY_PASSWORD_BYTES]
+    matched = await asyncio.to_thread(verify_password, target_hash, bounded)
+    return matched and usable and len(password.encode("utf-8")) <= MAX_VERIFY_PASSWORD_BYTES
 
 
 def password_fingerprint(password_hash: str) -> str:
@@ -138,12 +167,30 @@ async def authenticate_local(session: AsyncSession, token: str, settings: Settin
         if await session.get(RevokedToken, allow_key) is None:
             raise PermissionError("invalid_token")
     group_ids = await load_user_group_ids(session, user.id)
+    must_change = (
+        ensure_utc(user.must_change_password_by)
+        if user.must_change_password_by is not None
+        else None
+    )
     return Actor(
         id=user.id,
         role=user.role,
         display_name=user.display_name,
         group_ids=group_ids,
+        must_change_password_by=must_change,
     )
+
+
+def _fetch_oidc_signing_key(issuer: str, token: str) -> Any:
+    with _jwks_lock:
+        client = _jwks_clients.get(issuer)
+        if client is None:
+            client = PyJWKClient(
+                f"{issuer.rstrip('/')}/.well-known/jwks.json",
+                timeout=OIDC_JWKS_TIMEOUT_SECONDS,
+            )
+            _jwks_clients[issuer] = client
+    return client.get_signing_key_from_jwt(token)
 
 
 async def authenticate_oidc(session: AsyncSession, token: str, settings: Settings) -> Actor:
@@ -171,11 +218,11 @@ async def authenticate_oidc(session: AsyncSession, token: str, settings: Setting
                 issuer=settings.oidc_issuer,
             )
         else:
-            client = _jwks_clients.get(settings.oidc_issuer)
-            if client is None:
-                client = PyJWKClient(f"{settings.oidc_issuer.rstrip('/')}/.well-known/jwks.json")
-                _jwks_clients[settings.oidc_issuer] = client
-            signing = client.get_signing_key_from_jwt(token)
+            signing = await asyncio.to_thread(
+                _fetch_oidc_signing_key,
+                settings.oidc_issuer,
+                token,
+            )
             payload = jwt.decode(
                 token,
                 signing.key,
@@ -210,11 +257,17 @@ async def authenticate_oidc(session: AsyncSession, token: str, settings: Setting
     if not user.is_active:
         raise PermissionError("invalid_token")
     group_ids = await load_user_group_ids(session, user.id)
+    must_change = (
+        ensure_utc(user.must_change_password_by)
+        if user.must_change_password_by is not None
+        else None
+    )
     return Actor(
         id=user.id,
         role=user.role,
         display_name=user.display_name,
         group_ids=group_ids,
+        must_change_password_by=must_change,
     )
 
 
@@ -259,20 +312,30 @@ async def authenticate_pat(session: AsyncSession, raw_token: str) -> Actor:
     if api_token is None or api_token.revoked_at is not None:
         raise PermissionError("invalid_token")
     now = datetime.now(UTC)
-    if api_token.expires_at is not None and api_token.expires_at <= now:
+    if api_token.expires_at is not None and ensure_utc(api_token.expires_at) <= now:
         raise PermissionError("invalid_token")
     user = await session.get(User, api_token.user_id)
     if user is None or not user.is_active:
         raise PermissionError("invalid_token")
+    user_id = user.id
+    user_role = user.role
+    user_display_name = user.display_name
+    must_change = (
+        ensure_utc(user.must_change_password_by)
+        if user.must_change_password_by is not None
+        else None
+    )
+    token_id = api_token.id
+    group_ids = await load_user_group_ids(session, user_id)
     api_token.last_used_at = now
     await session.commit()
-    group_ids = await load_user_group_ids(session, user.id)
     return Actor(
-        id=user.id,
-        role=user.role,
-        display_name=user.display_name,
+        id=user_id,
+        role=user_role,
+        display_name=user_display_name,
         group_ids=group_ids,
         auth_via_pat=True,
-        token_id=api_token.id,
+        token_id=token_id,
+        must_change_password_by=must_change,
     )
 

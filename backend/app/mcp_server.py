@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import contextvars
+import ipaddress
 import json
 import os
+import urllib.parse
 import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -20,12 +26,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.acl import acl_sql, load_user_group_ids
 from app.agent import run_agent
 from app.audit import write_audit
-from app.auth import PAT_PREFIX, authenticate_pat
+from app.auth import PAT_PREFIX, authenticate_pat, ensure_utc
 from app.config import Settings, get_settings
 from app.db import get_sessionmaker
 from app.llm import LLM, build_llm
 from app.models import User
 from app.rag.embedder import Embedder, build_embedder
+from app.ratelimit import RateLimiter
 from app.tools import (
     fetch_document,
     query_lab_projects,
@@ -48,6 +55,7 @@ TOOL_NAMES = [
 _SETTINGS: Settings | None = None
 _EMBEDDER: Embedder | None = None
 _LLM: LLM | None = None
+_LIMITER: RateLimiter | None = None
 _MCP_HTTP_ACTOR_ID: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
     "_MCP_HTTP_ACTOR_ID",
     default=None,
@@ -80,24 +88,37 @@ def get_mcp_llm() -> LLM:
     return _LLM
 
 
+def get_mcp_limiter() -> RateLimiter:
+    """Return the lazy module-level RateLimiter singleton for MCP tool calls."""
+    global _LIMITER
+    settings = get_mcp_settings()
+    if _LIMITER is None:
+        _LIMITER = RateLimiter(settings)
+    return _LIMITER
+
+
 async def close_mcp_singletons() -> None:
-    """Close and clear lazy MCP singletons (embedder, llm, settings)."""
-    global _SETTINGS, _EMBEDDER, _LLM
+    """Close and clear lazy MCP singletons (embedder, llm, limiter, settings)."""
+    global _SETTINGS, _EMBEDDER, _LLM, _LIMITER
     if _EMBEDDER is not None:
         await _EMBEDDER.aclose()
         _EMBEDDER = None
     if _LLM is not None:
         await _LLM.aclose()
         _LLM = None
+    if _LIMITER is not None:
+        await _LIMITER.close()
+        _LIMITER = None
     _SETTINGS = None
 
 
 def reset_mcp_singletons() -> None:
     """Reset lazy MCP singletons without awaiting close (for synchronous test setup)."""
-    global _SETTINGS, _EMBEDDER, _LLM
+    global _SETTINGS, _EMBEDDER, _LLM, _LIMITER
     _SETTINGS = None
     _EMBEDDER = None
     _LLM = None
+    _LIMITER = None
 
 
 def _new_request_id() -> str:
@@ -106,6 +127,22 @@ def _new_request_id() -> str:
 
 async def _noop_emit(_event: dict[str, object]) -> None:
     return None
+
+
+def _check_password_change_deadline(
+    must_change_password_by: datetime | None,
+) -> tuple[str, str] | None:
+    if must_change_password_by is None:
+        return None
+    if datetime.now(UTC) > ensure_utc(must_change_password_by):
+        return (
+            "initial_password_expired",
+            "初始口令已过期，请联系课题组管理员重置",
+        )
+    return (
+        "password_change_required",
+        "首次登录请先修改初始口令后再访问系统功能",
+    )
 
 
 async def resolve_mcp_actor(session: AsyncSession) -> tuple[User, frozenset[str]]:
@@ -119,6 +156,10 @@ async def resolve_mcp_actor(session: AsyncSession) -> tuple[User, frozenset[str]
         user = await session.get(User, http_actor_id)
         if user is None or not user.is_active:
             raise RuntimeError("MCP actor is not provisioned")
+        pw_block = _check_password_change_deadline(user.must_change_password_by)
+        if pw_block is not None:
+            code, _ = pw_block
+            raise RuntimeError(f"MCP actor forbidden: {code}")
         group_ids = await load_user_group_ids(session, user.id)
         return user, group_ids
 
@@ -128,6 +169,10 @@ async def resolve_mcp_actor(session: AsyncSession) -> tuple[User, frozenset[str]
     user = await session.scalar(select(User).where(User.email == email))
     if user is None or not user.is_active:
         raise RuntimeError("MCP actor is not provisioned")
+    pw_block = _check_password_change_deadline(user.must_change_password_by)
+    if pw_block is not None:
+        code, _ = pw_block
+        raise RuntimeError(f"MCP actor forbidden: {code}")
     group_ids = await load_user_group_ids(session, user.id)
     return user, group_ids
 
@@ -297,6 +342,7 @@ async def mcp_get_document_excerpt(document_id: str, max_chars: int = 6000) -> s
                 document_id=document_id,
                 request_id=request_id,
                 group_ids=group_ids,
+                allow_eval=False,
             )
         except Exception:
             await session.rollback()
@@ -352,6 +398,7 @@ async def mcp_fetch_document(document_id: str) -> str:
                 document_id=document_id,
                 request_id=request_id,
                 group_ids=group_ids,
+                allow_eval=False,
             )
         except Exception:
             await session.rollback()
@@ -529,10 +576,35 @@ async def mcp_answer_question(question: str) -> str:
     settings = get_mcp_settings()
     embedder = get_mcp_embedder()
     llm = get_mcp_llm()
+    limiter = get_mcp_limiter()
     request_id = _new_request_id()
     async with get_sessionmaker()() as session:
         user, group_ids = await resolve_mcp_actor(session)
         actor_id = user.id
+        allowed = await limiter.allow(
+            f"chat:{actor_id}",
+            settings.chat_rate_limit,
+            settings.chat_rate_window_seconds,
+        )
+        if not allowed:
+            await _audit_mcp_tool_call(
+                settings=settings,
+                actor_id=actor_id,
+                tool_name="answer_question",
+                status="rate_limited",
+                hit_count=0,
+                request_id=request_id,
+            )
+            await session.commit()
+            return json.dumps(
+                {
+                    "refused": True,
+                    "reason": "rate_limited",
+                    "answer": "",
+                    "citations": [],
+                },
+                ensure_ascii=False,
+            )
         try:
             result = await run_agent(
                 session=session,
@@ -719,12 +791,118 @@ def _ensure_mcp_accept_header(scope: Scope) -> Scope:
     return {**scope, "headers": new_headers}
 
 
+def _format_host_entry(host: str) -> str:
+    cleaned = host.strip().strip("[]")
+    if not cleaned:
+        return ""
+    try:
+        addr = ipaddress.ip_address(cleaned)
+        if isinstance(addr, ipaddress.IPv6Address):
+            return f"[{cleaned}]"
+    except ValueError:
+        pass
+    return cleaned
+
+
+def _add_host_variants(target: list[str], raw_host: str) -> None:
+    formatted = _format_host_entry(raw_host)
+    if not formatted:
+        return
+    for candidate in (formatted, f"{formatted}:*"):
+        if candidate not in target:
+            target.append(candidate)
+
+
+def _build_transport_security(
+    settings: Settings,
+    *,
+    host: str | None = None,
+) -> TransportSecuritySettings:
+    allowed_hosts: list[str] = [
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "localhost",
+        "localhost:*",
+        "[::1]",
+        "[::1]:*",
+    ]
+    allowed_origins: list[str] = [
+        "http://127.0.0.1",
+        "http://127.0.0.1:*",
+        "http://localhost",
+        "http://localhost:*",
+        "http://[::1]",
+        "http://[::1]:*",
+        "https://127.0.0.1",
+        "https://127.0.0.1:*",
+        "https://localhost",
+        "https://localhost:*",
+        "https://[::1]",
+        "https://[::1]:*",
+    ]
+
+    for url in [settings.public_base_url, *settings.cors_origin_list]:
+        raw = (url or "").strip()
+        if not raw:
+            continue
+        parsed = urllib.parse.urlsplit(raw if "://" in raw else f"http://{raw}")
+        if parsed.netloc and parsed.netloc not in allowed_hosts:
+            allowed_hosts.append(parsed.netloc)
+        if parsed.hostname:
+            _add_host_variants(allowed_hosts, parsed.hostname)
+        if parsed.scheme and parsed.netloc:
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            if origin not in allowed_origins:
+                allowed_origins.append(origin)
+
+    if host and host.strip() not in {"", "0.0.0.0", "::"}:
+        _add_host_variants(allowed_hosts, host.strip())
+
+    extra_hosts = os.environ.get("MCP_ALLOWED_HOSTS", "")
+    for item in extra_hosts.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        if ":" in entry and not entry.startswith("["):
+            if entry not in allowed_hosts:
+                allowed_hosts.append(entry)
+        else:
+            _add_host_variants(allowed_hosts, entry)
+
+    if settings.app_env == "test":
+        for test_host in ("test", "testserver"):
+            _add_host_variants(allowed_hosts, test_host)
+            for test_origin in (f"http://{test_host}", f"http://{test_host}:*"):
+                if test_origin not in allowed_origins:
+                    allowed_origins.append(test_origin)
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 class _MCPPatAuthMiddleware:
     """ASGI middleware that authenticates `Authorization: Bearer la_pat_...` for HTTP MCP."""
 
     def __init__(self, app: ASGIApp, *, session_manager: Any = None) -> None:
         self.app = app
         self.session_manager = session_manager
+        self._fallback_lock = asyncio.Lock()
+        self._fallback_active = 0
+        self._fallback_task: asyncio.Task[None] | None = None
+        self._fallback_stop: asyncio.Event | None = None
+
+    async def _run_fallback_manager(
+        self,
+        ready: asyncio.Event,
+        stop: asyncio.Event,
+    ) -> None:
+        self.session_manager._has_started = False
+        async with self.session_manager.run():
+            ready.set()
+            await stop.wait()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -761,31 +939,105 @@ class _MCPPatAuthMiddleware:
                 await resp(scope, receive, send)
                 return
 
+        pw_block = _check_password_change_deadline(actor.must_change_password_by)
+        if pw_block is not None:
+            code, message = pw_block
+            resp = JSONResponse(
+                status_code=403,
+                content={"error": {"code": code, "message": message}},
+            )
+            await resp(scope, receive, send)
+            return
+
         patched_scope = _ensure_mcp_accept_header(scope)
         ctx_token = _MCP_HTTP_ACTOR_ID.set(actor.id)
+        used_fallback = False
         try:
-            if (
-                self.session_manager is not None
-                and getattr(self.session_manager, "_task_group", None) is None
+            if self.session_manager is not None and (
+                getattr(self.session_manager, "_task_group", None) is None
+                or self._fallback_task is not None
             ):
-                self.session_manager._has_started = False
-                async with self.session_manager.run():
-                    await self.app(patched_scope, receive, send)
-            else:
-                await self.app(patched_scope, receive, send)
+                async with self._fallback_lock:
+                    if (
+                        self._fallback_task is None
+                        and getattr(self.session_manager, "_task_group", None) is None
+                    ):
+                        ready = asyncio.Event()
+                        stop = asyncio.Event()
+                        task = asyncio.create_task(self._run_fallback_manager(ready, stop))
+                        done_waiter = asyncio.create_task(ready.wait())
+                        try:
+                            finished, _ = await asyncio.wait(
+                                {task, done_waiter},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if task in finished and task.done():
+                                await task
+                        except BaseException:
+                            stop.set()
+                            if not task.done():
+                                task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await task
+                            raise
+                        finally:
+                            if not done_waiter.done():
+                                done_waiter.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await done_waiter
+                        self._fallback_task = task
+                        self._fallback_stop = stop
+                    if self._fallback_task is not None:
+                        self._fallback_active += 1
+                        used_fallback = True
+            await self.app(patched_scope, receive, send)
         finally:
             _MCP_HTTP_ACTOR_ID.reset(ctx_token)
+            if used_fallback:
+                async with self._fallback_lock:
+                    self._fallback_active -= 1
+                    if self._fallback_active == 0 and self._fallback_task is not None:
+                        task_to_join = self._fallback_task
+                        stop_ev = self._fallback_stop
+                        self._fallback_task = None
+                        self._fallback_stop = None
+                        if stop_ev is not None:
+                            stop_ev.set()
+                        try:
+                            await task_to_join
+                        except BaseException:
+                            if not task_to_join.done():
+                                task_to_join.cancel()
+                                with contextlib.suppress(BaseException):
+                                    await task_to_join
+                            raise
 
 
-def build_http_app(streamable_http_path: str = "/mcp") -> Starlette:
+def build_http_app(
+    streamable_http_path: str = "/mcp",
+    *,
+    host: str | None = None,
+) -> Starlette:
     """Build a Streamable HTTP MCP Starlette ASGI app protected by Personal Access Tokens."""
+    settings = get_mcp_settings()
     server = build_server()
     starlette_app = server.streamable_http_app(
         streamable_http_path=streamable_http_path,
         stateless_http=True,
         json_response=True,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        transport_security=_build_transport_security(settings, host=host),
     )
+    orig_lifespan = starlette_app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(app: Starlette) -> AsyncIterator[Any]:
+        try:
+            async with orig_lifespan(app) as state:
+                yield state
+        finally:
+            await close_mcp_singletons()
+
+    starlette_app.router.lifespan_context = _lifespan
     starlette_app.add_middleware(
         _MCPPatAuthMiddleware,
         session_manager=getattr(server, "_session_manager", None)
@@ -813,7 +1065,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         import uvicorn
 
-        uvicorn.run(build_http_app(), host=args.host, port=args.port)
+        uvicorn.run(build_http_app(host=args.host), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

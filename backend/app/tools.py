@@ -109,13 +109,19 @@ async def fetch_document(
     document_id: str,
     request_id: str | None = None,
     group_ids: frozenset[str] | None = None,
+    allow_eval: bool = True,
 ) -> dict[str, object] | None:
     try:
         parsed = uuid.UUID(document_id)
     except ValueError:
         return None
     document = await session.get(Document, parsed)
-    if document is None or document.deleted_at is not None:
+    if (
+        document is None
+        or document.deleted_at is not None
+        or document.status != "ready"
+        or (not allow_eval and document.source == "eval")
+    ):
         return None
     grants = list(
         await session.scalars(select(DocumentACL).where(DocumentACL.document_id == document.id))
