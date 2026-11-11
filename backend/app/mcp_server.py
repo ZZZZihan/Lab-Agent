@@ -966,14 +966,25 @@ class _MCPPatAuthMiddleware:
                         stop = asyncio.Event()
                         task = asyncio.create_task(self._run_fallback_manager(ready, stop))
                         done_waiter = asyncio.create_task(ready.wait())
-                        finished, _ = await asyncio.wait(
-                            {task, done_waiter},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if not done_waiter.done():
-                            done_waiter.cancel()
-                        if task in finished and task.done():
-                            await task
+                        try:
+                            finished, _ = await asyncio.wait(
+                                {task, done_waiter},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if task in finished and task.done():
+                                await task
+                        except BaseException:
+                            stop.set()
+                            if not task.done():
+                                task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await task
+                            raise
+                        finally:
+                            if not done_waiter.done():
+                                done_waiter.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await done_waiter
                         self._fallback_task = task
                         self._fallback_stop = stop
                     if self._fallback_task is not None:
@@ -983,7 +994,6 @@ class _MCPPatAuthMiddleware:
         finally:
             _MCP_HTTP_ACTOR_ID.reset(ctx_token)
             if used_fallback:
-                task_to_join: asyncio.Task[None] | None = None
                 async with self._fallback_lock:
                     self._fallback_active -= 1
                     if self._fallback_active == 0 and self._fallback_task is not None:
@@ -993,8 +1003,14 @@ class _MCPPatAuthMiddleware:
                         self._fallback_stop = None
                         if stop_ev is not None:
                             stop_ev.set()
-                if task_to_join is not None:
-                    await task_to_join
+                        try:
+                            await task_to_join
+                        except BaseException:
+                            if not task_to_join.done():
+                                task_to_join.cancel()
+                                with contextlib.suppress(BaseException):
+                                    await task_to_join
+                            raise
 
 
 def build_http_app(

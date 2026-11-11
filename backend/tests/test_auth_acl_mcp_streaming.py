@@ -559,7 +559,58 @@ async def test_mcp_password_deadline_rate_limit_dns_rebinding_and_concurrency(
                 payload = json.loads(res.json()["result"]["content"][0]["text"])
                 assert payload["status"] == "ok"
 
-        # 5. Lifespan shutdown closes lazy MCP singletons cleanly
+        # 5. Cancelling a lifespan-less request mid-startup cleans up fallback owner task
+        import contextlib as _ctxlib
+
+        cancel_test_app = build_http_app()
+        entering_startup = asyncio.Event()
+        orig_run_fallback = (
+            cancel_test_app.user_middleware[0].cls._run_fallback_manager  # type: ignore[attr-defined]
+        )
+
+        async def delayed_run_fallback(
+            mw_self: Any,
+            ready: asyncio.Event,
+            stop: asyncio.Event,
+        ) -> None:
+            entering_startup.set()
+            await asyncio.sleep(5.0)
+            await orig_run_fallback(mw_self, ready, stop)
+
+        monkeypatch.setattr(
+            cancel_test_app.user_middleware[0].cls,
+            "_run_fallback_manager",
+            delayed_run_fallback,
+        )
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=cancel_test_app),
+            base_url="http://test",
+        ) as cancel_http:
+            inflight = asyncio.create_task(
+                cancel_http.post(
+                    "/mcp",
+                    headers={"Authorization": f"Bearer {active_pat}"},
+                    json=rpc_body,
+                )
+            )
+            await asyncio.wait_for(entering_startup.wait(), timeout=2.0)
+            inflight.cancel()
+            with _ctxlib.suppress(asyncio.CancelledError):
+                await inflight
+
+            monkeypatch.setattr(
+                cancel_test_app.user_middleware[0].cls,
+                "_run_fallback_manager",
+                orig_run_fallback,
+            )
+            recovery_res = await cancel_http.post(
+                "/mcp",
+                headers={"Authorization": f"Bearer {active_pat}"},
+                json=rpc_body,
+            )
+            assert recovery_res.status_code == 200
+
+        # 6. Lifespan shutdown closes lazy MCP singletons cleanly
         mcp_app_with_lifespan = build_http_app()
         _ = get_mcp_limiter()
         async with mcp_app_with_lifespan.router.lifespan_context(mcp_app_with_lifespan):
