@@ -120,7 +120,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.offline.yml logs --no-color > compose-logs/compose.log || true
       - name: Upload compose logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compose-smoke-logs
           path: compose-logs/
